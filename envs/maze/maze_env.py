@@ -10,7 +10,7 @@ from gymnasium import Env
 from gymnasium.spaces import MultiDiscrete, Discrete
 
 class MazeEnv(Env):
-    MAP_FILE = os.path.join(os.path.dirname(__file__), "maps", "sparse_goal.txt")
+    MAP_FILE = os.path.join(os.path.dirname(__file__), "maps", "basic_goal.txt")
     MAP_RAW = None
 
     ROWS_DELIMITER = "\n\n"
@@ -23,6 +23,10 @@ class MazeEnv(Env):
     TILE_IS_PASSABLE = None # can move through, ie. not a wall
     TILE_IS_END = None # whether to end the episode upon moving to the tile
     SPAWNPOINTS = None # valid starting positions for reset()
+
+    # highest non-negative END tile becomes the goal
+    GOAL_POS = None
+    GOAL_REWARD = 0
 
     ACTIONS = jnp.asarray(( (-1,0), (1,0), (0,-1), (0,1) ), dtype="int32")
 
@@ -54,16 +58,22 @@ class MazeEnv(Env):
         tile_is_end = np.zeros(MazeEnv.MAP_SHAPE, dtype="int8")
         spawnpoints = []
 
+        MazeEnv.GOAL_REWARD = 0
+
         for y, row in enumerate(rows):
             rewards, types = map(lambda a: a.split(MazeEnv.COLS_DELIMITER), row.split("\n"))
 
-            for x, (reward, type) in enumerate(zip(rewards, types)):
+            for x, (reward, type_str) in enumerate(zip(rewards, types)):
                 tile_rewards[y, x] = int(reward)
-                tile_is_passable[y, x] = type != MazeEnv.WALL_TILE
-                tile_is_end[y, x] = type == MazeEnv.END_TILE
+                tile_is_passable[y, x] = type_str != MazeEnv.WALL_TILE
+                tile_is_end[y, x] = type_str == MazeEnv.END_TILE
 
-                if not (type == MazeEnv.WALL_TILE or type == MazeEnv.END_TILE):
+                if not (type_str == MazeEnv.WALL_TILE or type_str == MazeEnv.END_TILE):
                     spawnpoints.append(jnp.asarray((y, x), dtype="int32"))
+
+                if type_str == "END" and tile_rewards[y, x] > MazeEnv.GOAL_REWARD:
+                    MazeEnv.GOAL_POS = jnp.asarray((y, x), dtype="int32")
+                    MazeEnv.GOAL_REWARD = tile_rewards[y, x]
 
         MazeEnv.TILE_REWARDS = jnp.asarray(tile_rewards)
         MazeEnv.TILE_IS_PASSABLE = jnp.asarray(tile_is_passable)
