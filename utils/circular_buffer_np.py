@@ -1,6 +1,6 @@
 import numpy as np
 
-class CircularBuffer:
+class CircularBufferNP:
     def __init__(self, arr):
         self.max_size = arr.shape[0]
         self.__arr = arr
