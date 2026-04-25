@@ -6,9 +6,9 @@ import functools
 class LinearlyInterpolatedTable:
 
     def __init__(self, min, max, step):
-        self.min = min
-        self.max = max
-        self.step = step
+        self.min = jnp.array(min)
+        self.max = jnp.array(max)
+        self.step = jnp.array(step)
 
         self.shape = ()
 
@@ -36,46 +36,48 @@ class LinearlyInterpolatedTable:
         return result
 
     @functools.partial(jax.jit, static_argnames=('self'))
-    def adjust(self, data: ArrayLike, pos: ArrayLike, adjust_amount) -> jax.Array:
+    def adjust_get_corner_adjustments(self, data: ArrayLike, pos: ArrayLike, adjust_amount):
         assert data.shape == self.shape
         assert len(pos) == len(self.shape)
 
         lower_indices, offsets = self.get_lower_indices_and_offsets(pos)
         corner_indices, weights = self.get_corner_indices_and_weights(lower_indices, offsets)
+        
+        corner_indices = jnp.array(corner_indices)
+        weights = jnp.array(weights)
 
-        sum_squared_weights = sum(map(lambda x: x**2, weights))
-        adjust_amounts = map(lambda x: x * adjust_amount / sum_squared_weights, weights)
+        sum_squared_weights = jnp.sum(weights**2)
+        adjust_amounts = weights * adjust_amount / sum_squared_weights
 
-        for corner, cur_adjust_amount in zip(corner_indices, adjust_amounts):
-            data = data.at[corner].add(cur_adjust_amount)
+        return corner_indices, adjust_amounts
 
-        return data
+    @functools.partial(jax.jit, static_argnames=('self'))
+    def set_get_corner_adjustments(self, data: ArrayLike, pos: ArrayLike, value):
+        cur_value = self.get(data, pos)
+        return self.adjust_get_corner_adjustments(data, pos, value - cur_value)
 
-    def adjust_get_corner_adjustments():
-        pass
-
-    def set_get_corner_adjustments():
-        pass
+    @functools.partial(jax.jit, static_argnames=('self'))
+    def adjust(self, data: ArrayLike, pos: ArrayLike, adjust_amount) -> jax.Array:
+        corner_indices, adjust_amounts = self.adjust_get_corner_adjustments(data, pos, adjust_amount)
+        return data.at[tuple(corner_indices.T)].add(adjust_amounts)
 
     @functools.partial(jax.jit, static_argnames=('self'))
     def set(self, data: ArrayLike, pos: ArrayLike, value) -> jax.Array:
         cur_value = self.get(data, pos)
         return self.adjust(data, pos, value - cur_value)
     
+    @functools.partial(jax.jit, static_argnames=('self'))
     def get_lower_indices_and_offsets(self, pos: ArrayLike):
         assert len(pos) == len(self.shape)
 
-        lower_indices = []
-        offsets = []
+        indices = ((pos - self.min) // self.step).astype(int)
+        indices = jnp.clip(indices, 0, jnp.array(self.shape) - 2)
+            # clip to inside bounds; use extrapolation for those cases
 
-        for i in range(len(self.shape)):
-            index = (pos[i] - self.min[i]) // self.step[i]
-            index = jnp.clip(index, 0, self.shape[i] - 2)
-            lower_indices.append(jnp.rint(index).astype(int))
+        offsets = (pos - (indices*self.step + self.min)) / self.step
+            # offset from lower_index, in units of indices (normalized by step size)
 
-            offsets.append((pos[i] - (index*self.step[i] + self.min[i])) / self.step[i])
-
-        return lower_indices, offsets
+        return indices, offsets
 
     def get_corner_indices_and_weights(self, lower_indices, offsets, chosen_indices=(), weight=1):
         assert len(offsets) == len(self.shape)
@@ -100,7 +102,7 @@ if __name__ == "__main__":
 
     key = jax.random.key(0)
 
-    for i in range(1000):
+    for i in range(100):
         key, subkey1, subkey2, = jax.random.split(key, 3)
         coords = jax.random.uniform(subkey1, (2,), minval=jnp.array((-10,-10)), maxval=jnp.array((11,20)))
         set_val = jax.random.uniform(subkey2, (), minval=-10, maxval=10)

@@ -2,13 +2,13 @@ import jax.numpy as jnp
 import jax
 import numpy as np
 
-from envs.flappy_bird import FlappyBirdEnv, Action
+from envs.flappy_bird import FlappyBirdEnv, Action, State
 
 import pygame, sys
 pygame.init()
 
 DT = 0.1
-FPS = round(1/DT)
+FPS = 1#round(1/DT)
 clock = pygame.time.Clock()
 
 rng_key = jax.random.key(0)
@@ -16,6 +16,17 @@ rng_key = jax.random.key(0)
 env = FlappyBirdEnv(dt=DT)
 rng_key, reset_key = jax.random.split(rng_key, 2)
 state = env.reset(reset_key)
+
+def get_observation(state: State):
+    use_pipe2 = state.pipe1_pos_x + env.settings.pipe_width/2 + env.settings.bird_size < env.settings.bird_pos_x
+
+    pipe_pos_x = jnp.where(use_pipe2, state.pipe2_pos_x, state.pipe1_pos_x)
+    pipe_pos_y = jnp.where(use_pipe2, state.pipe2_pos_y, state.pipe1_pos_y)
+
+    pipe_dx = pipe_pos_x - env.settings.bird_pos_x
+    pipe_dy = pipe_pos_y - state.bird_pos_y
+
+    return jnp.array((state.bird_vel_y, pipe_dy, pipe_dx))
 
 cur_return = 0
 terminated = False
@@ -44,7 +55,7 @@ while True:
         rng_key, step_key = jax.random.split(rng_key, 2)
         state, reward, terminated = env.step(state, Action(flap=flap), step_key)
 
-        print(state.pipe2_pos_x)
+        print(get_observation(state))
 
         cur_return += reward
 

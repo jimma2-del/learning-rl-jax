@@ -65,12 +65,12 @@ class FlappyBirdEnv:
 
         return State(
             bird_pos_y = self.settings.window_size[0] / 2,
-            bird_vel_y = 0,
+            bird_vel_y = jnp.array(0, dtype=jnp.float32),
 
-            pipe1_pos_x = self.settings.bird_pos_x - self.settings.pipe_width/2,
+            pipe1_pos_x = self.settings.bird_pos_x - self.settings.pipe_width/2 - self.settings.bird_size,
             pipe1_pos_y = self.gen_pipe_y(pipe1_key),
 
-            pipe2_pos_x = self.settings.window_size[1]/2 + self.settings.bird_pos_x,
+            pipe2_pos_x = self.settings.window_size[1]/2 + self.settings.bird_pos_x  - self.settings.bird_size,
             pipe2_pos_y = self.gen_pipe_y(pipe2_key)
         )
 

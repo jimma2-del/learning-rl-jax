@@ -1,4 +1,4 @@
 from .circular_buffer_np import CircularBufferNP
 
-from .replay_buffer import ReplayBuffer
+from .replay_buffer import ReplayBuffer, ReplayBufferState
 from .linearly_interpolated_table import LinearlyInterpolatedTable
