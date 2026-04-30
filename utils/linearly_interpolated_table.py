@@ -5,7 +5,7 @@ import functools
 
 class LinearlyInterpolatedTable:
 
-    def __init__(self, min, max, step):
+    def __init__(self, min: ArrayLike, max: ArrayLike, step: ArrayLike):
         self.min = jnp.array(min)
         self.max = jnp.array(max)
         self.step = jnp.array(step)
@@ -17,11 +17,11 @@ class LinearlyInterpolatedTable:
                 + ((max[i] - min[i]) % step[i] != 0)) # add an extra if not perfectly ending on max
 
     @functools.partial(jax.jit, static_argnames=('self'))
-    def init(self, init):
+    def init(self, init: ArrayLike) -> jax.Array:
         return jnp.full(self.shape, init, dtype=jnp.float32)
 
     @functools.partial(jax.jit, static_argnames=('self'))
-    def get(self, data: ArrayLike, pos: ArrayLike) -> jax.Array:
+    def get(self, data: jax.Array, pos: ArrayLike) -> jax.Array:
         assert data.shape == self.shape
         assert len(pos) == len(self.shape)
 
@@ -36,7 +36,9 @@ class LinearlyInterpolatedTable:
         return result
 
     @functools.partial(jax.jit, static_argnames=('self'))
-    def adjust_get_corner_adjustments(self, data: ArrayLike, pos: ArrayLike, adjust_amount):
+    def adjust_get_corner_adjustments(
+        self, data: jax.Array, pos: ArrayLike, adjust_amount: ArrayLike
+    ) -> tuple[jax.Array, jax.Array]:
         assert data.shape == self.shape
         assert len(pos) == len(self.shape)
 
@@ -52,17 +54,19 @@ class LinearlyInterpolatedTable:
         return corner_indices, adjust_amounts
 
     @functools.partial(jax.jit, static_argnames=('self'))
-    def set_get_corner_adjustments(self, data: ArrayLike, pos: ArrayLike, value):
+    def set_get_corner_adjustments(
+        self, data: jax.Array, pos: ArrayLike, value: ArrayLike
+    ) -> tuple[jax.Array, jax.Array]:
         cur_value = self.get(data, pos)
         return self.adjust_get_corner_adjustments(data, pos, value - cur_value)
 
     @functools.partial(jax.jit, static_argnames=('self'))
-    def adjust(self, data: ArrayLike, pos: ArrayLike, adjust_amount) -> jax.Array:
+    def adjust(self, data: jax.Array, pos: ArrayLike, adjust_amount: ArrayLike) -> jax.Array:
         corner_indices, adjust_amounts = self.adjust_get_corner_adjustments(data, pos, adjust_amount)
         return data.at[tuple(corner_indices.T)].add(adjust_amounts)
 
     @functools.partial(jax.jit, static_argnames=('self'))
-    def set(self, data: ArrayLike, pos: ArrayLike, value) -> jax.Array:
+    def set(self, data: jax.Array, pos: ArrayLike, value: ArrayLike) -> jax.Array:
         cur_value = self.get(data, pos)
         return self.adjust(data, pos, value - cur_value)
     

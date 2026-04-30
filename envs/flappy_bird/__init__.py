@@ -1,1 +1,1 @@
-from .flappy_bird_env import FlappyBirdEnv, Settings, RenderSettings, Rewards, State, Action
+from .flappy_bird_env import FlappyBirdEnv, Settings, RenderSettings, Rewards, State

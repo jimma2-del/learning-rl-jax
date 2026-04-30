@@ -1,6 +1,10 @@
 from chex import dataclass
 from jax.typing import ArrayLike
 from jax import Array
+from typing import Any
+
+from ..base import Environment, Space
+
 import jax.numpy as jnp
 import jax
 import functools
@@ -17,10 +21,6 @@ class State:
 
     pipe2_pos_x: ArrayLike
     pipe2_pos_y: ArrayLike
-
-@dataclass(frozen=True)
-class Action:
-    flap: ArrayLike
 
 @dataclass(frozen=True)
 class Settings:
@@ -51,7 +51,7 @@ class RenderSettings:
     pipe_color = jnp.array((114, 197, 100), dtype=jnp.uint8)
     bird_color = jnp.array((253, 218, 66), dtype=jnp.uint8)
 
-class FlappyBirdEnv:
+class FlappyBirdEnv(Environment[State, Array, ArrayLike, Array]):
 
     def __init__(self, dt=0.1, settings=Settings(), rewards=Rewards(), render_settings=RenderSettings()):
         self.DT = dt
@@ -59,27 +59,28 @@ class FlappyBirdEnv:
         self.rewards = rewards
         self.render_settings = render_settings
 
-    @functools.partial(jax.jit, static_argnames=('self'))
-    def reset(self, rng_key) -> State:
-        pipe1_key, pipe2_key = jax.random.split(rng_key, 2)
+    # @functools.partial(jax.jit, static_argnames=('self'))
+    def reset(self, key: Array) -> State:
+        pipe1_key, pipe2_key = jax.random.split(key, 2)
 
         return State(
             bird_pos_y = self.settings.window_size[0] / 2,
             bird_vel_y = jnp.array(0, dtype=jnp.float32),
 
             pipe1_pos_x = self.settings.bird_pos_x - self.settings.pipe_width/2 - self.settings.bird_size,
-            pipe1_pos_y = self.gen_pipe_y(pipe1_key),
+            pipe1_pos_y = self._gen_pipe_y(pipe1_key),
 
             pipe2_pos_x = self.settings.window_size[1]/2 + self.settings.bird_pos_x  - self.settings.bird_size,
-            pipe2_pos_y = self.gen_pipe_y(pipe2_key)
-        )
+            pipe2_pos_y = self._gen_pipe_y(pipe2_key)
+        ), {}
 
-    @functools.partial(jax.jit, static_argnames=('self'))
-    def step(self, state: State, action: Action, rng_key) -> tuple[State, Array, Array]:
+    # @functools.partial(jax.jit, static_argnames=('self'))
+    def step(self, key: Array, state: State, action: ArrayLike) \
+        -> tuple[State, Array, Array, Array, dict[Any, Any]]:
         '''returns new_state, reward, terminated'''
 
         # update velocities & positions
-        new_bird_vel_y = jnp.where(action.flap != 0, 
+        new_bird_vel_y = jnp.where(action != 0, 
             self.settings.bird_flap_vel_y,
             state.bird_vel_y + self.settings.bird_accel_y*self.DT
         )
@@ -102,7 +103,7 @@ class FlappyBirdEnv:
             pipe1_pos_y = jnp.where(pipe1_left_screen, state.pipe2_pos_y, state.pipe1_pos_y),
 
             pipe2_pos_x = jnp.where(pipe1_left_screen, self.settings.window_size[1] + self.settings.pipe_width/2, state.pipe2_pos_x),
-            pipe2_pos_y = jnp.where(pipe1_left_screen, self.gen_pipe_y(rng_key), state.pipe2_pos_y),
+            pipe2_pos_y = jnp.where(pipe1_left_screen, self._gen_pipe_y(key), state.pipe2_pos_y),
         )
 
         reward = 0
@@ -133,20 +134,32 @@ class FlappyBirdEnv:
         passed_pipe = jnp.logical_and(prev_pipe1_pos_x >= self.settings.bird_pos_x, state.pipe1_pos_x < self.settings.bird_pos_x)
         reward += jnp.where(passed_pipe, self.rewards.pass_pipe, 0)
 
-        return state, reward, terminated
+        return state, reward, terminated, False, {}
     
     
-    @functools.partial(jax.jit, static_argnames=('self'))
-    def gen_pipe_y(self, rng_key):
+    # @functools.partial(jax.jit, static_argnames=('self'))
+    def _gen_pipe_y(self, key):
         height_to_center = self.settings.pipe_min_height + self.settings.pipe_gap_height/2
 
-        return jax.random.uniform(rng_key, shape=(), 
+        return jax.random.uniform(key, shape=(), 
             minval=height_to_center, 
             maxval=self.settings.window_size[0] - height_to_center + 1
         )
 
-    @functools.partial(jax.jit, static_argnames=('self'))
-    def render(self, state: State) -> Array:
+    # @functools.partial(jax.jit, static_argnames=('self'))
+    def get_obs(self, key: Array, state: State) -> Array:
+        use_pipe2 = state.pipe1_pos_x + self.settings.pipe_width/2 + self.settings.bird_size < self.settings.bird_pos_x
+
+        pipe_pos_x = jnp.where(use_pipe2, state.pipe2_pos_x, state.pipe1_pos_x)
+        pipe_pos_y = jnp.where(use_pipe2, state.pipe2_pos_y, state.pipe1_pos_y)
+
+        pipe_dx = pipe_pos_x - self.settings.bird_pos_x
+        pipe_dy = pipe_pos_y - state.bird_pos_y
+
+        return jnp.array((state.bird_vel_y, pipe_dy))
+
+    # @functools.partial(jax.jit, static_argnames=('self'))
+    def render(self, state: State, Action: ArrayLike) -> Array:
         image = jnp.full((*self.settings.window_size, 3), self.render_settings.background_color, dtype=jnp.uint8)
 
         # pipes
@@ -179,3 +192,14 @@ class FlappyBirdEnv:
         image = jax.lax.dynamic_update_slice(image, rect, (bird_top, bird_left, 0))
 
         return image
+
+    @property
+    def observation_space(self) -> Space[Array]:
+        """Observation space of the environment."""
+        # TODO: values should depend on self.settings
+        return Space(low=jnp.array((-600.0, -625.0)), high=jnp.array((1500.0,  625.0)))
+
+    @property
+    def action_space(self) -> Space[ArrayLike]:
+        """Action space of the environment."""
+        return Space(low=jnp.array(0), high=jnp.array(1))

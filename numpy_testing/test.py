@@ -1,4 +1,4 @@
-from envs.maze import MazeEnv
+from ..envs.maze import MazeEnv
 from jax import random
 
 env = MazeEnv(random.key(10))

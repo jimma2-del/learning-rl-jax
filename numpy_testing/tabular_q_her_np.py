@@ -3,9 +3,9 @@ from jax import random
 
 import numpy as np
 
-from envs.maze import MazeEnv
+from ..envs.maze import MazeEnv
 
-from utils import CircularBufferNP
+from .circular_buffer_np import CircularBufferNP
 
 DISCOUNT_RATE = 0.95
 
@@ -16,8 +16,8 @@ TARGET_UPDATE_INTERVAL = 100
 REPLAY_BUFFER_SIZE = 500
 LEARNING_RATE = 0.1
 
-STEPS = 100000
-LOG_INTERVAL = 1000
+STEPS = 1000000
+LOG_INTERVAL = 10000
 
 SEED = 2
 key = random.key(SEED)
@@ -25,18 +25,40 @@ key = random.key(SEED)
 key, subkey = random.split(key)
 env = MazeEnv(key=subkey)
 
-cur_state_replay_buffer = CircularBufferNP(np.zeros((REPLAY_BUFFER_SIZE, *env.observation_space.shape), dtype="int32"))
-next_state_replay_buffer = CircularBufferNP(np.zeros((REPLAY_BUFFER_SIZE, *env.observation_space.shape), dtype="int32"))
+input_shape = (env.observation_space.shape[0] + env.observation_space.shape[0], )
+
+cur_state_replay_buffer = CircularBufferNP(np.zeros((REPLAY_BUFFER_SIZE, *input_shape), dtype="int32")) # *goal, *obs
+next_state_replay_buffer = CircularBufferNP(np.zeros((REPLAY_BUFFER_SIZE, *input_shape), dtype="int32")) # *goal, *obs
 action_replay_buffer = CircularBufferNP(np.zeros((REPLAY_BUFFER_SIZE, *env.action_space.shape), dtype="int32"))
 reward_replay_buffer = CircularBufferNP(np.zeros((REPLAY_BUFFER_SIZE), dtype="int32"))
 
-policy_q_table = np.zeros((*env.observation_space.nvec, env.action_space.n))
+policy_q_table = np.zeros((*env.observation_space.nvec, *env.observation_space.nvec, env.action_space.n))
 target_q_table = np.array(policy_q_table)
 
 truncated = True
+episode_transitions = [] # [ (obs, action, reward, new_obs) ]
 
 for step in range(STEPS):
-    if truncated or terminated: #reset
+    if truncated or terminated: # episode ended; reset
+        # do HER; relabel transitions and add to replay buffer
+
+        if len(episode_transitions) != 0: # avoid first env reset
+            hindsight_goal = episode_transitions[-1][3]
+
+            for obs, action, reward, new_obs in episode_transitions:
+                cur_state_replay_buffer.add(jnp.concatenate((hindsight_goal, obs)))
+                action_replay_buffer.add(action)
+                next_state_replay_buffer.add(jnp.concatenate((hindsight_goal, new_obs)))
+
+                # re-compute reward with goal
+                if jnp.all(hindsight_goal != env.GOAL_POS) and jnp.all(new_obs == hindsight_goal):
+                    reward += env.GOAL_REWARD
+
+                reward_replay_buffer.add(reward)
+
+            episode_transitions = [] 
+
+        # reset env and flags
         obs, info = env.reset()
         terminated = False
         truncated = True
@@ -48,21 +70,17 @@ for step in range(STEPS):
         key, subkey = random.split(key)
         action = random.randint(subkey, shape=(), minval=0, maxval=4)
     else: # greedy
-        action = np.argmax(policy_q_table[tuple(obs)])
+        action = np.argmax(policy_q_table[(*env.GOAL_POS, *obs)])
 
     new_obs, reward, terminated, truncated, info = env.step(action)
-
-    cur_state_replay_buffer.add(obs)
-    action_replay_buffer.add(action)
-    reward_replay_buffer.add(reward)
-    next_state_replay_buffer.add(new_obs)
+    episode_transitions.append((obs, action, reward, new_obs))
 
     obs = new_obs
 
     if (step + 1) % TARGET_UPDATE_INTERVAL == 0:
         target_q_table = np.array(policy_q_table) # hard update; copy policy to target
 
-    if (step + 1) % TRAIN_FREQ == 0: # update
+    if (step + 1) % TRAIN_FREQ == 0 and cur_state_replay_buffer.cur_size != 0: # update
         key, subkey = random.split(key)
         sampled_indices = random.choice(subkey, cur_state_replay_buffer.cur_size, 
             shape=(BATCH_SIZE,), replace=cur_state_replay_buffer.cur_size < BATCH_SIZE)
@@ -82,7 +100,7 @@ for step in range(STEPS):
 
 result = ""
 
-for y, row in enumerate(policy_q_table):
+for y, row in enumerate(policy_q_table[tuple(env.GOAL_POS)]):
 
     for x, tile in enumerate(row):
         if env.TILE_IS_END[y,x] or not env.TILE_IS_PASSABLE[y,x]:
@@ -96,4 +114,5 @@ for y, row in enumerate(policy_q_table):
     result += "\n"
 
 print(result)
+#print(policy_q_table[tuple(env.GOAL_POS)])
 print(policy_q_table)
