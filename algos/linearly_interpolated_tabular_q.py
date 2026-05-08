@@ -98,11 +98,14 @@ class LinearlyInterpolatedTabularQ(Generic[TEnvState, TEnvObs]):
         return jnp.where(jax.random.uniform(do_greedy_key) < self.hyperparameters.epsilon, 
             random_action, greedy_action)
 
+    def init_q_table_vals(self, init_val: ArrayLike = jnp.array(0)) -> jax.Array:
+        return jnp.repeat(self.q_table.init(init_val)[None, ...], self.num_actions, axis=0)
+
     def train(self,
         key: jax.Array,
         steps: int,
 
-        init_q_vals: ArrayLike = None,
+        init_q_vals: ArrayLike | None = None,
         log_interval_steps: int = 100_000,
     ) -> jax.Array:
         """Train the q-table. Returns q-table with updated values."""
@@ -116,7 +119,7 @@ class LinearlyInterpolatedTabularQ(Generic[TEnvState, TEnvObs]):
         env_states, info = jax.vmap(self.env.reset)(reset_keys)
 
         if init_q_vals == None:
-            init_q_vals = jnp.repeat(self.q_table.init(0)[None, ...], 2, axis=0)
+            init_q_vals = self.init_q_table_vals()
 
         training_state = self.TrainingState(
             steps = jnp.array(0),

@@ -1,1 +1,1 @@
-import examples.lin_interp_tabular_q_flappy_bird
+import examples.lin_interp_tabular_q_acrobot

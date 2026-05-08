@@ -6,15 +6,18 @@ import functools
 class LinearlyInterpolatedTable:
 
     def __init__(self, min: ArrayLike, max: ArrayLike, step: ArrayLike):
-        self.min = jnp.array(min)
-        self.max = jnp.array(max)
-        self.step = jnp.array(step)
+        self.min = jnp.asarray(min)
+        self.max = jnp.asarray(max)
+        self.step = jnp.asarray(step)
+
+        assert self.min.shape == self.max.shape and self.min.shape == self.step.shape
 
         self.shape = ()
 
         for i in range(len(min)):
-            self.shape = (*self.shape, (max[i] - min[i]) // step[i] + 1 
-                + ((max[i] - min[i]) % step[i] != 0)) # add an extra if not perfectly ending on max
+            self.shape = (*self.shape, 
+                int((max[i] - min[i]) // step[i] + 1 + ((max[i] - min[i]) % step[i] != 0))) 
+                # add an extra if not perfectly ending on max
 
     @functools.partial(jax.jit, static_argnames=('self'))
     def init(self, init: ArrayLike) -> jax.Array:
