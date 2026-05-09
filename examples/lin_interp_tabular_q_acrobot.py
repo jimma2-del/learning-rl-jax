@@ -2,10 +2,10 @@ import jax
 import jax.numpy as jnp
 
 from gymnax.environments import Acrobot, CartPole
-from envs.gymnax_wrapper import GymnaxWrapper, Space
+from core.envs.gymnax_wrapper import GymnaxWrapper, Space
 
-from algos.linearly_interpolated_tabular_q import LinearlyInterpolatedTabularQ, TabularQHyperparameters
-from utils import LinearlyInterpolatedTable
+from core.algos.linearly_interpolated_tabular_q import LinearlyInterpolatedTabularQ, TabularQHyperparameters
+from core.utils import LinearlyInterpolatedTable
 
 SEED = 2
 key = jax.random.key(SEED)

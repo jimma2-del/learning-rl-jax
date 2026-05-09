@@ -1,3 +1,7 @@
+"""
+WARNING: Outdated API
+"""
+
 import os
 
 import jax.numpy as jnp

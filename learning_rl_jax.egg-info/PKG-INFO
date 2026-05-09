@@ -1,0 +1,18 @@
+Metadata-Version: 2.4
+Name: learning-rl-jax
+Version: 0.0.1
+Summary: Sample RL environments and algorithms implemented in Jax.
+Author-email: Jim Ma <jim.majk350@gmail.com>
+Maintainer-email: Jim Ma <jim.majk350@gmail.com>
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+Requires-Dist: gymnasium==1.2.0
+Requires-Dist: jax==0.6.2
+Requires-Dist: numpy==2.2.6
+Requires-Dist: pygame==2.6.1
+Requires-Dist: typing_extensions==4.15.0
+Requires-Dist: flax==0.10.7
+Requires-Dist: gymnax==0.0.9
+Requires-Dist: chex==0.1.90
+
+# Learning RL Jax

@@ -3,9 +3,9 @@ from jax import random
 
 import numpy as np
 
-from ..envs.maze import MazeEnv
+from core.envs.maze import MazeEnv
 
-from .circular_buffer_np import CircularBufferNP
+from circular_buffer_np import CircularBufferNP
 
 DISCOUNT_RATE = 0.95
 
@@ -16,7 +16,7 @@ TARGET_UPDATE_INTERVAL = 100
 REPLAY_BUFFER_SIZE = 500
 LEARNING_RATE = 0.1
 
-STEPS = 100000
+STEPS = 10000
 LOG_INTERVAL = 1000
 
 SEED = 2

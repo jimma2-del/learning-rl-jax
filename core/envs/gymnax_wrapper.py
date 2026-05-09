@@ -12,7 +12,7 @@ import jax.numpy as jnp
 from gymnax.environments.environment import Environment as GymnaxEnv
 import gymnax.environments.spaces as GymnaxSpaces
 
-from .base import Environment, Space
+from core.envs.base import Environment, Space
 
 def space_from_gymnax_space(gymnax_space: GymnaxSpaces.Space) -> Space:
     if isinstance(gymnax_space, GymnaxSpaces.Discrete):

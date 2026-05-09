@@ -2,7 +2,7 @@ import jax.numpy as jnp
 import jax
 import numpy as np
 
-from ..envs.flappy_bird import FlappyBirdEnv, State
+from core.envs.flappy_bird import FlappyBirdEnv, State
 
 import pygame, sys
 pygame.init()

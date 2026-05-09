@@ -3,7 +3,7 @@ from jax.typing import ArrayLike
 from jax import Array
 from typing import Any
 
-from ..base import Environment, Space
+from core.envs.base import Environment, Space
 
 import jax.numpy as jnp
 import jax

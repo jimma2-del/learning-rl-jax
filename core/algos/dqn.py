@@ -9,10 +9,10 @@ from typing import TypeVar, Generic
 
 import functools
 
-from .base import Hyperparameters
+from core.algos.base import Hyperparameters
 
-from envs.base import Environment
-from utils import ReplayBuffer, ReplayBufferState, LinearlyInterpolatedTable
+from core.envs.base import Environment
+from core.utils import ReplayBuffer, ReplayBufferState, LinearlyInterpolatedTable
 
 @dataclass(frozen=True)
 class TabularQHyperparameters(Hyperparameters):
