@@ -1,3 +1,8 @@
+"""
+Utility for converting a gymnax Environment/Space into an Environment/Space following the API of this repository.
+NOTE: these "wrappers" are unrelated to the Wrapper type in wrappers.py, which take in an Environment from this repository.
+"""
+
 from typing import Any, Generic
 from typing_extensions import TypeVar
 from abc import ABC, abstractmethod

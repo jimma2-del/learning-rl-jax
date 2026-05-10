@@ -22,7 +22,11 @@ class TabularQHyperparameters(Hyperparameters):
     batch_size: int = 32
         # NOTE: we don't average the update (divide by batch size), so higher batch size -> higher learning rate
 
-    epsilon: float = 0.05
+    #epsilon: float = 0.05
+
+    epsilon_initial: float = 1
+    epsilon_final: float = 0.05
+    epsilon_anneal_fraction: float = 0.1
 
     replay_buffer_size: int = 1000
 
@@ -50,6 +54,7 @@ class LinearlyInterpolatedTabularQ(Generic[TEnvState, TEnvObs]):
         env_states: TEnvState
         policy_q_vals: jax.Array
         target_q_vals: jax.Array
+        epsilon: ArrayLike
 
     def __init__(self, 
         env: Environment[TEnvState, TEnvObs, ArrayLike],
@@ -89,13 +94,15 @@ class LinearlyInterpolatedTabularQ(Generic[TEnvState, TEnvObs]):
         q_vals = jax.vmap(self.q_table.get, in_axes=[0, None])(q_table_vals, obs)
         return jnp.argmax(q_vals)
 
-    def get_action(self, key: jax.Array, q_table_vals: jax.Array, obs: TEnvObs) -> ArrayLike:
+    def get_action(self, key: jax.Array, q_table_vals: jax.Array, 
+        epsilon: ArrayLike, obs: TEnvObs) -> ArrayLike:
+
         do_greedy_key, random_action_key = jax.random.split(key)
 
         random_action = jax.random.randint(random_action_key, shape=(), minval=0, maxval=self.num_actions)
         greedy_action = self.get_greedy_action(q_table_vals, obs)
 
-        return jnp.where(jax.random.uniform(do_greedy_key) < self.hyperparameters.epsilon, 
+        return jnp.where(jax.random.uniform(do_greedy_key) < epsilon, 
             random_action, greedy_action)
 
     def init_q_table_vals(self, init_val: ArrayLike = jnp.array(0)) -> jax.Array:
@@ -127,13 +134,18 @@ class LinearlyInterpolatedTabularQ(Generic[TEnvState, TEnvObs]):
             env_states = env_states,
             policy_q_vals = init_q_vals,
             target_q_vals = init_q_vals,
+            epsilon = self.hyperparameters.epsilon_initial
         )
+
+        epsilon_anneal_amount = self.hyperparameters.epsilon_initial - self.hyperparameters.epsilon_final
+        epsilon_anneal_steps = steps * self.hyperparameters.epsilon_anneal_fraction
+        epsilon_anneal_rate = epsilon_anneal_amount / epsilon_anneal_steps
 
         while training_state.steps < steps:
             key, train_key = jax.random.split(key, 2)
 
-            training_state, replay_buffer_state = self.train_epoch(
-                train_key, log_interval_steps, training_state, replay_buffer_state)
+            training_state, replay_buffer_state = self.train_epoch(train_key, 
+                log_interval_steps, epsilon_anneal_rate, training_state, replay_buffer_state)
 
             print(f"Completed steps={training_state.steps}")
 
@@ -141,7 +153,7 @@ class LinearlyInterpolatedTabularQ(Generic[TEnvState, TEnvObs]):
 
     @functools.partial(jax.jit, static_argnames=('self', 'steps'))
     def train_epoch(
-        self, key: jax.Array, steps: int, 
+        self, key: jax.Array, steps: int, epsilon_anneal_rate: float,
         training_state: TrainingState, replay_buffer_state: ReplayBufferState
     ) -> tuple[TrainingState, ReplayBufferState]:
         """Train for one 'epoch' -- one fully JIT compiled segment."""
@@ -154,6 +166,7 @@ class LinearlyInterpolatedTabularQ(Generic[TEnvState, TEnvObs]):
             prev_target_qs_update_steps = training_state.prev_target_qs_update_steps
             policy_q_vals = training_state.policy_q_vals
             target_q_vals = training_state.policy_q_vals
+            epsilon = training_state.epsilon
             
             ## sample transitions from environment ##
 
@@ -166,7 +179,7 @@ class LinearlyInterpolatedTabularQ(Generic[TEnvState, TEnvObs]):
                 key, action_key, step_key, reset_key, cur_obs_key, new_obs_key = jax.random.split(key, 6)
 
                 cur_obs = self.env.get_obs(cur_obs_key, env_state)
-                action = self.get_action(action_key, policy_q_vals, cur_obs)
+                action = self.get_action(action_key, policy_q_vals, epsilon, cur_obs)
                 new_state, reward, terminated, truncated, info = self.env.step(step_key, env_state, action)
                 new_obs = self.env.get_obs(new_obs_key, new_state)
 
@@ -183,7 +196,10 @@ class LinearlyInterpolatedTabularQ(Generic[TEnvState, TEnvObs]):
                 (step_keys, env_states), None, length=self.hyperparameters.train_freq)
             _, env_states = carry
 
-            steps += self.hyperparameters.train_freq * self.hyperparameters.n_envs
+            iter_steps = self.hyperparameters.train_freq * self.hyperparameters.n_envs
+            steps += iter_steps
+
+            epsilon = jnp.maximum(epsilon - epsilon_anneal_rate*iter_steps, self.hyperparameters.epsilon_final)
 
             transitions = jax.tree_util.tree_map(lambda x: x.reshape(-1, *x.shape[2:]), transitions)
                 # flatten to remove axis 0
@@ -231,6 +247,7 @@ class LinearlyInterpolatedTabularQ(Generic[TEnvState, TEnvObs]):
                 env_states=env_states,
                 policy_q_vals=policy_q_vals,
                 target_q_vals=target_q_vals,
+                epsilon=epsilon
             ), replay_buffer_state), None
 
         iterations = math.ceil(steps / (self.hyperparameters.train_freq * self.hyperparameters.n_envs))

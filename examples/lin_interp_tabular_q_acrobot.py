@@ -82,7 +82,7 @@ hyperparameters = TabularQHyperparameters(
     discount_rate = 0.98,
     learning_rate = 0.01,
 
-    epsilon = 0.01,
+    epsilon_final = 0.01,
 
     replay_buffer_size = 4096, #1024,
     batch_size = 256, #64,
