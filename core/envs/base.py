@@ -36,7 +36,7 @@ class Space(Generic[TSpaceElement]):
         self.leaf_shapes = [ jnp.broadcast_shapes(cur_low.shape, cur_high.shape) 
             for cur_low, cur_high in zip(self.low_leaves, self.high_leaves) ] 
 
-    @functools.partial(jax.jit, static_argnames=('self'))
+    #@functools.partial(jax.jit, static_argnames=('self'))
     def sample(self, key: jax.Array) -> TSpaceElement:
         """Samples a single element from the space, according to a uniform distribution."""
 

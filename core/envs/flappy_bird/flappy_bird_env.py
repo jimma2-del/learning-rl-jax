@@ -60,7 +60,7 @@ class FlappyBirdEnv(Environment[State, Array, ArrayLike, Array]):
         self.render_settings = render_settings
 
     # @functools.partial(jax.jit, static_argnames=('self'))
-    def reset(self, key: Array) -> State:
+    def reset(self, key: Array) -> tuple[State, dict[Any, Any]]:
         pipe1_key, pipe2_key = jax.random.split(key, 2)
 
         return State(
@@ -77,7 +77,6 @@ class FlappyBirdEnv(Environment[State, Array, ArrayLike, Array]):
     # @functools.partial(jax.jit, static_argnames=('self'))
     def step(self, key: Array, state: State, action: ArrayLike) \
         -> tuple[State, Array, Array, Array, dict[Any, Any]]:
-        '''returns new_state, reward, terminated'''
 
         # update velocities & positions
         new_bird_vel_y = jnp.where(action != 0, 

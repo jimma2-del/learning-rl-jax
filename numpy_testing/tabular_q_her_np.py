@@ -1,3 +1,5 @@
+"""NOTE: very outdated; does not work currently"""
+
 import jax.numpy as jnp
 from jax import random
 

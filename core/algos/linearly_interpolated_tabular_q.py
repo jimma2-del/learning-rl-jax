@@ -238,7 +238,11 @@ class LinearlyInterpolatedTabularQ(Generic[TEnvState, TEnvObs]):
 
             # update target_q_vals if enough steps have passed
             update_target_qs = steps - prev_target_qs_update_steps >= self.hyperparameters.target_update_interval
-            target_q_vals = jnp.where(update_target_qs, policy_q_vals, target_q_vals)
+
+            #target_q_vals = jnp.where(update_target_qs, policy_q_vals, target_q_vals)
+            target_q_vals = jax.lax.cond(update_target_qs, lambda: policy_q_vals, lambda: target_q_vals)
+            #target_q_vals = policy_q_vals
+
             prev_target_qs_update_steps = jnp.where(update_target_qs, steps, prev_target_qs_update_steps)
 
             return (key, LinearlyInterpolatedTabularQ.TrainingState(
