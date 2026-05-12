@@ -19,11 +19,11 @@ class LinearlyInterpolatedTable:
                 int((max[i] - min[i]) // step[i] + 1 + ((max[i] - min[i]) % step[i] != 0))) 
                 # add an extra if not perfectly ending on max
 
-    @functools.partial(jax.jit, static_argnames=('self'))
+    #@functools.partial(jax.jit, static_argnames=('self'))
     def init(self, init: ArrayLike) -> jax.Array:
         return jnp.full(self.shape, init, dtype=jnp.float32)
 
-    @functools.partial(jax.jit, static_argnames=('self'))
+    #@functools.partial(jax.jit, static_argnames=('self'))
     def get(self, data: jax.Array, pos: ArrayLike) -> jax.Array:
         assert data.shape == self.shape
         assert len(pos) == len(self.shape)
@@ -38,7 +38,7 @@ class LinearlyInterpolatedTable:
 
         return result
 
-    @functools.partial(jax.jit, static_argnames=('self'))
+    #@functools.partial(jax.jit, static_argnames=('self'))
     def adjust_get_corner_adjustments(
         self, data: jax.Array, pos: ArrayLike, adjust_amount: ArrayLike
     ) -> tuple[jax.Array, jax.Array]:
@@ -56,24 +56,24 @@ class LinearlyInterpolatedTable:
 
         return corner_indices, adjust_amounts
 
-    @functools.partial(jax.jit, static_argnames=('self'))
+    #@functools.partial(jax.jit, static_argnames=('self'))
     def set_get_corner_adjustments(
         self, data: jax.Array, pos: ArrayLike, value: ArrayLike
     ) -> tuple[jax.Array, jax.Array]:
         cur_value = self.get(data, pos)
         return self.adjust_get_corner_adjustments(data, pos, value - cur_value)
 
-    @functools.partial(jax.jit, static_argnames=('self'))
+    #@functools.partial(jax.jit, static_argnames=('self'))
     def adjust(self, data: jax.Array, pos: ArrayLike, adjust_amount: ArrayLike) -> jax.Array:
         corner_indices, adjust_amounts = self.adjust_get_corner_adjustments(data, pos, adjust_amount)
         return data.at[tuple(corner_indices.T)].add(adjust_amounts)
 
-    @functools.partial(jax.jit, static_argnames=('self'))
+    #@functools.partial(jax.jit, static_argnames=('self'))
     def set(self, data: jax.Array, pos: ArrayLike, value: ArrayLike) -> jax.Array:
         cur_value = self.get(data, pos)
         return self.adjust(data, pos, value - cur_value)
     
-    @functools.partial(jax.jit, static_argnames=('self'))
+    #@functools.partial(jax.jit, static_argnames=('self'))
     def get_lower_indices_and_offsets(self, pos: ArrayLike):
         assert len(pos) == len(self.shape)
 

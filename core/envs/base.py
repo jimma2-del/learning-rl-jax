@@ -4,6 +4,8 @@ from typing import Any, Generic
 from typing_extensions import TypeVar
 from abc import ABC, abstractmethod
 
+import chex
+
 import functools
 
 import jax
@@ -18,63 +20,56 @@ class Space(Generic[TSpaceElement]):
     def __init__(self, low: TSpaceElement, high: TSpaceElement) -> None:
         """inclusive, inclusive for integer dtype; inclusive, exclusive for float dtype;"""
 
-        low_leaves, low_treedef = jax.tree.flatten(low)
-        high_leaves, high_treedef = jax.tree.flatten(high)
-
-        assert low_treedef == high_treedef, "'low' and 'high' must have the same treedef (shape)"
+        chex.assert_trees_all_equal_structs(low, high,
+            custom_message="'low' and 'high' must have the same treedef (structure).")
 
         self.low = low
         self.high = high
 
-        self.treedef = low_treedef
+        self.treedef = jax.tree.structure(low)
 
-        self.low_leaves = low_leaves
-        self.high_leaves = high_leaves
-
-        self.leaf_dtypes = [ jnp.result_type(cur_low, cur_high) 
-            for cur_low, cur_high in zip(self.low_leaves, self.high_leaves) ]
-        self.leaf_shapes = [ jnp.broadcast_shapes(cur_low.shape, cur_high.shape) 
-            for cur_low, cur_high in zip(self.low_leaves, self.high_leaves) ] 
+        self.shapes_dtypes = jax.tree.map(lambda cur_low, cur_high: jax.ShapeDtypeStruct(
+            dtype = jnp.result_type(cur_low, cur_high),
+            shape = jnp.broadcast_shapes(cur_low.shape, cur_high.shape)
+        ), low, high)
 
     #@functools.partial(jax.jit, static_argnames=('self'))
     def sample(self, key: jax.Array) -> TSpaceElement:
         """Samples a single element from the space, according to a uniform distribution."""
 
-        keys = jax.random.split(key, num=len(self.low_leaves))
+        keys = jax.random.split(key, num=self.treedef.num_leaves)
+        keys_tree = jax.tree.unflatten(self.treedef, keys)
 
-        def sample_leaf(i):
-            if jnp.issubdtype(self.leaf_dtypes[i], jnp.integer):
-                return jax.random.randint(keys[i], shape=self.leaf_shapes[i], dtype=self.leaf_dtypes[i],
-                    minval=self.low_leaves[i], maxval=self.high_leaves[i] + 1)
+        def sample_leaf(cur_low, cur_high, shape_dtype: jax.ShapeDtypeStruct, key: jax.Array):
+            if jnp.issubdtype(shape_dtype.dtype, jnp.integer):
+                return jax.random.randint(key, shape=shape_dtype.shape, dtype=shape_dtype.dtype,
+                    minval=cur_low, maxval=cur_high + 1)
             else:
-                return jax.random.uniform(keys[i], shape=self.leaf_shapes[i], dtype=self.leaf_dtypes[i],
-                    minval=self.low_leaves[i], maxval=self.high_leaves[i])
+                return jax.random.uniform(key, shape=shape_dtype.shape, dtype=shape_dtype.dtype,
+                    minval=cur_low, maxval=cur_high)
 
-        sampled_leaves = [ sample_leaf(i) for i in range(len(self.low_leaves)) ]
-
-        return self.treedef.unflatten(sampled_leaves)
+        return jax.tree.map(sample_leaf, self.low, self.high, self.shapes_dtypes, keys_tree)
 
     def contains(self, x: TSpaceElement, batched: bool = False) -> bool:
         """Check if `x` is a valid member of this space. 
         If batched=True, disregards leading batch dimensions"""
 
-        x_leaves, x_treedef = jax.tree.flatten(x)
-        if x_treedef != self.treedef: return False
+        if jax.tree.structure(x) != self.treedef: return False
 
-        for i in range(len(x_leaves)):
-            if x_leaves[i].dtype != self.leaf_dtypes[i]: return False
+        def leaf_matches(x_leaf, cur_low, cur_high, shape_dtype):
+            shape_compare_start = -len(shape_dtype.shape) if batched else 0
+            if x_leaf.shape[shape_compare_start:] != shape_dtype.shape: return False
 
-            shape_compare_start = -len(self.leaf_shapes[i]) if batched else 0
-            if x_leaves[i].shape[shape_compare_start:] != self.leaf_shapes[i]: return False
+            if not bool(jnp.all(x_leaf >= cur_low)): return False
 
-            if not bool(jnp.all(x_leaves[i] >= self.low_leaves[i])): return False
-
-            if jnp.issubdtype(self.leaf_dtypes[i], jnp.integer):
-                if not bool(jnp.all(x_leaves[i] <= self.high_leaves[i])): return False
+            if jnp.issubdtype(shape_dtype.dtype, jnp.integer):
+                if not jnp.issubdtype(x_leaf.dtype, jnp.integer): return False
+                if not bool(jnp.all(x_leaf <= cur_high)): return False
             else:
-                if not bool(jnp.all(x_leaves[i] < self.high_leaves[i])): return False
+                if not jnp.issubdtype(x_leaf.dtype, jnp.floating): return False
+                if not bool(jnp.all(x_leaf < cur_high)): return False
 
-        return True
+        return jax.tree.all(leaf_matches, x, self.low, self.high, self.shapes_dtypes)
 
 TEnvState = TypeVar("TEnvState")
 TEnvObs = TypeVar("TEnvObs")

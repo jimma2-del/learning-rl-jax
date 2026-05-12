@@ -6,6 +6,8 @@ import jax
 
 from flax import nnx
 
+from core.utils import jax_utils
+
 class MLP(nnx.Module):
 
     def __init__(self, rngs: nnx.Rngs, 
@@ -28,7 +30,7 @@ class MLP(nnx.Module):
             for i in range(num_hidden_layers) ]
 
         if do_layer_norm:
-            self.hidden_norms = [ nnx.LayerNorm(input_dim if i == 0 else hidden_dim, rngs=rngs)
+            self.hidden_norms = [ nnx.LayerNorm(hidden_dim, rngs=rngs)
                 for i in range(num_hidden_layers) ]
 
         self.output_layer = nnx.Linear(hidden_dim, output_dim, rngs=rngs)
@@ -50,7 +52,7 @@ TInputType = TypeVar("TInputType")
 class MLPFeatureExtractor(nnx.Module, Generic[TInputType]):
 
     def __init__(self, rngs: nnx.Rngs, 
-        dummy_input: TInputType,
+        input_shapes_dtypes,
 
         output_dim: int = 256,
         output_activation_func = None, # same as activation_func by default
@@ -60,12 +62,16 @@ class MLPFeatureExtractor(nnx.Module, Generic[TInputType]):
         do_layer_norm: bool = True,
         activation_func = nnx.swish,
     ):
-        dummy_flattened, unravel_func = flatten_util.ravel_pytree(dummy_input)
+        """input_shapes_dtypes: A PyTree of jax.ShapeDtypeStruct leaves, eg. from jax.eval_shape()."""
 
-        self.batched_flatten_func = jax.vmap(lambda x: flatten_util.ravel_pytree(x)[0])
-        self.unflatten_func = unravel_func
+        self.input_shapes_dtypes = input_shapes_dtypes
 
-        self.flattened_len = len(dummy_flattened)
+        self.flattened_len = jax.tree.reduce(
+            lambda cum_len, shape_dtype: cum_len + (
+                1 if len(shape_dtype.shape) == 0 else sum(shape_dtype.shape)), 
+            input_shapes_dtypes, 0
+        )
+
         self.output_dim = output_dim
 
         self.output_activation_func = output_activation_func \
@@ -77,11 +83,12 @@ class MLPFeatureExtractor(nnx.Module, Generic[TInputType]):
             hidden_dim, num_hidden_layers, do_layer_norm, activation_func)
 
         if self.do_layer_norm:
-            self.output_norm = nnx.LayerNorm(output_dim, rngs)
+            self.output_norm = nnx.LayerNorm(output_dim, rngs=rngs)
 
     def __call__(self, x: Generic[TInputType], rngs: nnx.Rngs):
-        x = self.batched_flatten_func(x)
-        x = self.mlp(x, rngs)
+        x = jax_utils.flatten_batched_tree(self.input_shapes_dtypes, x)
+
+        x = self.mlp(x, rngs=rngs)
 
         if self.do_layer_norm:
             x = self.output_norm(x)

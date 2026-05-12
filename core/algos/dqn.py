@@ -29,7 +29,8 @@ class DQNHyperparameters(Hyperparameters):
 
     train_freq: int = 4 # does an average of 1 gradient step per train_freq env steps
         # NOTE: if n_envs > train_freq, we take 1 step in each env, followed by multiple gradient steps
-
+    
+    # TODO: train_freq is not implemented properly yet; need to add multiple gradient steps
 
     target_update_interval: int = 1000
 
@@ -50,7 +51,6 @@ class DQN(Generic[TEnvState, TEnvObs]):
     @dataclass(frozen=True)
     class TrainingState:
         steps: ArrayLike
-        prev_target_qs_update_steps: ArrayLike
         env_states: TEnvState
         epsilon: ArrayLike
 
@@ -64,7 +64,7 @@ class DQN(Generic[TEnvState, TEnvObs]):
     ) -> None:
         assert (
             jnp.isscalar(env.action_space.low) 
-            and jnp.issubdtype(env.action_space.leaf_dtypes[0], jnp.integer)
+            and jnp.issubdtype(env.action_space.shapes_dtypes.dtype, jnp.integer)
             and env.action_space.low == 0
         ), "Action space for Q-Learning must be discrete (jnp integer scalar, min=0)."
 
@@ -74,55 +74,41 @@ class DQN(Generic[TEnvState, TEnvObs]):
         self.hyperparameters = hyperparameters
 
         # make replay buffer
-        key = jax.random.key(0) # any random key will work since values in dummy data do not matter
-        key, reset_key, action_key, obs_key = jax.random.split(key, 4)
-
-        dummy_state, _ = self.env.reset(reset_key)
-        dummy_obs = self.env.get_obs(obs_key, dummy_state)
-
-        self.dummy_transition = DQN.Transition(
-            cur_obs = dummy_obs,
-            action = self.env.action_space.sample(action_key),
-            reward = jnp.array(0),
-            new_obs = dummy_obs,
-            terminated = False
+        self.transition_shapes_dtypes = DQN.Transition(
+            cur_obs = self.env.observation_space.shapes_dtypes,
+            action = self.env.action_space.shapes_dtypes,
+            reward = jax.ShapeDtypeStruct(shape=(), dtype=jnp.float32),
+            new_obs = self.env.observation_space.shapes_dtypes,
+            terminated = jax.ShapeDtypeStruct(shape=(), dtype=jnp.bool)
         )
 
-        self.replay_buffer = ReplayBuffer(self.dummy_transition, self.hyperparameters.replay_buffer_size)
+        self.replay_buffer = ReplayBuffer[DQN.Transition](
+            self.transition_shapes_dtypes, self.hyperparameters.replay_buffer_size)
 
-    def get_q_table_index(self, obs: TEnvObs) -> jax.Array:
-        flattened_obs = flatten_util.ravel_pytree(obs)[0]
-
-        return jnp.clip(
-            jnp.round((flattened_obs - self.obs_low_flattened) / self.obs_resolution_flattened), 
-            0, jnp.array(self.q_table_shape) - 1
-        ).astype(int)
-
-    def get_greedy_action(self, q_net: nnx.module, obs: TEnvObs) -> ArrayLike:
-        q_vals = q_net(obs)
+    def get_greedy_action(self, rngs: nnx.Rngs, q_net: nnx.module, obs: TEnvObs) -> ArrayLike:
+        q_vals = q_net(obs, rngs=rngs)
         return jnp.argmax(q_vals)
 
-    def get_action(self, key: jax.Array, q_net: nnx.module, 
+    def get_action(self, rngs: nnx.Rngs, q_net: nnx.module, 
         epsilon: ArrayLike, obs: TEnvObs) -> ArrayLike:
 
-        do_greedy_key, random_action_key = jax.random.split(key)
+        random_action = jax.random.randint(rngs.actions(), shape=(), minval=0, maxval=self.num_actions)
+        greedy_action = self.get_greedy_action(rngs, q_net, obs)
 
-        random_action = jax.random.randint(random_action_key, shape=(), minval=0, maxval=self.num_actions)
-        greedy_action = self.get_greedy_action(q_net, obs)
-
-        return jnp.where(jax.random.uniform(do_greedy_key) < epsilon, 
+        return jnp.where(jax.random.uniform(rngs.actions()) < epsilon, 
             random_action, greedy_action)
 
-    def create_default_q_net(self, key: jax.Array) -> nnx.Module:
-        rngs = nnx.Rngs(key)
+    def create_default_q_net(self, rngs: nnx.Rngs) -> nnx.Module:
+        FEATURE_EXTRACTOR_OUTPUT_DIM = 256
 
         return nnx.Sequential(
-            MLPFeatureExtractor(rngs, self.env.observation_space.sample(key), output_dim=256),
-            MLP(rngs, input_dim=256, output_dim=self.num_actions)
+            MLPFeatureExtractor[TEnvObs](rngs, self.env.observation_space.shapes_dtypes, 
+                output_dim=FEATURE_EXTRACTOR_OUTPUT_DIM),
+            MLP(rngs, input_dim=FEATURE_EXTRACTOR_OUTPUT_DIM, output_dim=self.num_actions)
         )
 
     def train(self,
-        key: jax.Array,
+        rngs: nnx.Rngs,
         steps: int,
         q_net: nnx.Module = None,
         log_interval_steps: int = 100_000,
@@ -131,24 +117,20 @@ class DQN(Generic[TEnvState, TEnvObs]):
 
         # create default network if none given
         if q_net is None:
-            key, subkey = jax.random.split(key)
-            q_net = self.create_default_q_net(subkey)
+            q_net = self.create_default_q_net(rngs)
 
-        optimizer = nnx.Optimizer(q_net, optax.adamw(Hyperparameters.learning_rate))
+        optimizer = nnx.Optimizer(q_net, optax.adamw(learning_rate=Hyperparameters.learning_rate))
 
         ## initialize ##
         replay_buffer_state = self.replay_buffer.init()
 
-        key, reset_key = jax.random.split(key, 2)
-        reset_keys = jax.random.split(reset_key, self.hyperparameters.n_envs)
-
+        reset_keys = jax.random.split(rngs.env(), self.hyperparameters.n_envs)
         env_states, info = jax.vmap(self.env.reset)(reset_keys)
 
         training_state = DQN.TrainingState(
-            steps = jnp.array(0),
-            prev_target_qs_update_steps = jnp.array(0),
+            steps = jnp.array(0, dtype=jnp.int32),
             env_states = env_states,
-            epsilon = self.hyperparameters.epsilon_initial,
+            epsilon = jnp.array(self.hyperparameters.epsilon_initial, dtype=jnp.float32),
 
             policy_q_net = q_net,
             target_q_net = nnx.clone(q_net),
@@ -160,28 +142,27 @@ class DQN(Generic[TEnvState, TEnvObs]):
         epsilon_anneal_rate = epsilon_anneal_amount / epsilon_anneal_steps
 
         while training_state.steps < steps:
-            key, train_key = jax.random.split(key, 2)
-
-            training_state, replay_buffer_state = self.train_epoch(train_key, 
+            training_state, replay_buffer_state = self.train_epoch(rngs, 
                 log_interval_steps, epsilon_anneal_rate, training_state, replay_buffer_state)
 
             print(f"Completed steps={training_state.steps}")
 
-        return training_state.policy_q_vals
+        return training_state.policy_q_net
 
-    @functools.partial(jax.jit, static_argnames=('self', 'steps'))
+    @functools.partial(nnx.jit, static_argnames=('self', 'steps'))
     def train_epoch(
-        self, key: jax.Array, steps: int, epsilon_anneal_rate: float,
+        self, rngs: nnx.Rngs, steps: int, epsilon_anneal_rate: float,
         training_state: TrainingState, replay_buffer_state: ReplayBufferState
     ) -> tuple[TrainingState, ReplayBufferState]:
         """Train for one 'epoch' -- one fully JIT compiled segment."""
 
-        def train_iteration(carry: tuple[jax.Array, DQN.TrainingState, ReplayBufferState], _):
-            key, training_state, replay_buffer_state = carry
+        steps_per_update = self.hyperparameters.train_freq * self.hyperparameters.n_envs
+
+        def train_iteration(carry: tuple[DQN.TrainingState, ReplayBufferState], rngs: nnx.Rngs):
+            training_state, replay_buffer_state = carry
 
             env_states = training_state.env_states
             steps = training_state.steps
-            prev_target_qs_update_steps = training_state.prev_target_qs_update_steps
             epsilon = training_state.epsilon
 
             policy_q_net = training_state.policy_q_net
@@ -190,80 +171,84 @@ class DQN(Generic[TEnvState, TEnvObs]):
             
             ## sample transitions from environment ##
 
-            key, step_key = jax.random.split(key, 2)
-            step_keys = jax.random.split(step_key, self.hyperparameters.n_envs)
-
-            def env_step(carry: tuple[jax.Array, TEnvState], _):
-                key, env_state = carry
-
-                key, action_key, step_key, reset_key, cur_obs_key, new_obs_key = jax.random.split(key, 6)
-
-                cur_obs = self.env.get_obs(cur_obs_key, env_state)
-                action = self.get_action(action_key, policy_q_net, epsilon, cur_obs)
-                new_state, reward, terminated, truncated, info = self.env.step(step_key, env_state, action)
-                new_obs = self.env.get_obs(new_obs_key, new_state)
+            def env_step(env_state: TEnvState, rngs: nnx.Rngs):
+                cur_obs = self.env.get_obs(rngs.env(), env_state)
+                action = self.get_action(rngs, policy_q_net, epsilon, cur_obs)
+                new_state, reward, terminated, truncated, info = self.env.step(rngs.env(), env_state, action)
+                new_obs = self.env.get_obs(rngs.env(), new_state)
 
                 # reset env if terminated/truncated, don't otherwise
-                next_state = jax.lax.cond(jnp.logical_or(terminated, truncated), 
-                    lambda: self.env.reset(reset_key)[0], lambda: new_state)
+                next_state = nnx.cond(jnp.logical_or(terminated, truncated), 
+                    lambda rngs: self.env.reset(rngs.env())[0], lambda rngs: new_state, rngs)
 
                 return (
-                    (key, next_state),
+                    next_state,
                     self.Transition(cur_obs=cur_obs, action=action, reward=reward, new_obs=new_obs, terminated=terminated)
                 )
 
-            carry, transitions = jax.lax.scan(jax.vmap(env_step), 
-                (step_keys, env_states), None, length=self.hyperparameters.train_freq)
-            _, env_states = carry
+            env_steps_rngs = rngs.fork(split=self.hyperparameters.train_freq)
 
-            iter_steps = self.hyperparameters.train_freq * self.hyperparameters.n_envs
-            steps += iter_steps
+            def batched_env_step(env_states: TEnvState, rngs: nnx.Rngs):
+                cur_env_step_rngs = rngs.fork(split=self.hyperparameters.n_envs)
+                return nnx.vmap(env_step)(env_states, cur_env_step_rngs)
 
-            epsilon = jnp.maximum(epsilon - epsilon_anneal_rate*iter_steps, self.hyperparameters.epsilon_final)
+            env_states, transitions = nnx.scan(batched_env_step, length=self.hyperparameters.train_freq)(
+                env_states, env_steps_rngs)
 
-            transitions = jax.tree_util.tree_map(lambda x: x.reshape(-1, *x.shape[2:]), transitions)
-                # flatten to remove axis 0
+            steps += steps_per_update
+
+            epsilon = jnp.maximum(epsilon - epsilon_anneal_rate*steps_per_update, self.hyperparameters.epsilon_final)
+
+            transitions: DQN.Transition = jax.tree_util.tree_map(lambda x: x.reshape(-1, *x.shape[2:]), 
+                transitions) # flatten to remove axis 0
             replay_buffer_state = self.replay_buffer.insert(replay_buffer_state, transitions)
 
             ## update policy q-table ##
 
-            key, sample_key = jax.random.split(key, 2)
-            sampled_transitions = self.replay_buffer.sample(sample_key, 
+            sampled_transitions = self.replay_buffer.sample(rngs.transitions(), 
                 replay_buffer_state, self.hyperparameters.batch_size)
 
-            def get_q_adjustments(transition: DQN.Transition):
-                next_q_vals = target_q_net(transition.new_obs)
-                
-                # zero out q_val if terminated
-                next_q_vals = next_q_vals * jnp.logical_not(transition.terminated)
+            max_next_qs = jnp.max(target_q_net(sampled_transitions.new_obs, rngs=rngs.actions()), axis=1)
+            # zero out q_val if terminated
+            max_next_qs = max_next_qs * jnp.logical_not(sampled_transitions.terminated)
 
-                target_q = transition.reward + self.hyperparameters.discount_rate*jnp.max(next_q_vals)
+            target_qs = sampled_transitions.reward + self.hyperparameters.discount_rate*max_next_qs
 
-                pred_q = policy_q_net(transition.cur_obs)[transition.action]
+            def loss_func(policy_q_net: nnx.Module, rngs: nnx.Rngs):
+                pred_qs_all_actions = policy_q_net(sampled_transitions.cur_obs, rngs=rngs.actions())
+                pred_qs = jnp.take_along_axis(pred_qs_all_actions, sampled_transitions.action[None, :], axis=1)
 
-                return target_q - pred_q
+                # simple MSE loss
+                return jnp.mean(jnp.pow(target_qs - pred_qs, 2))
 
-            # simple MSE loss
-            loss = jnp.mean(jnp.pow(jax.vmap(get_q_adjustments)(sampled_transitions), 2))
-
-            policy_q_vals = policy_q_vals.at[(actions, ) + tuple(adjust_is.T)].add(adjusts)
+            loss_grad_func = nnx.value_and_grad(loss_func)
+            loss, grads = loss_grad_func(policy_q_net, rngs)
+            optimizer.update(grads) 
 
             # update target_q_vals if enough steps have passed
-            update_target_qs = steps - prev_target_qs_update_steps >= self.hyperparameters.target_update_interval
-            target_q_vals = jnp.where(update_target_qs, policy_q_vals, target_q_vals)
-            prev_target_qs_update_steps = jnp.where(update_target_qs, steps, prev_target_qs_update_steps)
+            update_target_net = steps % self.hyperparameters.target_update_interval < steps_per_update
 
-            return (key, DQN.TrainingState(
+            nnx.update(target_q_net, nnx.cond(update_target_net, 
+                lambda policy_q_net, target_q_net: nnx.state(policy_q_net), 
+                lambda policy_q_net, target_q_net: nnx.state(target_q_net),
+                policy_q_net, target_q_net
+            ))
+
+            return (DQN.TrainingState(
                 steps=steps,
-                prev_target_qs_update_steps=prev_target_qs_update_steps,
                 env_states=env_states,
-                policy_q_vals=policy_q_vals,
-                target_q_vals=target_q_vals,
-                epsilon=epsilon
+                epsilon=epsilon,
+
+                policy_q_net=policy_q_net,
+                target_q_net=target_q_net,
+                optimizer=optimizer
             ), replay_buffer_state), None
 
         iterations = math.ceil(steps / (self.hyperparameters.train_freq * self.hyperparameters.n_envs))
-        carry, _ = jax.lax.scan(train_iteration, (key, training_state, replay_buffer_state), length=iterations)
-        key, training_state, replay_buffer_state = carry
+
+        train_iter_rngs = rngs.fork(split=iterations)
+        carry, _ = nnx.scan(train_iteration, length=iterations)((training_state, replay_buffer_state), train_iter_rngs)
+
+        training_state, replay_buffer_state = carry
 
         return training_state, replay_buffer_state

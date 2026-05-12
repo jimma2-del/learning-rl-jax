@@ -8,6 +8,8 @@ import jax
 from jax import flatten_util
 import jax.numpy as jnp
 
+from core.utils import jax_utils
+
 @dataclass(frozen=True)
 class ReplayBufferState:
     data: jax.Array
@@ -17,51 +19,59 @@ class ReplayBufferState:
 TReplayBufferItem = TypeVar("TReplayBufferItem")
 
 class ReplayBuffer(Generic[TReplayBufferItem]):
-    def __init__(self, dummy_item: TReplayBufferItem, capacity: int = 10000) -> None:
-        dummy_flattened, unravel_func = flatten_util.ravel_pytree(dummy_item)
-
-        self.batched_flatten_func = jax.vmap(lambda x: flatten_util.ravel_pytree(x)[0])
-        self.batched_unflatten_func = jax.vmap(unravel_func)
-
+    def __init__(self, item_shapes_dtypes, capacity: int = 10000) -> None:
+        """item_shapes_dtypes: A PyTree of jax.ShapeDtypeStruct leaves, eg. from jax.eval_shape()."""
+        self.item_shapes_dtypes = item_shapes_dtypes
         self.capacity = capacity
-        self.item_size = len(dummy_flattened)
-        self.data_shape = (capacity, self.item_size)
-        self.dtype = dummy_flattened.dtype
 
-    @functools.partial(jax.jit, static_argnames=('self'))
+    #@functools.partial(jax.jit, static_argnames=('self'))
     def init(self) -> ReplayBufferState:
-        return ReplayBufferState(
-            data = jnp.empty(self.data_shape, dtype=self.dtype),
-            insert_i = jnp.array(0),
-            filled_len = jnp.array(0)
+
+        data = jax.tree.map(
+            lambda shape_dtype: jnp.empty((self.capacity, *shape_dtype.shape), dtype=shape_dtype.dtype),
+            self.item_shapes_dtypes
         )
 
-    @functools.partial(jax.jit, static_argnames=('self'))
-    def insert(self, state: ReplayBufferState, samples: TReplayBufferItem) -> None:
+        return ReplayBufferState(
+            data = data,
+            insert_i = jnp.array(0, dtype=jnp.int32),
+            filled_len = jnp.array(0, dtype=jnp.int32)
+        )
+
+    #@functools.partial(jax.jit, static_argnames=('self'))
+    def insert(self, state: ReplayBufferState, items: TReplayBufferItem) -> None:
         '''samples: farther back means newer'''
+        
+        # flatten/add batch axis if number of batch axes is not 1
+        items = jax.tree.map(
+            lambda shape_dtype, items_leaf: items_leaf.reshape((-1, *shape_dtype.shape)),
+            self.item_shapes_dtypes, items
+        )
 
-        flattened_samples = self.batched_flatten_func(samples)
+        insert_n = jax_utils.get_tree_batch_dims(self.item_shapes_dtypes, items)[0]
 
-        if len(flattened_samples) > self.capacity:
+        if insert_n > self.capacity:
             return ReplayBufferState(
-                data = flattened_samples[len(flattened_samples) - self.capacity : ],
+                data = jax.tree.map(lambda x: x[insert_n - self.capacity : ], items),
                 insert_i = 0,
                 filled_len = self.capacity
             )
 
-        insert_indices = (state.insert_i + jnp.arange(len(flattened_samples))) % self.capacity
+        insert_indices = (state.insert_i + jnp.arange(insert_n)) % self.capacity
+
+        data = jax.tree.map(lambda data_leaf, items_leaf: data_leaf.at[insert_indices].set(items_leaf), 
+            state.data, items)
 
         return ReplayBufferState(
-            data = state.data.at[insert_indices].set(flattened_samples),
+            data = data,
             insert_i = insert_indices[-1] + 1,
-            filled_len = jnp.clip(state.filled_len + len(flattened_samples), max=self.capacity)
+            filled_len = jnp.clip(state.filled_len + insert_n, max=self.capacity)
         )
 
-    @functools.partial(jax.jit, static_argnames=('self', 'num_samples'))
+    #@functools.partial(jax.jit, static_argnames=('self', 'num_samples'))
     def sample(self, key: jax.Array, state: ReplayBufferState, num_samples: int) -> TReplayBufferItem:
         indices = jax.random.randint(key, (num_samples, ), minval=0, maxval=state.filled_len)
-        flattened_samples = state.data[indices]
-        return self.batched_unflatten_func(flattened_samples)
+        return jax.tree.map(lambda x: x[indices], state.data)
 
 if __name__ == "__main__":
     @dataclass(frozen=True)

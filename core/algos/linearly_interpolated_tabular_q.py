@@ -14,6 +14,8 @@ from core.algos.base import Hyperparameters
 from core.envs.base import Environment
 from core.utils import ReplayBuffer, ReplayBufferState, LinearlyInterpolatedTable
 
+import time
+
 @dataclass(frozen=True)
 class TabularQHyperparameters(Hyperparameters):
     discount_rate: float = 0.95
@@ -50,7 +52,6 @@ class LinearlyInterpolatedTabularQ(Generic[TEnvState, TEnvObs]):
     @dataclass(frozen=True)
     class TrainingState:
         steps: ArrayLike
-        prev_target_qs_update_steps: ArrayLike
         env_states: TEnvState
         policy_q_vals: jax.Array
         target_q_vals: jax.Array
@@ -63,7 +64,7 @@ class LinearlyInterpolatedTabularQ(Generic[TEnvState, TEnvObs]):
     ) -> None:
         assert (
             jnp.isscalar(env.action_space.low) 
-            and jnp.issubdtype(env.action_space.leaf_dtypes[0], jnp.integer)
+            and jnp.issubdtype(env.action_space.shapes_dtypes.dtype, jnp.integer)
             and env.action_space.low == 0
         ), "Action space for Q-Learning must be discrete (jnp integer scalar, min=0)."
 
@@ -74,21 +75,16 @@ class LinearlyInterpolatedTabularQ(Generic[TEnvState, TEnvObs]):
         self.hyperparameters = hyperparameters
 
         # make replay buffer
-        key = jax.random.key(0) # any random key will work since values in dummy data do not matter
-        key, reset_key, action_key, obs_key = jax.random.split(key, 4)
-
-        dummy_state, _ = self.env.reset(reset_key)
-        dummy_obs = self.env.get_obs(obs_key, dummy_state)
-
-        self.dummy_transition = LinearlyInterpolatedTabularQ.Transition(
-            cur_obs = dummy_obs,
-            action = self.env.action_space.sample(action_key),
-            reward = jnp.array(0),
-            new_obs = dummy_obs,
-            terminated = False
+        self.transition_shapes_dtypes = LinearlyInterpolatedTabularQ.Transition(
+            cur_obs = self.env.observation_space.shapes_dtypes,
+            action = self.env.action_space.shapes_dtypes,
+            reward = jax.ShapeDtypeStruct(shape=(), dtype=jnp.float32),
+            new_obs = self.env.observation_space.shapes_dtypes,
+            terminated = jax.ShapeDtypeStruct(shape=(), dtype=jnp.bool)
         )
 
-        self.replay_buffer = ReplayBuffer(self.dummy_transition, self.hyperparameters.replay_buffer_size)
+        self.replay_buffer = ReplayBuffer[LinearlyInterpolatedTabularQ.Transition](
+            self.transition_shapes_dtypes, self.hyperparameters.replay_buffer_size)
 
     def get_greedy_action(self, q_table_vals: jax.Array, obs: TEnvObs) -> ArrayLike:
         q_vals = jax.vmap(self.q_table.get, in_axes=[0, None])(q_table_vals, obs)
@@ -105,7 +101,7 @@ class LinearlyInterpolatedTabularQ(Generic[TEnvState, TEnvObs]):
         return jnp.where(jax.random.uniform(do_greedy_key) < epsilon, 
             random_action, greedy_action)
 
-    def init_q_table_vals(self, init_val: ArrayLike = jnp.array(0)) -> jax.Array:
+    def init_q_table_vals(self, init_val: ArrayLike = jnp.array(0, dtype=jnp.float32)) -> jax.Array:
         return jnp.repeat(self.q_table.init(init_val)[None, ...], self.num_actions, axis=0)
 
     def train(self,
@@ -129,12 +125,11 @@ class LinearlyInterpolatedTabularQ(Generic[TEnvState, TEnvObs]):
             init_q_vals = self.init_q_table_vals()
 
         training_state = self.TrainingState(
-            steps = jnp.array(0),
-            prev_target_qs_update_steps = jnp.array(0),
+            steps = jnp.array(0, dtype=jnp.int32),
             env_states = env_states,
             policy_q_vals = init_q_vals,
             target_q_vals = init_q_vals,
-            epsilon = self.hyperparameters.epsilon_initial
+            epsilon = jnp.array(self.hyperparameters.epsilon_initial, dtype=jnp.float32)
         )
 
         epsilon_anneal_amount = self.hyperparameters.epsilon_initial - self.hyperparameters.epsilon_final
@@ -144,10 +139,16 @@ class LinearlyInterpolatedTabularQ(Generic[TEnvState, TEnvObs]):
         while training_state.steps < steps:
             key, train_key = jax.random.split(key, 2)
 
+            #start_time = time.time()
+
             training_state, replay_buffer_state = self.train_epoch(train_key, 
                 log_interval_steps, epsilon_anneal_rate, training_state, replay_buffer_state)
 
+            #training_state.policy_q_vals.block_until_ready()
+
             print(f"Completed steps={training_state.steps}")
+
+            #print(f"Time: {time.time() - start_time} s")
 
         return training_state.policy_q_vals
 
@@ -158,12 +159,13 @@ class LinearlyInterpolatedTabularQ(Generic[TEnvState, TEnvObs]):
     ) -> tuple[TrainingState, ReplayBufferState]:
         """Train for one 'epoch' -- one fully JIT compiled segment."""
 
+        steps_per_update = self.hyperparameters.train_freq * self.hyperparameters.n_envs
+
         def train_iteration(carry: tuple[jax.Array, LinearlyInterpolatedTabularQ.TrainingState, ReplayBufferState], _):
             key, training_state, replay_buffer_state = carry
 
             env_states = training_state.env_states
             steps = training_state.steps
-            prev_target_qs_update_steps = training_state.prev_target_qs_update_steps
             policy_q_vals = training_state.policy_q_vals
             target_q_vals = training_state.policy_q_vals
             epsilon = training_state.epsilon
@@ -196,13 +198,13 @@ class LinearlyInterpolatedTabularQ(Generic[TEnvState, TEnvObs]):
                 (step_keys, env_states), None, length=self.hyperparameters.train_freq)
             _, env_states = carry
 
-            iter_steps = self.hyperparameters.train_freq * self.hyperparameters.n_envs
-            steps += iter_steps
+            steps += steps_per_update
 
-            epsilon = jnp.maximum(epsilon - epsilon_anneal_rate*iter_steps, self.hyperparameters.epsilon_final)
+            epsilon = jnp.maximum(epsilon - epsilon_anneal_rate*steps_per_update, self.hyperparameters.epsilon_final)
 
-            transitions = jax.tree_util.tree_map(lambda x: x.reshape(-1, *x.shape[2:]), transitions)
-                # flatten to remove axis 0
+            transitions: LinearlyInterpolatedTabularQ.Transition = jax.tree_util.tree_map(
+                lambda x: x.reshape(-1, *x.shape[2:]), transitions) # flatten to remove axis 0
+                
             replay_buffer_state = self.replay_buffer.insert(replay_buffer_state, transitions)
 
             ## update policy q-table ##
@@ -237,17 +239,14 @@ class LinearlyInterpolatedTabularQ(Generic[TEnvState, TEnvObs]):
             policy_q_vals = policy_q_vals.at[(actions, ) + tuple(adjust_is.T)].add(adjusts)
 
             # update target_q_vals if enough steps have passed
-            update_target_qs = steps - prev_target_qs_update_steps >= self.hyperparameters.target_update_interval
+            update_target_qs = steps % self.hyperparameters.target_update_interval < steps_per_update
 
             #target_q_vals = jnp.where(update_target_qs, policy_q_vals, target_q_vals)
             target_q_vals = jax.lax.cond(update_target_qs, lambda: policy_q_vals, lambda: target_q_vals)
             #target_q_vals = policy_q_vals
 
-            prev_target_qs_update_steps = jnp.where(update_target_qs, steps, prev_target_qs_update_steps)
-
             return (key, LinearlyInterpolatedTabularQ.TrainingState(
                 steps=steps,
-                prev_target_qs_update_steps=prev_target_qs_update_steps,
                 env_states=env_states,
                 policy_q_vals=policy_q_vals,
                 target_q_vals=target_q_vals,

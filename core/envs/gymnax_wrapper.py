@@ -51,10 +51,10 @@ class GymnaxWrapper(Environment[TEnvState, ArrayLike, ArrayLike], Generic[TEnvSt
 
     def __init__(self, gymnax_env: GymnaxEnv[TEnvState, TEnvParams], gymnax_params: TEnvParams | None = None):
         self.gymnax_env = gymnax_env
-        self.gymnax_params = gymnax_params
+        self.gymnax_params = gymnax_params if gymnax_params is not None else gymnax_env.default_params
 
-        self._observation_space = space_from_gymnax_space(self.gymnax_env.observation_space(gymnax_params))
-        self._action_space = space_from_gymnax_space(self.gymnax_env.action_space(gymnax_params))
+        self._observation_space = space_from_gymnax_space(self.gymnax_env.observation_space(self.gymnax_params))
+        self._action_space = space_from_gymnax_space(self.gymnax_env.action_space(self.gymnax_params))
 
     def reset(self, key: jax.Array) -> tuple[TEnvState, dict[Any, Any]]:
         obs, state = self.gymnax_env.reset_env(key, self.gymnax_params)

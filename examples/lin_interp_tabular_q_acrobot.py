@@ -7,6 +7,8 @@ from core.envs.gymnax_wrapper import GymnaxWrapper, Space
 from core.algos.linearly_interpolated_tabular_q import LinearlyInterpolatedTabularQ, TabularQHyperparameters
 from core.utils import LinearlyInterpolatedTable
 
+#jax.config.update("jax_log_compiles", True)
+
 SEED = 2
 key = jax.random.key(SEED)
 
@@ -31,13 +33,13 @@ class CustomGymnaxWrapper(GymnaxWrapper):
             jnp.atan2(gymnax_obs[1], gymnax_obs[0]), 
             jnp.atan2(gymnax_obs[3], gymnax_obs[2]), 
             gymnax_obs[4], gymnax_obs[5]
-        ))
+        ), dtype=jnp.float32)
 
     @property
     def observation_space(self):
         return Space(
-            low=jnp.array((-jnp.pi, -jnp.pi, -13, -29)),
-            high=jnp.array((jnp.pi, jnp.pi, 13, 29))
+            low=jnp.array((-jnp.pi, -jnp.pi, -13, -29), dtype=jnp.float32),
+            high=jnp.array((jnp.pi, jnp.pi, 13, 29), dtype=jnp.float32)
         )
 
 gymnax_env = Acrobot()
@@ -64,11 +66,19 @@ Q_TABLE_GRIDPOINTS_PER_AXIS = 10
 #     max=(3.2, 3.2, 13, 29), 
 #     step=(0.4, 0.4, 2, 4)
 # )
+
 q_table = LinearlyInterpolatedTable(
     min=(-3.2, -3.2, -6, -15), 
     max=(3.2, 3.2, 6, 15), 
     step=(0.2, 0.4, 0.25, 0.25)
 )
+
+# # testing performance on a smaller table
+# q_table = LinearlyInterpolatedTable(
+#     min=(-3.2, -3.2, -6, -15), 
+#     max=(3.2, 3.2, 6, 15), 
+#     step=(1.6, 1.6, 2, 2)
+# )
 
 # # CARTPOLE
 # q_table = LinearlyInterpolatedTable(

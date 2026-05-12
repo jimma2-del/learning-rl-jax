@@ -53,8 +53,8 @@ class GridworldEnv(Environment[State, Array, ArrayLike, str]):
             - jnp.asarray((1, 1), dtype=jnp.int32) # subtract 1 because 0-indexed
 
         tile_rewards = np.zeros(self.map_shape, dtype="int32")
-        tile_is_passable = np.zeros(self.map_shape, dtype="int8")
-        tile_is_end = np.zeros(self.map_shape, dtype="int8")
+        tile_is_passable = np.zeros(self.map_shape, dtype="bool")
+        tile_is_end = np.zeros(self.map_shape, dtype="bool")
         spawnpoints = []
 
         # highest non-negative END tile becomes the goal
