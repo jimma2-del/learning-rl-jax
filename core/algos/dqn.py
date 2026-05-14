@@ -27,8 +27,9 @@ class DQNHyperparameters(Hyperparameters):
 
     replay_buffer_size: int = 1_000_000
 
-    train_freq: int = 4 # does an average of 1 gradient step per train_freq env steps
+    train_freq: int = 4 # does around 1 gradient step per train_freq env steps
         # NOTE: if n_envs > train_freq, we take 1 step in each env, followed by multiple gradient steps
+        # NOTE: will round up or down if not divisible evenly
     
     # TODO: train_freq is not implemented properly yet; need to add multiple gradient steps
 
@@ -52,7 +53,6 @@ class DQN(Generic[TEnvState, TEnvObs]):
     class TrainingState:
         steps: ArrayLike
         env_states: TEnvState
-        epsilon: ArrayLike
 
         policy_q_net: nnx.Module
         target_q_net: nnx.Module
@@ -119,7 +119,7 @@ class DQN(Generic[TEnvState, TEnvObs]):
         if q_net is None:
             q_net = self.create_default_q_net(rngs)
 
-        optimizer = nnx.Optimizer(q_net, optax.adamw(learning_rate=Hyperparameters.learning_rate))
+        optimizer = nnx.Optimizer(q_net, optax.adamw(learning_rate=self.hyperparameters.learning_rate))
 
         ## initialize ##
         replay_buffer_state = self.replay_buffer.init()
@@ -130,50 +130,61 @@ class DQN(Generic[TEnvState, TEnvObs]):
         training_state = DQN.TrainingState(
             steps = jnp.array(0, dtype=jnp.int32),
             env_states = env_states,
-            epsilon = jnp.array(self.hyperparameters.epsilon_initial, dtype=jnp.float32),
 
             policy_q_net = q_net,
             target_q_net = nnx.clone(q_net),
             optimizer=optimizer
         )
 
-        epsilon_anneal_amount = self.hyperparameters.epsilon_initial - self.hyperparameters.epsilon_final
-        epsilon_anneal_steps = steps * self.hyperparameters.epsilon_anneal_fraction
-        epsilon_anneal_rate = epsilon_anneal_amount / epsilon_anneal_steps
+        # epsilon_anneal_amount = self.hyperparameters.epsilon_initial - self.hyperparameters.epsilon_final
+        # epsilon_anneal_steps = steps * self.hyperparameters.epsilon_anneal_fraction
+        # epsilon_anneal_rate = epsilon_anneal_amount / epsilon_anneal_steps
 
         while training_state.steps < steps:
             training_state, replay_buffer_state = self.train_epoch(rngs, 
-                log_interval_steps, epsilon_anneal_rate, training_state, replay_buffer_state)
+                log_interval_steps, training_state, replay_buffer_state)
 
             print(f"Completed steps={training_state.steps}")
 
         return training_state.policy_q_net
 
-    @functools.partial(nnx.jit, static_argnames=('self', 'steps'))
+    @functools.partial(nnx.jit, static_argnames=('self', 'steps', 'total_steps'))
     def train_epoch(
-        self, rngs: nnx.Rngs, steps: int, epsilon_anneal_rate: float,
+        self, rngs: nnx.Rngs, steps: int,
         training_state: TrainingState, replay_buffer_state: ReplayBufferState
     ) -> tuple[TrainingState, ReplayBufferState]:
         """Train for one 'epoch' -- one fully JIT compiled segment."""
 
-        steps_per_update = self.hyperparameters.train_freq * self.hyperparameters.n_envs
+        steps_per_env_per_iter = int(jnp.ceil(self.hyperparameters.train_freq / self.hyperparameters.n_envs))
+        total_steps_per_iter = steps_per_env_per_iter * self.hyperparameters.n_envs
+        grad_steps_per_iter = int(jnp.ceil(self.hyperparameters.n_envs / self.hyperparameters.train_freq))
 
         def train_iteration(carry: tuple[DQN.TrainingState, ReplayBufferState], rngs: nnx.Rngs):
             training_state, replay_buffer_state = carry
 
             env_states = training_state.env_states
             steps = training_state.steps
-            epsilon = training_state.epsilon
 
             policy_q_net = training_state.policy_q_net
             target_q_net = training_state.target_q_net
-            optimizer = training_state.optimizer
+            optimizer = training_state.optimizer    
+
+            # calculate hyperparameters with schedules
+            scheduled_hyperparam_vals = DQNHyperparameters()
+
+            for field in self.hyperparameters.fields():
+                val = getattr(self.hyperparameters, field.name)
+                
+                if callable(val):
+                    val = val(steps)
+
+                setattr(scheduled_hyperparam_vals, field.name, val)
             
             ## sample transitions from environment ##
 
             def env_step(env_state: TEnvState, rngs: nnx.Rngs):
                 cur_obs = self.env.get_obs(rngs.env(), env_state)
-                action = self.get_action(rngs, policy_q_net, epsilon, cur_obs)
+                action = self.get_action(rngs, policy_q_net, scheduled_hyperparam_vals.epsilon, cur_obs)
                 new_state, reward, terminated, truncated, info = self.env.step(rngs.env(), env_state, action)
                 new_obs = self.env.get_obs(rngs.env(), new_state)
 
@@ -195,9 +206,9 @@ class DQN(Generic[TEnvState, TEnvObs]):
             env_states, transitions = nnx.scan(batched_env_step, length=self.hyperparameters.train_freq)(
                 env_states, env_steps_rngs)
 
-            steps += steps_per_update
+            steps += total_steps_per_iter
 
-            epsilon = jnp.maximum(epsilon - epsilon_anneal_rate*steps_per_update, self.hyperparameters.epsilon_final)
+            #epsilon = jnp.maximum(epsilon - epsilon_anneal_rate*total_steps_per_iter, self.hyperparameters.epsilon_final)
 
             transitions: DQN.Transition = jax.tree_util.tree_map(lambda x: x.reshape(-1, *x.shape[2:]), 
                 transitions) # flatten to remove axis 0
@@ -226,7 +237,7 @@ class DQN(Generic[TEnvState, TEnvObs]):
             optimizer.update(grads) 
 
             # update target_q_vals if enough steps have passed
-            update_target_net = steps % self.hyperparameters.target_update_interval < steps_per_update
+            update_target_net = steps % self.hyperparameters.target_update_interval < total_steps_per_iter
 
             nnx.update(target_q_net, nnx.cond(update_target_net, 
                 lambda policy_q_net, target_q_net: nnx.state(policy_q_net), 
@@ -237,7 +248,6 @@ class DQN(Generic[TEnvState, TEnvObs]):
             return (DQN.TrainingState(
                 steps=steps,
                 env_states=env_states,
-                epsilon=epsilon,
 
                 policy_q_net=policy_q_net,
                 target_q_net=target_q_net,
