@@ -11,13 +11,14 @@ import jax.numpy as jnp
 
 from .base import Environment, Space
 
+TEnv = TypeVar("TEnv", bound=Environment)
 TEnvState = TypeVar("TEnvState")
 TEnvObs = TypeVar("TEnvObs")
 TEnvAction = TypeVar("TEnvAction")
 TRenderFrame = TypeVar("TRenderFrame", default=None)
 
 class Wrapper(
-    Generic[TEnvState, TEnvObs, TEnvAction, TRenderFrame],
+    Generic[TEnv, TEnvState, TEnvObs, TEnvAction, TRenderFrame],
     Environment[TEnvState, TEnvObs, TEnvAction, TRenderFrame]
 ):
 
@@ -25,7 +26,7 @@ class Wrapper(
         self.env = env
 
     @property
-    def unwrapped(self) -> Environment[TEnvState, TEnvObs, TEnvAction, TRenderFrame]:
+    def unwrapped(self) -> TEnv:
         """Get the underlying Environment, without any wrappers."""
 
         if isinstance(self.env, Wrapper):

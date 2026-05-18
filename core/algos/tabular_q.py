@@ -10,13 +10,13 @@ from typing import TypeVar, Generic
 
 import functools
 
-from core.algos.base import Hyperparameters
-
 from core.envs.base import Environment, Space
 from core.utils import ReplayBuffer, ReplayBufferState
 
 @dataclass(frozen=True)
-class TabularQHyperparameters(Hyperparameters):
+class TabularQHyperparameters:
+    n_envs: int = 32
+
     discount_rate: float = 0.95
     learning_rate: float = 0.01
 

@@ -3,13 +3,16 @@ import jax
 
 from jax.typing import ArrayLike
 from chex import dataclass
-from typing import TypeVar
+from typing import TypeVar, Generic, Protocol, TypeAlias
 
-@dataclass(frozen=True)
-class Hyperparameters:
-    n_envs: int = 32
+TScheduleValue = TypeVar('TScheduleValue')
 
-    discount_rate: float = 0.99
-    learning_rate: float = 2.5e-4
+class Schedule(Generic[TScheduleValue], Protocol):
+    def __call__(self, steps: int) -> TScheduleValue:
+        ...
 
-    batch_size: int = 32
+Scheduleable: TypeAlias = TScheduleValue | Schedule[TScheduleValue]
+
+def resolve_scheduleable(scheduleable: Scheduleable[TScheduleValue], steps: int) -> TScheduleValue:
+    if callable(scheduleable): return scheduleable(steps)
+    return scheduleable

@@ -12,7 +12,7 @@ import functools
 from flax import nnx
 import optax
 
-from core.algos.base import Hyperparameters
+from core.algos.base import Scheduleable, resolve_scheduleable
 
 from core.envs.base import Environment
 from core.utils import ReplayBuffer, ReplayBufferState
@@ -20,10 +20,17 @@ from core.utils import ReplayBuffer, ReplayBufferState
 from core.sample_networks import MLP, MLPFeatureExtractor
 
 @dataclass(frozen=True)
-class DQNHyperparameters(Hyperparameters):
-    epsilon_initial: float = 1
-    epsilon_final: float = 0.05
-    epsilon_anneal_fraction: float = 0.1
+class DQNHyperparameters:
+    n_envs: int = 32
+
+    discount_rate: Scheduleable[float] = 0.99
+    learning_rate: Scheduleable[float] = 2.5e-4
+
+    batch_size: int = 32
+
+    epsilon: Scheduleable[float] = 0.1
+        # it is recommended to use a schedule: decay from 1 to ~0.05 over ~10% of training steps
+        # eg. optax.schedules.linear_schedule(1, 0.05, 0.1*steps)
 
     replay_buffer_size: int = 1_000_000
 
@@ -119,7 +126,8 @@ class DQN(Generic[TEnvState, TEnvObs]):
         if q_net is None:
             q_net = self.create_default_q_net(rngs)
 
-        optimizer = nnx.Optimizer(q_net, optax.adamw(learning_rate=self.hyperparameters.learning_rate))
+        optimizer = nnx.Optimizer(q_net, optax.inject_hyperparams(optax.adamw)(
+            learning_rate=resolve_scheduleable(self.hyperparameters.learning_rate, 0)))
 
         ## initialize ##
         replay_buffer_state = self.replay_buffer.init()
@@ -136,10 +144,6 @@ class DQN(Generic[TEnvState, TEnvObs]):
             optimizer=optimizer
         )
 
-        # epsilon_anneal_amount = self.hyperparameters.epsilon_initial - self.hyperparameters.epsilon_final
-        # epsilon_anneal_steps = steps * self.hyperparameters.epsilon_anneal_fraction
-        # epsilon_anneal_rate = epsilon_anneal_amount / epsilon_anneal_steps
-
         while training_state.steps < steps:
             training_state, replay_buffer_state = self.train_epoch(rngs, 
                 log_interval_steps, training_state, replay_buffer_state)
@@ -148,16 +152,16 @@ class DQN(Generic[TEnvState, TEnvObs]):
 
         return training_state.policy_q_net
 
-    @functools.partial(nnx.jit, static_argnames=('self', 'steps', 'total_steps'))
+    @functools.partial(nnx.jit, static_argnames=('self', 'steps'))
     def train_epoch(
         self, rngs: nnx.Rngs, steps: int,
         training_state: TrainingState, replay_buffer_state: ReplayBufferState
     ) -> tuple[TrainingState, ReplayBufferState]:
         """Train for one 'epoch' -- one fully JIT compiled segment."""
 
-        steps_per_env_per_iter = int(jnp.ceil(self.hyperparameters.train_freq / self.hyperparameters.n_envs))
+        steps_per_env_per_iter = math.ceil(self.hyperparameters.train_freq / self.hyperparameters.n_envs)
         total_steps_per_iter = steps_per_env_per_iter * self.hyperparameters.n_envs
-        grad_steps_per_iter = int(jnp.ceil(self.hyperparameters.n_envs / self.hyperparameters.train_freq))
+        grad_steps_per_iter = math.ceil(self.hyperparameters.n_envs / self.hyperparameters.train_freq)
 
         def train_iteration(carry: tuple[DQN.TrainingState, ReplayBufferState], rngs: nnx.Rngs):
             training_state, replay_buffer_state = carry
@@ -168,28 +172,20 @@ class DQN(Generic[TEnvState, TEnvObs]):
             policy_q_net = training_state.policy_q_net
             target_q_net = training_state.target_q_net
             optimizer = training_state.optimizer    
-
-            # calculate hyperparameters with schedules
-            scheduled_hyperparam_vals = DQNHyperparameters()
-
-            for field in self.hyperparameters.fields():
-                val = getattr(self.hyperparameters, field.name)
-                
-                if callable(val):
-                    val = val(steps)
-
-                setattr(scheduled_hyperparam_vals, field.name, val)
             
             ## sample transitions from environment ##
 
-            def env_step(env_state: TEnvState, rngs: nnx.Rngs):
+            def env_step(env_state: TEnvState, rngs: nnx.Rngs) -> tuple[TEnvState, DQN.Transition]:
                 cur_obs = self.env.get_obs(rngs.env(), env_state)
-                action = self.get_action(rngs, policy_q_net, scheduled_hyperparam_vals.epsilon, cur_obs)
+
+                action = self.get_action(rngs, policy_q_net, 
+                    resolve_scheduleable(self.hyperparameters.epsilon, steps), cur_obs)
+
                 new_state, reward, terminated, truncated, info = self.env.step(rngs.env(), env_state, action)
                 new_obs = self.env.get_obs(rngs.env(), new_state)
 
                 # reset env if terminated/truncated, don't otherwise
-                next_state = nnx.cond(jnp.logical_or(terminated, truncated), 
+                next_state: TEnvState = nnx.cond(jnp.logical_or(terminated, truncated), 
                     lambda rngs: self.env.reset(rngs.env())[0], lambda rngs: new_state, rngs)
 
                 return (
@@ -197,18 +193,17 @@ class DQN(Generic[TEnvState, TEnvObs]):
                     self.Transition(cur_obs=cur_obs, action=action, reward=reward, new_obs=new_obs, terminated=terminated)
                 )
 
-            env_steps_rngs = rngs.fork(split=self.hyperparameters.train_freq)
-
-            def batched_env_step(env_states: TEnvState, rngs: nnx.Rngs):
-                cur_env_step_rngs = rngs.fork(split=self.hyperparameters.n_envs)
-                return nnx.vmap(env_step)(env_states, cur_env_step_rngs)
-
-            env_states, transitions = nnx.scan(batched_env_step, length=self.hyperparameters.train_freq)(
-                env_states, env_steps_rngs)
+            def batched_env_step(env_states: TEnvState, rngs: nnx.Rngs) -> tuple[TEnvState, DQN.Transition]:
+                return nnx.vmap(env_step)(env_states, rngs.fork(split=self.hyperparameters.n_envs))
+            
+            env_states, transitions = nnx.scan(batched_env_step)(env_states, 
+                rngs.fork(split=steps_per_env_per_iter))
 
             steps += total_steps_per_iter
 
-            #epsilon = jnp.maximum(epsilon - epsilon_anneal_rate*total_steps_per_iter, self.hyperparameters.epsilon_final)
+            # update optimizer schedules using env steps (rather than default grad steps)
+            optimizer.opt_state.hyperparams['learning_rate'].value \
+                = resolve_scheduleable(self.hyperparameters.learning_rate, steps)
 
             transitions: DQN.Transition = jax.tree_util.tree_map(lambda x: x.reshape(-1, *x.shape[2:]), 
                 transitions) # flatten to remove axis 0
@@ -216,25 +211,36 @@ class DQN(Generic[TEnvState, TEnvObs]):
 
             ## update policy q-table ##
 
-            sampled_transitions = self.replay_buffer.sample(rngs.transitions(), 
-                replay_buffer_state, self.hyperparameters.batch_size)
+            def grad_update(carry: tuple[nnx.Module, nnx.Optimizer], rngs: nnx.Rngs) \
+                -> tuple[tuple[nnx.Module, nnx.Optimizer], ArrayLike]:
+                policy_q_net, optimizer = carry
 
-            max_next_qs = jnp.max(target_q_net(sampled_transitions.new_obs, rngs=rngs.actions()), axis=1)
-            # zero out q_val if terminated
-            max_next_qs = max_next_qs * jnp.logical_not(sampled_transitions.terminated)
+                sampled_transitions = self.replay_buffer.sample(rngs.transitions(), 
+                    replay_buffer_state, self.hyperparameters.batch_size)
 
-            target_qs = sampled_transitions.reward + self.hyperparameters.discount_rate*max_next_qs
+                max_next_qs = jnp.max(target_q_net(sampled_transitions.new_obs, rngs=rngs), axis=1)
+                # zero out q_val if terminated
+                max_next_qs = max_next_qs * jnp.logical_not(sampled_transitions.terminated)
 
-            def loss_func(policy_q_net: nnx.Module, rngs: nnx.Rngs):
-                pred_qs_all_actions = policy_q_net(sampled_transitions.cur_obs, rngs=rngs.actions())
-                pred_qs = jnp.take_along_axis(pred_qs_all_actions, sampled_transitions.action[None, :], axis=1)
+                target_qs = sampled_transitions.reward \
+                    + resolve_scheduleable(self.hyperparameters.discount_rate, steps)*max_next_qs
 
-                # simple MSE loss
-                return jnp.mean(jnp.pow(target_qs - pred_qs, 2))
+                def loss_func(policy_q_net: nnx.Module, rngs: nnx.Rngs):
+                    pred_qs_all_actions = policy_q_net(sampled_transitions.cur_obs, rngs=rngs)
+                    pred_qs = jnp.take_along_axis(pred_qs_all_actions, sampled_transitions.action[None, :], axis=1)
 
-            loss_grad_func = nnx.value_and_grad(loss_func)
-            loss, grads = loss_grad_func(policy_q_net, rngs)
-            optimizer.update(grads) 
+                    # simple MSE loss
+                    return jnp.mean(jnp.power(target_qs - pred_qs, 2))
+
+                loss_grad_func = nnx.value_and_grad(loss_func)
+                loss, grads = loss_grad_func(policy_q_net, rngs)
+                optimizer.update(grads) 
+
+                return (policy_q_net, optimizer), loss
+
+            carry, losses = nnx.scan(grad_update)((policy_q_net, optimizer), 
+                rngs.fork(split=grad_steps_per_iter))
+            policy_q_net, optimizer = carry
 
             # update target_q_vals if enough steps have passed
             update_target_net = steps % self.hyperparameters.target_update_interval < total_steps_per_iter
@@ -254,10 +260,10 @@ class DQN(Generic[TEnvState, TEnvObs]):
                 optimizer=optimizer
             ), replay_buffer_state), None
 
-        iterations = math.ceil(steps / (self.hyperparameters.train_freq * self.hyperparameters.n_envs))
+        iterations = math.ceil(steps / total_steps_per_iter)
 
-        train_iter_rngs = rngs.fork(split=iterations)
-        carry, _ = nnx.scan(train_iteration, length=iterations)((training_state, replay_buffer_state), train_iter_rngs)
+        carry, _ = nnx.scan(train_iteration)((training_state, replay_buffer_state), 
+            rngs.fork(split=iterations))
 
         training_state, replay_buffer_state = carry
 
