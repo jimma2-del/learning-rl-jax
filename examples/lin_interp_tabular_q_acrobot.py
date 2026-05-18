@@ -4,6 +4,8 @@ import jax.numpy as jnp
 from gymnax.environments import Acrobot, CartPole
 from core.envs.gymnax_wrapper import GymnaxWrapper, Space
 
+from core.envs.wrappers import Wrapper
+
 from core.algos.linearly_interpolated_tabular_q import LinearlyInterpolatedTabularQ, TabularQHyperparameters
 from core.utils import LinearlyInterpolatedTable
 
@@ -12,9 +14,16 @@ from core.utils import LinearlyInterpolatedTable
 SEED = 2
 key = jax.random.key(SEED)
 
-class CustomGymnaxWrapper(GymnaxWrapper):
+gymnax_env = Acrobot()
+gymnax_env_params = gymnax_env.default_params
+
+env = GymnaxWrapper(gymnax_env)
+
+# add wrapper for custom rewards and observations
+
+class AcrobotWrapper(Wrapper):
     def step(self, key, state, action):
-        obs, state, reward, terminated, info = self.gymnax_env.step_env(key, state, action, self.gymnax_params)
+        obs, state, reward, terminated, info = super().step(key, state, action, self.gymnax_params)
 
         height = (-obs[0] - (obs[0] * obs[2] - obs[1] * obs[3])) / 2 # [-1, 0.5]
         h_d = ((obs[1] * (1 + obs[2]) + obs[0] * obs[3]) * obs[4] 
@@ -28,13 +37,14 @@ class CustomGymnaxWrapper(GymnaxWrapper):
         return state, reward, terminated, False, info
 
     def get_obs(self, key, state):
-        gymnax_obs = self.gymnax_env.get_obs(state=state, params=self.gymnax_params, key=key)
-        return jnp.array((
-            jnp.atan2(gymnax_obs[1], gymnax_obs[0]), 
-            jnp.atan2(gymnax_obs[3], gymnax_obs[2]), 
-            gymnax_obs[4], gymnax_obs[5]
-        ), dtype=jnp.float32)
+        obs = super().get_obs(key, state)
 
+        return jnp.array((
+            jnp.atan2(obs[1], obs[0]), 
+            jnp.atan2(obs[3], obs[2]), 
+            obs[4], obs[5]
+        ), dtype=jnp.float32)
+        
     @property
     def observation_space(self):
         return Space(
@@ -42,9 +52,7 @@ class CustomGymnaxWrapper(GymnaxWrapper):
             high=jnp.array((jnp.pi, jnp.pi, 13, 29), dtype=jnp.float32)
         )
 
-gymnax_env = Acrobot()
-gymnax_env_params = gymnax_env.default_params
-env = CustomGymnaxWrapper(gymnax_env, gymnax_env_params)
+env = AcrobotWrapper(env)
 
 ### TRAIN ###
 Q_TABLE_GRIDPOINTS_PER_AXIS = 10

@@ -1,6 +1,12 @@
 import jax
+from jax.typing import ArrayLike
+
+import jax.numpy as jnp
 
 from core.envs.flappy_bird import FlappyBirdEnv, State
+
+from core.envs.wrappers import Wrapper
+from core.envs.base import Space
 
 from core.algos.linearly_interpolated_tabular_q import LinearlyInterpolatedTabularQ, TabularQHyperparameters
 from core.utils import LinearlyInterpolatedTable
@@ -10,6 +16,21 @@ key = jax.random.key(SEED)
 
 DT = 0.1
 env = FlappyBirdEnv(DT)
+
+# remove pipe_dx from observations to simply
+
+class FlappyBirdWrapper(Wrapper[State, jax.Array, ArrayLike, jax.Array]):
+
+    def get_obs(self, key: jax.Array, state: State) -> jax.Array:
+        obs = super().get_obs(key, state)
+        return obs[:2]
+
+    @property
+    def observation_space(self):
+        space = super().observation_space
+        return Space(low=space.low[:2], high=space.high[:2])
+
+env = FlappyBirdWrapper(env)
 
 ### TRAIN ###
 
@@ -68,7 +89,7 @@ done = False
 done_pause = 0
 
 pygame.display.set_caption("Flappy Bird")
-screen = pygame.display.set_mode((env.settings.window_size[1], env.settings.window_size[0]))
+screen = pygame.display.set_mode((env.unwrapped.settings.window_size[1], env.unwrapped.settings.window_size[0]))
 
 prev_flap_pressed = False
 

@@ -16,12 +16,25 @@ import jax.numpy as jnp
 TSpaceElement = TypeVar("TSpaceElement")
 
 class Space(Generic[TSpaceElement]):
+    """Defines bounds and structure, such as for observations/actions. 
+
+    Similar to gymnasium.Space, but more flexible as it allows elements to be arbitrary PyTrees,
+        rather than requiring custom Tuple/Dict spaces.
+
+    Integer bounds denote discrete values, while float bounds denote continuous values.
+    Float bounds can be infinite to indicate an unbounded leaf.
+        However, sampling is currently not supported for unbounded leaves.
+
+    `low`: Lower bound, inclusive.
+    `high`: Upper bound. Inclusive for integer type, exclusive for float type.
+
+    `treedef`: Jax PyTree treedef for an element of the space. Can be used to unflatten elements.
+    `shapes_dtypes`: PyTree of `jax.ShapeDtypeStruct`, storing the shape and dtype of each leaf.
+    """
 
     def __init__(self, low: TSpaceElement, high: TSpaceElement) -> None:
-        """inclusive, inclusive for integer dtype; inclusive, exclusive for float dtype;"""
-
         chex.assert_trees_all_equal_structs(low, high,
-            custom_message="'low' and 'high' must have the same treedef (structure).")
+            custom_message="`low` and `high` must have the same treedef (structure).")
 
         self.low = low
         self.high = high
@@ -35,7 +48,8 @@ class Space(Generic[TSpaceElement]):
 
     #@functools.partial(jax.jit, static_argnames=('self'))
     def sample(self, key: jax.Array) -> TSpaceElement:
-        """Samples a single element from the space, according to a uniform distribution."""
+        """Samples a single element from the space, according to a uniform distribution.
+        Does not currently support unbounded leaves (low or high are infinity)"""
 
         keys = jax.random.split(key, num=self.treedef.num_leaves)
         keys_tree = jax.tree.unflatten(self.treedef, keys)

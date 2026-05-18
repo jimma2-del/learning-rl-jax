@@ -2,6 +2,8 @@ from typing import Any, Generic
 from typing_extensions import TypeVar
 from abc import ABC, abstractmethod
 
+import chex
+
 import functools
 
 import jax
@@ -11,14 +13,13 @@ import jax.numpy as jnp
 
 from .base import Environment, Space
 
-TEnv = TypeVar("TEnv", bound=Environment)
 TEnvState = TypeVar("TEnvState")
 TEnvObs = TypeVar("TEnvObs")
 TEnvAction = TypeVar("TEnvAction")
 TRenderFrame = TypeVar("TRenderFrame", default=None)
 
 class Wrapper(
-    Generic[TEnv, TEnvState, TEnvObs, TEnvAction, TRenderFrame],
+    Generic[TEnvState, TEnvObs, TEnvAction, TRenderFrame],
     Environment[TEnvState, TEnvObs, TEnvAction, TRenderFrame]
 ):
 
@@ -26,7 +27,7 @@ class Wrapper(
         self.env = env
 
     @property
-    def unwrapped(self) -> TEnv:
+    def unwrapped(self) -> Environment: # there is no way to type this properly
         """Get the underlying Environment, without any wrappers."""
 
         if isinstance(self.env, Wrapper):
@@ -34,7 +35,7 @@ class Wrapper(
 
         return self.env
 
-    # fowards all Environment methods/properties to the internal env by default
+    # forwards all Environment methods/properties to the internal env by default
 
     def reset(self, key: jax.Array) -> tuple[TEnvState, dict[Any, Any]]:
         return self.env.reset(key)
@@ -61,3 +62,42 @@ class Wrapper(
     def name(self) -> str:
         """Environment name."""
         return self.env.name
+
+class ObsRangeNormalizeWrapper(
+    Generic[TEnvState, TEnvObs, TEnvAction, TRenderFrame],
+    Wrapper[TEnvState, TEnvObs, TEnvAction, TRenderFrame]
+):
+    """Normalizes the observations using the range (low, high) of the observation space.
+
+    Centers observations around the midpoint of the observation space.
+    Approximates standard deviation using half-range.
+
+    IMPORTANT: Does not properly handle unbounded leaves (infinite low/high).
+
+    """
+
+    def __init__(self, 
+        env: Environment[TEnvState, TEnvObs, TEnvAction, TRenderFrame],
+        ranges: Space[TEnvObs] | None = None
+    ):
+        super().__init__(env)
+
+        self.ranges: Space[TEnvObs] = ranges if ranges is not None else super().observation_space
+        chex.assert_trees_all_equal_structs(env.observation_space.low, self.ranges.low,
+            "`ranges` treedef does not match with `env.observation space`.")
+
+    def get_obs(self, key: jax.Array, state: TEnvState) -> jax.Array:
+        obs = super().get_obs(key, state)
+
+        mean = jax.tree.map(lambda high, low: (high+low) / 2, self.ranges.high, self.ranges.low)
+        std = jax.tree.map(lambda high, low: (high-low) / 2, self.ranges.high, self.ranges.low)
+            # simple half-range approximation
+
+        return jax.tree.map(lambda obs, mean, std: (obs-mean) / std, obs, mean, std)
+
+    @property
+    def observation_space(self) -> Space[TEnvObs]:
+        return Space(
+            low = jax.tree.map(lambda leaf: jnp.full_like(leaf, -2), self.ranges.low), 
+            high = jax.tree.map(lambda leaf: jnp.full_like(leaf, 2), self.ranges.high)
+        )

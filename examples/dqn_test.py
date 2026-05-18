@@ -7,11 +7,11 @@ from flax import nnx
 from optax import schedules
 
 from gymnax.environments import Acrobot, CartPole
-from core.envs.gymnax_wrapper import GymnaxWrapper, Space
+from core.envs.gymnax_wrapper import GymnaxWrapper
 
 from core.envs.flappy_bird import FlappyBirdEnv, State as FlappyBirdState
 
-from core.envs.wrappers import Wrapper
+from core.envs.wrappers import ObsRangeNormalizeWrapper
 
 from core.algos.dqn import DQN, DQNHyperparameters
 from core.utils import LinearlyInterpolatedTable
@@ -29,13 +29,7 @@ rngs = nnx.Rngs(0, params=1, env=2, actions=3, transitions=4)
 DT = 0.1
 env = FlappyBirdEnv(DT)
 
-class FlappyBirdNormalizeWrapper(Wrapper[FlappyBirdEnv, FlappyBirdState, jax.Array, ArrayLike, jax.Array]):
-    def get_obs(self, key, state):
-        obs = super().get_obs(key, state)
-
-        return jnp.array(((obs[0] - 450) / 2100 * 2 * 2, obs[1] / 625 * 2))
-
-env = FlappyBirdNormalizeWrapper(env)
+env = ObsRangeNormalizeWrapper(env)
 
 ### TRAIN ###
 

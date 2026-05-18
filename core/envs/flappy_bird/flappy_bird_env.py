@@ -155,7 +155,7 @@ class FlappyBirdEnv(Environment[State, Array, ArrayLike, Array]):
         pipe_dx = pipe_pos_x - self.settings.bird_pos_x
         pipe_dy = pipe_pos_y - state.bird_pos_y
 
-        return jnp.array((state.bird_vel_y, pipe_dy))
+        return jnp.array((state.bird_vel_y, pipe_dy, pipe_dx))
 
     # @functools.partial(jax.jit, static_argnames=('self'))
     def render(self, state: State, Action: ArrayLike) -> Array:
@@ -196,7 +196,7 @@ class FlappyBirdEnv(Environment[State, Array, ArrayLike, Array]):
     def observation_space(self) -> Space[Array]:
         """Observation space of the environment."""
         # TODO: values should depend on self.settings
-        return Space(low=jnp.array((-600.0, -625.0)), high=jnp.array((1500.0,  625.0)))
+        return Space(low=jnp.array((-600.0, -625.0, -100)), high=jnp.array((1500.0,  625.0, 255)))
 
     @property
     def action_space(self) -> Space[ArrayLike]:

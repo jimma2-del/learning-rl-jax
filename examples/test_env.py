@@ -51,6 +51,11 @@ while True:
         if reward != 0:
             print(cur_return)
 
+    else:
+        rng_key, reset_key = jax.random.split(rng_key, 2)
+        state, info = env.reset(reset_key)
+        terminated = False
+
     image_array = np.array(env.render(state, 0))
     pygame_surface = pygame.surfarray.make_surface(image_array.swapaxes(0,1))
     screen.blit(pygame_surface, (0,0))
