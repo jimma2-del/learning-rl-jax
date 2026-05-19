@@ -69,7 +69,7 @@ class ReplayBuffer(Generic[TReplayBufferItem]):
         )
 
     #@functools.partial(jax.jit, static_argnames=('self', 'num_samples'))
-    def sample(self, key: jax.Array, state: ReplayBufferState, num_samples: int) -> TReplayBufferItem:
+    def sample(self, key: chex.PRNGKey, state: ReplayBufferState, num_samples: int) -> TReplayBufferItem:
         indices = jax.random.randint(key, (num_samples, ), minval=0, maxval=state.filled_len)
         return jax.tree.map(lambda x: x[indices], state.data)
 

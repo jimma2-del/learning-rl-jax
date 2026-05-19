@@ -6,6 +6,7 @@ from jax import flatten_util
 
 from jax.typing import ArrayLike
 from chex import dataclass
+import chex
 from typing import TypeVar, Generic
 
 import functools
@@ -113,7 +114,7 @@ class TabularQ(Generic[TEnvState, TEnvObs]):
             in_axes=[0, None])(q_table_vals, obs)
         return jnp.argmax(q_vals)
 
-    def get_action(self, key: jax.Array, q_table_vals: jax.Array, 
+    def get_action(self, key: chex.PRNGKey, q_table_vals: jax.Array, 
         epsilon: ArrayLike, obs: TEnvObs) -> ArrayLike:
 
         do_greedy_key, random_action_key = jax.random.split(key)
@@ -129,7 +130,7 @@ class TabularQ(Generic[TEnvState, TEnvObs]):
             self.num_actions, axis=0)
 
     def train(self,
-        key: jax.Array,
+        key: chex.PRNGKey,
         steps: int,
 
         init_q_vals: ArrayLike | None = None,
@@ -172,7 +173,7 @@ class TabularQ(Generic[TEnvState, TEnvObs]):
 
     @functools.partial(jax.jit, static_argnames=('self', 'steps'))
     def train_epoch(
-        self, key: jax.Array, steps: int, epsilon_anneal_rate: float,
+        self, key: chex.PRNGKey, steps: int, epsilon_anneal_rate: float,
         training_state: TrainingState, replay_buffer_state: ReplayBufferState
     ) -> tuple[TrainingState, ReplayBufferState]:
         """Train for one 'epoch' -- one fully JIT compiled segment."""

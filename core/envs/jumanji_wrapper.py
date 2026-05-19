@@ -15,8 +15,7 @@ import chex
 
 import jax.numpy as jnp
 
-from gymnax.environments.environment import Environment as GymnaxEnv
-import gymnax.environments.spaces as GymnaxSpaces
+from jumanji.env import Environment as JumanjiEnv
 
 from core.envs.base import Environment, Space
 
@@ -47,12 +46,11 @@ def space_from_gymnax_space(gymnax_space: GymnaxSpaces.Space) -> Space:
 TEnvState = TypeVar("TEnvState")
 TEnvParams = TypeVar("TEnvParams")
 
-class GymnaxWrapper(Environment[TEnvState, ArrayLike, ArrayLike], Generic[TEnvState, TEnvParams]):
+class JumanjiWrapper(Environment[TEnvState, ArrayLike, ArrayLike], Generic[TEnvState, TEnvParams]):
     """Wrapper for Gymnax environments."""
 
-    def __init__(self, gymnax_env: GymnaxEnv[TEnvState, TEnvParams], gymnax_params: TEnvParams | None = None):
-        self.gymnax_env = gymnax_env
-        self.gymnax_params = gymnax_params if gymnax_params is not None else gymnax_env.default_params
+    def __init__(self, jumanji_env: JumanjiEnv[TEnvState]):
+        self.jumanji_env = jumanji_env
 
         self._observation_space = space_from_gymnax_space(self.gymnax_env.observation_space(self.gymnax_params))
         self._action_space = space_from_gymnax_space(self.gymnax_env.action_space(self.gymnax_params))

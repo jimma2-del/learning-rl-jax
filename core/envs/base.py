@@ -47,14 +47,14 @@ class Space(Generic[TSpaceElement]):
         ), low, high)
 
     #@functools.partial(jax.jit, static_argnames=('self'))
-    def sample(self, key: jax.Array) -> TSpaceElement:
+    def sample(self, key: chex.PRNGKey) -> TSpaceElement:
         """Samples a single element from the space, according to a uniform distribution.
         Does not currently support unbounded leaves (low or high are infinity)"""
 
         keys = jax.random.split(key, num=self.treedef.num_leaves)
         keys_tree = jax.tree.unflatten(self.treedef, keys)
 
-        def sample_leaf(cur_low, cur_high, shape_dtype: jax.ShapeDtypeStruct, key: jax.Array):
+        def sample_leaf(cur_low, cur_high, shape_dtype: jax.ShapeDtypeStruct, key: chex.PRNGKey):
             if jnp.issubdtype(shape_dtype.dtype, jnp.integer):
                 return jax.random.randint(key, shape=shape_dtype.shape, dtype=shape_dtype.dtype,
                     minval=cur_low, maxval=cur_high + 1)
@@ -94,18 +94,18 @@ class Environment(ABC, Generic[TEnvState, TEnvObs, TEnvAction, TRenderFrame]):
     """Abstract base class for environments."""
 
     @abstractmethod
-    def reset(self, key: jax.Array) -> tuple[TEnvState, dict[Any, Any]]:
+    def reset(self, key: chex.PRNGKey) -> tuple[TEnvState, dict[Any, Any]]:
         """Performs resetting of environment.
         Returns: state, info"""
 
     @abstractmethod
-    def step(self, key: jax.Array, state: TEnvState, action: TEnvAction) \
+    def step(self, key: chex.PRNGKey, state: TEnvState, action: TEnvAction) \
         -> tuple[TEnvState, jax.Array, jax.Array, jax.Array, dict[Any, Any]]:
         """Performs step transitions in the environment.
         Returns: state, reward, terminated, truncated, info"""
 
     @abstractmethod
-    def get_obs(self, key: jax.Array, state: TEnvState) -> TEnvObs:
+    def get_obs(self, key: chex.PRNGKey, state: TEnvState) -> TEnvObs:
         """Applies observation function to state."""
 
     def render(self, state: TEnvState, action: ArrayLike) -> TRenderFrame:

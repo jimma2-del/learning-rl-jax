@@ -1,5 +1,6 @@
 import jax
 from jax.typing import ArrayLike
+import chex
 
 import jax.numpy as jnp
 
@@ -23,7 +24,7 @@ env = FlappyBirdEnv(DT)
 
 class FlappyBirdWrapper(Wrapper[State, jax.Array, ArrayLike, jax.Array]):
 
-    def get_obs(self, key: jax.Array, state: State) -> jax.Array:
+    def get_obs(self, key: chex.PRNGKey, state: State) -> jax.Array:
         obs = super().get_obs(key, state)
         return obs[:2]
 

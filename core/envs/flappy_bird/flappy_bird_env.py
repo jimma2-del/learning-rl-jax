@@ -2,6 +2,7 @@ from chex import dataclass
 from jax.typing import ArrayLike
 from jax import Array
 from typing import Any
+import chex
 
 from core.envs.base import Environment, Space
 
@@ -60,7 +61,7 @@ class FlappyBirdEnv(Environment[State, Array, ArrayLike, Array]):
         self.render_settings = render_settings
 
     # @functools.partial(jax.jit, static_argnames=('self'))
-    def reset(self, key: Array) -> tuple[State, dict[Any, Any]]:
+    def reset(self, key: chex.PRNGKey) -> tuple[State, dict[Any, Any]]:
         pipe1_key, pipe2_key = jax.random.split(key, 2)
 
         return State(
@@ -75,7 +76,7 @@ class FlappyBirdEnv(Environment[State, Array, ArrayLike, Array]):
         ), {}
 
     # @functools.partial(jax.jit, static_argnames=('self'))
-    def step(self, key: Array, state: State, action: ArrayLike) \
+    def step(self, key: chex.PRNGKey, state: State, action: ArrayLike) \
         -> tuple[State, Array, Array, Array, dict[Any, Any]]:
 
         # update velocities & positions
@@ -146,7 +147,7 @@ class FlappyBirdEnv(Environment[State, Array, ArrayLike, Array]):
         )
 
     # @functools.partial(jax.jit, static_argnames=('self'))
-    def get_obs(self, key: Array, state: State) -> Array:
+    def get_obs(self, key: chex.PRNGKey, state: State) -> Array:
         use_pipe2 = state.pipe1_pos_x + self.settings.pipe_width/2 + self.settings.bird_size < self.settings.bird_pos_x
 
         pipe_pos_x = jnp.where(use_pipe2, state.pipe2_pos_x, state.pipe1_pos_x)

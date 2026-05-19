@@ -14,7 +14,8 @@ dependencies = [
   "typing_extensions==4.15.0",
   "flax==0.10.7",
   "gymnax==0.0.9",
-  "chex==0.1.90"
+  "chex==0.1.90",
+  "jumanji==1.1.1"
 ]
 authors = [
   {name = "Jim Ma", email = "jim.majk350@gmail.com"}

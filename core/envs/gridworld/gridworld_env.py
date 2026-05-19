@@ -2,6 +2,7 @@ from chex import dataclass
 from jax.typing import ArrayLike
 from jax import Array
 from typing import Any
+import chex
 
 from os import path
 
@@ -81,13 +82,13 @@ class GridworldEnv(Environment[State, Array, ArrayLike, str]):
         self.tile_is_end = jnp.asarray(tile_is_end) # whether to end the episode upon moving to the tile
         self.spawnpoints = jnp.asarray(spawnpoints) # valid starting positions for reset()
 
-    def reset(self, key: Array) -> tuple[State, dict[Any, Any]]:
+    def reset(self, key: chex.PRNGKey) -> tuple[State, dict[Any, Any]]:
         pos = jax.random.choice(key, self.spawnpoints)
         # self.pos = jnp.asarray((0, 0), dtype="int32")
 
         return State(pos=pos, steps=0), { "goal": self.goal_pos }
 
-    def step(self, key: Array, state: State, action: ArrayLike) \
+    def step(self, key: chex.PRNGKey, state: State, action: ArrayLike) \
         -> tuple[State, Array, Array, Array, dict[Any, Any]]:
         n_pos = self.update_pos(state.pos, action)
         n_steps = state.steps + 1
@@ -107,7 +108,7 @@ class GridworldEnv(Environment[State, Array, ArrayLike, str]):
 
         return n_pos
 
-    def get_obs(self, key: jax.Array, state: State) -> Array:
+    def get_obs(self, key: chex.PRNGKey, state: State) -> Array:
         return state.pos
 
     def render(self, state: State, Action: ArrayLike) -> Array:

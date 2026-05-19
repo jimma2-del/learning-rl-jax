@@ -37,14 +37,14 @@ class Wrapper(
 
     # forwards all Environment methods/properties to the internal env by default
 
-    def reset(self, key: jax.Array) -> tuple[TEnvState, dict[Any, Any]]:
+    def reset(self, key: chex.PRNGKey) -> tuple[TEnvState, dict[Any, Any]]:
         return self.env.reset(key)
 
-    def step(self, key: jax.Array, state: TEnvState, action: TEnvAction) \
+    def step(self, key: chex.PRNGKey, state: TEnvState, action: TEnvAction) \
         -> tuple[TEnvState, jax.Array, jax.Array, jax.Array, dict[Any, Any]]:
         return self.env.step(key, state, action)
 
-    def get_obs(self, key: jax.Array, state: TEnvState) -> TEnvObs:
+    def get_obs(self, key: chex.PRNGKey, state: TEnvState) -> TEnvObs:
         return self.env.get_obs(key, state)
 
     def render(self, state: TEnvState, action: ArrayLike) -> TRenderFrame:
@@ -88,7 +88,7 @@ class ObsRangeNormalizeWrapper(
         self.obs_centers = jax.tree.map(lambda high, low: (high+low) / 2, 
             self.normalize_obs_space.high, self.normalize_obs_space.low)
 
-    def get_obs(self, key: jax.Array, state: TEnvState) -> jax.Array:
+    def get_obs(self, key: chex.PRNGKey, state: TEnvState) -> jax.Array:
         obs = super().get_obs(key, state)
 
         normalized = jax.tree.map(lambda obs, center, range: (obs-center) / range * 2, 
