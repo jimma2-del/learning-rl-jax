@@ -4,6 +4,8 @@ import numpy as np
 
 from core.envs.flappy_bird import FlappyBirdEnv, State
 
+from core.envs.wrappers import ObsRangeNormalizeWrapper
+
 import pygame, sys
 pygame.init()
 
@@ -22,6 +24,8 @@ terminated = False
 
 pygame.display.set_caption("Flappy Bird")
 screen = pygame.display.set_mode((env.settings.window_size[1], env.settings.window_size[0]))
+
+env = ObsRangeNormalizeWrapper(env)
 
 prev_flap_pressed = False
 

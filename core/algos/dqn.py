@@ -37,8 +37,6 @@ class DQNHyperparameters:
     train_freq: int = 4 # does around 1 gradient step per train_freq env steps
         # NOTE: if n_envs > train_freq, we take 1 step in each env, followed by multiple gradient steps
         # NOTE: will round up or down if not divisible evenly
-    
-    # TODO: train_freq is not implemented properly yet; need to add multiple gradient steps
 
     target_update_interval: int = 1000
 
@@ -96,10 +94,13 @@ class DQN(Generic[TEnvState, TEnvObs]):
         q_vals = q_net(obs, rngs=rngs)
         return jnp.argmax(q_vals)
 
+    def get_random_action(self, rngs: nnx.Rngs) -> ArrayLike:
+        return jax.random.randint(rngs.actions(), shape=(), minval=0, maxval=self.num_actions)
+
     def get_action(self, rngs: nnx.Rngs, q_net: nnx.module, 
         epsilon: ArrayLike, obs: TEnvObs) -> ArrayLike:
 
-        random_action = jax.random.randint(rngs.actions(), shape=(), minval=0, maxval=self.num_actions)
+        random_action = self.get_random_action(rngs)
         greedy_action = self.get_greedy_action(rngs, q_net, obs)
 
         return jnp.where(jax.random.uniform(rngs.actions()) < epsilon, 
@@ -119,6 +120,7 @@ class DQN(Generic[TEnvState, TEnvObs]):
         steps: int,
         q_net: nnx.Module = None,
         log_interval_steps: int = 100_000,
+        prefill_steps: int = 10_000
     ) -> jax.Array:
         """Train the q-network. Returns the trained q-network."""
 
@@ -128,9 +130,10 @@ class DQN(Generic[TEnvState, TEnvObs]):
 
         optimizer = nnx.Optimizer(q_net, optax.inject_hyperparams(optax.adamw)(
             learning_rate=resolve_scheduleable(self.hyperparameters.learning_rate, 0)))
+        #optimizer = nnx.Optimizer(q_net, optax.adamw(learning_rate=2.5e-4))
 
         ## initialize ##
-        replay_buffer_state = self.replay_buffer.init()
+        replay_buffer_state = self.prefill_replay_buffer(rngs, prefill_steps)
 
         reset_keys = jax.random.split(rngs.env(), self.hyperparameters.n_envs)
         env_states, info = jax.vmap(self.env.reset)(reset_keys)
@@ -141,7 +144,7 @@ class DQN(Generic[TEnvState, TEnvObs]):
 
             policy_q_net = q_net,
             target_q_net = nnx.clone(q_net),
-            optimizer=optimizer
+            optimizer = optimizer
         )
 
         while training_state.steps < steps:
@@ -151,6 +154,42 @@ class DQN(Generic[TEnvState, TEnvObs]):
             print(f"Completed steps={training_state.steps}")
 
         return training_state.policy_q_net
+    
+    @functools.partial(nnx.jit, static_argnames=('self', 'prefill_steps'))
+    def prefill_replay_buffer(self, rngs: nnx.Rngs, prefill_steps: int) -> ReplayBufferState:
+       
+        def env_step(env_state: TEnvState, rngs: nnx.Rngs) -> tuple[TEnvState, DQN.Transition]:
+            cur_obs = self.env.get_obs(rngs.env(), env_state)
+
+            action = self.get_random_action(rngs)
+
+            new_state, reward, terminated, truncated, info = self.env.step(rngs.env(), env_state, action)
+            new_obs = self.env.get_obs(rngs.env(), new_state)
+
+            # reset env if terminated/truncated, don't otherwise
+            next_state: TEnvState = nnx.cond(jnp.logical_or(terminated, truncated), 
+                lambda rngs: self.env.reset(rngs.env())[0], lambda rngs: new_state, rngs)
+
+            return (
+                next_state,
+                self.Transition(cur_obs=cur_obs, action=action, reward=reward, new_obs=new_obs, terminated=terminated)
+            )
+
+        def batched_env_step(env_states: TEnvState, rngs: nnx.Rngs) -> tuple[TEnvState, DQN.Transition]:
+            return nnx.vmap(env_step)(env_states, rngs.fork(split=self.hyperparameters.n_envs))
+        
+        reset_keys = jax.random.split(rngs.env(), self.hyperparameters.n_envs)
+        env_states, info = jax.vmap(self.env.reset)(reset_keys)
+
+        env_states, transitions = nnx.scan(batched_env_step)(env_states, 
+            rngs.fork(split = math.ceil(prefill_steps / self.hyperparameters.n_envs)))
+
+        replay_buffer_state = self.replay_buffer.init()
+
+        transitions: DQN.Transition = jax.tree_util.tree_map(lambda x: x.reshape(-1, *x.shape[2:]), 
+            transitions) # flatten to remove axis 0
+
+        return self.replay_buffer.insert(replay_buffer_state, transitions)
 
     @functools.partial(nnx.jit, static_argnames=('self', 'steps'))
     def train_epoch(
@@ -227,7 +266,9 @@ class DQN(Generic[TEnvState, TEnvObs]):
 
                 def loss_func(policy_q_net: nnx.Module, rngs: nnx.Rngs):
                     pred_qs_all_actions = policy_q_net(sampled_transitions.cur_obs, rngs=rngs)
-                    pred_qs = jnp.take_along_axis(pred_qs_all_actions, sampled_transitions.action[None, :], axis=1)
+                        # q-net returns a q-value for every action
+                    pred_qs = pred_qs_all_actions[jnp.arange(self.hyperparameters.batch_size), sampled_transitions.action]
+                        # take only the q-value corresponding to the chosen action
 
                     # simple MSE loss
                     return jnp.mean(jnp.power(target_qs - pred_qs, 2))
@@ -238,9 +279,8 @@ class DQN(Generic[TEnvState, TEnvObs]):
 
                 return (policy_q_net, optimizer), loss
 
-            carry, losses = nnx.scan(grad_update)((policy_q_net, optimizer), 
+            (policy_q_net, optimizer), losses = nnx.scan(grad_update)((policy_q_net, optimizer), 
                 rngs.fork(split=grad_steps_per_iter))
-            policy_q_net, optimizer = carry
 
             # update target_q_vals if enough steps have passed
             update_target_net = steps % self.hyperparameters.target_update_interval < total_steps_per_iter
@@ -262,9 +302,7 @@ class DQN(Generic[TEnvState, TEnvObs]):
 
         iterations = math.ceil(steps / total_steps_per_iter)
 
-        carry, _ = nnx.scan(train_iteration)((training_state, replay_buffer_state), 
+        (training_state, replay_buffer_state), _ = nnx.scan(train_iteration)((training_state, replay_buffer_state), 
             rngs.fork(split=iterations))
-
-        training_state, replay_buffer_state = carry
 
         return training_state, replay_buffer_state

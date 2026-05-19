@@ -67,37 +67,41 @@ class ObsRangeNormalizeWrapper(
     Generic[TEnvState, TEnvObs, TEnvAction, TRenderFrame],
     Wrapper[TEnvState, TEnvObs, TEnvAction, TRenderFrame]
 ):
-    """Normalizes the observations using the range (low, high) of the observation space.
-
-    Centers observations around the midpoint of the observation space.
-    Approximates standard deviation using half-range.
-
-    IMPORTANT: Does not properly handle unbounded leaves (infinite low/high).
-
+    """Normalizes observations to [-1, 1) using the range (low, high) of the observation space.
+    Ignores unbounded (infinite low/high) leaves, keeping the values unaltered.
     """
 
     def __init__(self, 
         env: Environment[TEnvState, TEnvObs, TEnvAction, TRenderFrame],
-        ranges: Space[TEnvObs] | None = None
+        normalize_obs_space: Space[TEnvObs] | None = None
     ):
         super().__init__(env)
 
-        self.ranges: Space[TEnvObs] = ranges if ranges is not None else super().observation_space
-        chex.assert_trees_all_equal_structs(env.observation_space.low, self.ranges.low,
+        self.normalize_obs_space: Space[TEnvObs] = normalize_obs_space \
+            if normalize_obs_space is not None else super().observation_space
+
+        chex.assert_trees_all_equal_structs(env.observation_space.low, self.normalize_obs_space.low,
             "`ranges` treedef does not match with `env.observation space`.")
+
+        self.obs_ranges = jax.tree.map(lambda high, low: high - low, 
+            self.normalize_obs_space.high, self.normalize_obs_space.low)
+        self.obs_centers = jax.tree.map(lambda high, low: (high+low) / 2, 
+            self.normalize_obs_space.high, self.normalize_obs_space.low)
 
     def get_obs(self, key: jax.Array, state: TEnvState) -> jax.Array:
         obs = super().get_obs(key, state)
 
-        mean = jax.tree.map(lambda high, low: (high+low) / 2, self.ranges.high, self.ranges.low)
-        std = jax.tree.map(lambda high, low: (high-low) / 2, self.ranges.high, self.ranges.low)
-            # simple half-range approximation
+        normalized = jax.tree.map(lambda obs, center, range: (obs-center) / range * 2, 
+            obs, self.obs_centers, self.obs_ranges)
 
-        return jax.tree.map(lambda obs, mean, std: (obs-mean) / std, obs, mean, std)
+        return jax.tree.map(lambda normed, orig: jnp.where(jnp.isfinite(normed), normed, orig),
+            normalized, obs)
 
     @property
     def observation_space(self) -> Space[TEnvObs]:
         return Space(
-            low = jax.tree.map(lambda leaf: jnp.full_like(leaf, -2), self.ranges.low), 
-            high = jax.tree.map(lambda leaf: jnp.full_like(leaf, 2), self.ranges.high)
+            low = jax.tree.map(lambda leaf, range: jnp.where(jnp.isfinite(range), -jnp.ones_like(leaf), leaf),
+                self.normalize_obs_space.low, self.obs_ranges),
+            high = jax.tree.map(lambda leaf, range: jnp.where(jnp.isfinite(range), jnp.ones_like(leaf), leaf),
+                self.normalize_obs_space.high, self.obs_ranges)
         )

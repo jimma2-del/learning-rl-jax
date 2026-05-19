@@ -3,6 +3,8 @@ from jax.typing import ArrayLike
 
 import jax.numpy as jnp
 
+from optax import schedules
+
 from core.envs.flappy_bird import FlappyBirdEnv, State
 
 from core.envs.wrappers import Wrapper
@@ -47,6 +49,9 @@ q_table = LinearlyInterpolatedTable(
     step=(  50,    5 )
 ) # bird_vel_y, pipe_dy
 
+STEPS = 10_000_000
+LOG_INTERVAL_STEPS = 1_000_000
+
 hyperparameters = TabularQHyperparameters(
     discount_rate = 0.95,
     learning_rate = 0.01,
@@ -62,9 +67,6 @@ hyperparameters = TabularQHyperparameters(
 )
 
 algo = LinearlyInterpolatedTabularQ(env, q_table, hyperparameters)
-
-STEPS = 10_000_000
-LOG_INTERVAL_STEPS = 1_000_000
 
 key, train_key = jax.random.split(key, 2)
 q_vals = algo.train(train_key, STEPS, log_interval_steps=LOG_INTERVAL_STEPS)

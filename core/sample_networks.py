@@ -1,3 +1,5 @@
+import math
+
 from jax.typing import ArrayLike
 from typing import Any, Generic, TypeVar
 
@@ -14,7 +16,7 @@ class MLP(nnx.Module):
         input_dim: int,
         output_dim: int,
         hidden_dim: int = 256, 
-        num_hidden_layers: int = 2,
+        num_hidden_layers: int = 1,
         do_layer_norm: bool = True,
         activation_func = nnx.swish
     ):
@@ -68,7 +70,7 @@ class MLPFeatureExtractor(nnx.Module, Generic[TInputType]):
 
         self.flattened_len = jax.tree.reduce(
             lambda cum_len, shape_dtype: cum_len + (
-                1 if len(shape_dtype.shape) == 0 else sum(shape_dtype.shape)), 
+                1 if len(shape_dtype.shape) == 0 else math.prod(shape_dtype.shape)), 
             input_shapes_dtypes, 0
         )
 
