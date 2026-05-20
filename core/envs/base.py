@@ -36,15 +36,22 @@ class Space(Generic[TSpaceElement]):
         chex.assert_trees_all_equal_structs(low, high,
             custom_message="`low` and `high` must have the same treedef (structure).")
 
-        self.low = low
-        self.high = high
-
         self.treedef = jax.tree.structure(low)
 
         self.shapes_dtypes = jax.tree.map(lambda cur_low, cur_high: jax.ShapeDtypeStruct(
             dtype = jnp.result_type(cur_low, cur_high),
             shape = jnp.broadcast_shapes(cur_low.shape, cur_high.shape)
         ), low, high)
+
+        self.low = jax.tree.map(
+            lambda leaf, shape_dtype: jnp.broadcast_to(leaf, shape_dtype.shape).astype(shape_dtype.dtype),
+            low, self.shapes_dtypes
+        )
+
+        self.high = jax.tree.map(
+            lambda leaf, shape_dtype: jnp.broadcast_to(leaf, shape_dtype.shape).astype(shape_dtype.dtype),
+            high, self.shapes_dtypes
+        )
 
     #@functools.partial(jax.jit, static_argnames=('self'))
     def sample(self, key: chex.PRNGKey) -> TSpaceElement:

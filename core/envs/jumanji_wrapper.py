@@ -3,7 +3,7 @@ Utility for converting a gymnax Environment/Space into an Environment/Space foll
 NOTE: these "wrappers" are unrelated to the Wrapper type in wrappers.py, which take in an Environment from this repository.
 """
 
-from typing import Any, Generic
+from typing import Any, Generic, Callable
 from typing_extensions import TypeVar
 from abc import ABC, abstractmethod
 
@@ -16,78 +16,103 @@ import chex
 import jax.numpy as jnp
 
 from jumanji.env import Environment as JumanjiEnv
+from jumanji import specs
 
 from core.envs.base import Environment, Space
 
-def space_from_gymnax_space(gymnax_space: GymnaxSpaces.Space) -> Space:
-    if isinstance(gymnax_space, GymnaxSpaces.Discrete):
-        return Space(low=jnp.array(0, dtype=jnp.int32), high=jnp.array(gymnax_space.n - 1, dtype=jnp.int32))
-
-    if isinstance(gymnax_space, GymnaxSpaces.Box):
+def space_from_jumanji_spec(spec: specs.Spec) -> Space:
+    if isinstance(spec, specs.BoundedArray):
         return Space(
-            low=jnp.broadcast_to(gymnax_space.low, gymnax_space.shape).astype(jnp.float32), 
-            high=jnp.broadcast_to(gymnax_space.high, gymnax_space.shape).astype(dtype=jnp.float32)
+            low=jnp.broadcast_to(spec.minimum, spec.shape).astype(spec.dtype), 
+            high=jnp.broadcast_to(spec.maximum, spec.shape).astype(spec.dtype)
         )
 
-    if isinstance(gymnax_space, GymnaxSpaces.Dict):
-        sub_spaces = { key: space_from_gymnax_space(space) for key, space in gymnax_space.spaces.items() }
-        low = { key: space.low for key, space in sub_spaces.items() }
-        high = { key: space.high for key, space in sub_spaces.items() }
-        return Space(low=low, high=high)
+    elif isinstance(spec, specs.Array):
+        if jnp.issubdtype(spec.dtype, jnp.integer):
+            iinfo = jnp.iinfo(spec.dtype)
+            min_val = iinfo.min
+            max_val = iinfo.max
+        else:
+            min_val = -jnp.inf
+            max_val = +jnp.inf
 
-    if isinstance(gymnax_space, GymnaxSpaces.Tuple):
-        sub_spaces = [ space_from_gymnax_space(space) for space in gymnax_space.spaces ]
-        low = [ space.low for space in sub_spaces ]
-        high = [ space.high for space in sub_spaces ]
-        return Space(low=low, high=high)
+        return Space(
+            low=jnp.full(spec.shape, min_val, dtype=spec.dtype), 
+            high=jnp.full(spec.shape, max_val, dtype=spec.dtype)
+        )
 
-    raise ValueError("Unknown Gymnax Space type.")
+    else: # nested spec
+        sub_spaces = { f"{key}": space_from_jumanji_spec(value)
+            for key, value in vars(spec).items() if isinstance(value, specs.Spec) }
+
+        low = spec._constructor(**{ key: space.low for key, space in sub_spaces.items() })
+        high = spec._constructor(**{ key: space.high for key, space in sub_spaces.items() })
+
+        return Space(low=low, high=high)
 
 TEnvState = TypeVar("TEnvState")
-TEnvParams = TypeVar("TEnvParams")
+TActionSpec = TypeVar("TActionSpec", bound=specs.Array)
+TEnvObs = TypeVar("TEnvObs")
 
-class JumanjiWrapper(Environment[TEnvState, ArrayLike, ArrayLike], Generic[TEnvState, TEnvParams]):
-    """Wrapper for Gymnax environments."""
+class JumanjiWrapper(Environment[TEnvState, TEnvObs, jax.Array, Any], Generic[TEnvState, TActionSpec, TEnvObs]):
+    """Wrapper for Jumanji environments."""
 
-    def __init__(self, jumanji_env: JumanjiEnv[TEnvState]):
+    def __init__(self, 
+        jumanji_env: JumanjiEnv[TEnvState, TActionSpec, TEnvObs], 
+        get_obs_func: Callable[[TEnvState], TEnvObs] | None = None
+    ) -> None:
+        """
+        `get_obs_func`: Jumanji environments do not have a standard public-facing method to get an observation from a state.
+            However, many environments implement such a method internally, and we can guess the method name
+            (eg. `_state_to_observation`, `_observation_from_state`). However, if this fails, the user should provide their own
+            function to get an observation from a state.
+        """
+
         self.jumanji_env = jumanji_env
 
-        self._observation_space = space_from_gymnax_space(self.gymnax_env.observation_space(self.gymnax_params))
-        self._action_space = space_from_gymnax_space(self.gymnax_env.action_space(self.gymnax_params))
+        if get_obs_func is None:
+            OBS_METHOD_POSSIBLE_NAMES = ('_state_to_observation', '_observation_from_state')
+
+            for name in OBS_METHOD_POSSIBLE_NAMES:
+                method = getattr(jumanji_env, name, None)
+
+                if callable(method):
+                    get_obs_func = method
+                    break
+
+        assert get_obs_func is not None, "No get_obs function provided, and cannot locate this function in environment."
+
+        self._get_obs = get_obs_func
+
+        self._observation_space = space_from_jumanji_spec(jumanji_env.observation_spec)
+        self._action_space = space_from_jumanji_spec(jumanji_env.action_spec)
 
     def reset(self, key: chex.PRNGKey) -> tuple[TEnvState, dict[Any, Any]]:
-        obs, state = self.gymnax_env.reset_env(key, self.gymnax_params)
-        return state, {}
+        state, timestep = self.jumanji_env.reset(key)
+        return state, timestep.extras
 
-    def step(self, key: chex.PRNGKey, state: TEnvState, action: ArrayLike) \
+    def step(self, key: chex.PRNGKey, state: TEnvState, action: jax.Array) \
         -> tuple[TEnvState, jax.Array, jax.Array, jax.Array, dict[Any, Any]]:
-        obs, state, reward, terminated, info = self.gymnax_env.step_env(key, state, action, self.gymnax_params)
-        return state, reward, terminated, False, info
+        state, timestep = self.jumanji_env.step(state, action)
 
-    def get_obs(self, key: chex.PRNGKey, state: TEnvState) -> ArrayLike:
-        return self.gymnax_env.get_obs(state=state, params=self.gymnax_params, key=key)
+        terminated = jnp.all(timestep.discount == 0)
+        truncated = jnp.logical_and(timestep.last(), jnp.logical_not(terminated))
+
+        return state, timestep.reward, terminated, truncated, timestep.extras
+
+    def get_obs(self, key: chex.PRNGKey, state: TEnvState) -> TEnvObs:
+        return self._get_obs(state)
+
+    def render(self, state: TEnvState, action: ArrayLike) -> Any:
+        return self.jumanji_env.render(state)
 
     @property
-    def observation_space(self) -> Space[ArrayLike]:
+    def observation_space(self) -> Space[TEnvObs]:
         return self._observation_space
 
     @property
-    def action_space(self) -> Space[ArrayLike]:
+    def action_space(self) -> Space[jax.Array]:
         return self._action_space
 
 if __name__ == "__main__":
-    space = space_from_gymnax_space(GymnaxSpaces.Dict({
-        "foo": GymnaxSpaces.Box(-10, 12, (), jnp.float32),
-        "foo2": GymnaxSpaces.Box(-10, 12, (2,3), jnp.float32),
-        "bar": GymnaxSpaces.Discrete(5),
-        "foobar": GymnaxSpaces.Tuple((
-            GymnaxSpaces.Box(-10, 12, (), jnp.float32),
-            GymnaxSpaces.Discrete(5)
-        ))
-    }))
-
-    print("low", space.low)
-    print("high", space.high)
-
-    key = jax.random.key(0)
-    print("sample", space.sample(key))
+    ...

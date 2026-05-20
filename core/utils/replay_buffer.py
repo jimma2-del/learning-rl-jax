@@ -1,4 +1,5 @@
 from chex import dataclass
+import chex
 from jax.typing import ArrayLike
 from typing import Any, Generic, TypeVar
 
