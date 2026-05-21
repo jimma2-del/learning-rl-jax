@@ -15,6 +15,7 @@ import optax
 from core.algos.base import Scheduleable, resolve_scheduleable
 
 from core.envs.base import Environment
+from core.envs.wrappers import AutoResetWrapper
 from core.utils import ReplayBuffer, ReplayBufferState
 
 from core.sample_networks import MLP, MLPFeatureExtractor
@@ -51,7 +52,7 @@ class DQN(Generic[TEnvState, TEnvObs]):
         cur_obs: TEnvObs
         action: ArrayLike
         reward: ArrayLike
-        new_obs: TEnvObs
+        next_obs: TEnvObs
         terminated: ArrayLike
 
     @dataclass(frozen=True)
@@ -73,7 +74,7 @@ class DQN(Generic[TEnvState, TEnvObs]):
             and env.action_space.low == 0
         ), "Action space for Q-Learning must be discrete (jnp integer scalar, min=0)."
 
-        self.env = env
+        self.env = AutoResetWrapper(env)
         self.num_actions = env.action_space.high + 1
 
         self.hyperparameters = hyperparameters
@@ -83,7 +84,7 @@ class DQN(Generic[TEnvState, TEnvObs]):
             cur_obs = self.env.observation_space.shapes_dtypes,
             action = self.env.action_space.shapes_dtypes,
             reward = jax.ShapeDtypeStruct(shape=(), dtype=jnp.float32),
-            new_obs = self.env.observation_space.shapes_dtypes,
+            next_obs = self.env.observation_space.shapes_dtypes,
             terminated = jax.ShapeDtypeStruct(shape=(), dtype=jnp.bool)
         )
 
@@ -162,17 +163,13 @@ class DQN(Generic[TEnvState, TEnvObs]):
             cur_obs = self.env.get_obs(rngs.env(), env_state)
 
             action = self.get_random_action(rngs)
-
             new_state, reward, terminated, truncated, info = self.env.step(rngs.env(), env_state, action)
-            new_obs = self.env.get_obs(rngs.env(), new_state)
 
-            # reset env if terminated/truncated, don't otherwise
-            next_state: TEnvState = nnx.cond(jnp.logical_or(terminated, truncated), 
-                lambda rngs: self.env.reset(rngs.env())[0], lambda rngs: new_state, rngs)
+            next_obs = self.env.get_obs(rngs.env(), info[self.env.NEXT_STATE_INFO_KEY])
 
             return (
-                next_state,
-                self.Transition(cur_obs=cur_obs, action=action, reward=reward, new_obs=new_obs, terminated=terminated)
+                new_state,
+                self.Transition(cur_obs=cur_obs, action=action, reward=reward, next_obs=next_obs, terminated=terminated)
             )
 
         def batched_env_step(env_states: TEnvState, rngs: nnx.Rngs) -> tuple[TEnvState, DQN.Transition]:
@@ -220,16 +217,12 @@ class DQN(Generic[TEnvState, TEnvObs]):
                 action = self.get_action(rngs, policy_q_net, 
                     resolve_scheduleable(self.hyperparameters.epsilon, steps), cur_obs)
 
-                new_state, reward, terminated, truncated, info = self.env.step(rngs.env(), env_state, action)
-                new_obs = self.env.get_obs(rngs.env(), new_state)
-
-                # reset env if terminated/truncated, don't otherwise
-                next_state: TEnvState = nnx.cond(jnp.logical_or(terminated, truncated), 
-                    lambda rngs: self.env.reset(rngs.env())[0], lambda rngs: new_state, rngs)
+                next_state, reward, terminated, truncated, info = self.env.step(rngs.env(), env_state, action)
+                next_obs = self.env.get_obs(rngs.env(), info[self.env.NEXT_STATE_INFO_KEY])
 
                 return (
                     next_state,
-                    self.Transition(cur_obs=cur_obs, action=action, reward=reward, new_obs=new_obs, terminated=terminated)
+                    self.Transition(cur_obs=cur_obs, action=action, reward=reward, next_obs=next_obs, terminated=terminated)
                 )
 
             def batched_env_step(env_states: TEnvState, rngs: nnx.Rngs) -> tuple[TEnvState, DQN.Transition]:
@@ -257,7 +250,7 @@ class DQN(Generic[TEnvState, TEnvObs]):
                 sampled_transitions = self.replay_buffer.sample(rngs.transitions(), 
                     replay_buffer_state, self.hyperparameters.batch_size)
 
-                max_next_qs = jnp.max(target_q_net(sampled_transitions.new_obs, rngs=rngs), axis=1)
+                max_next_qs = jnp.max(target_q_net(sampled_transitions.next_obs, rngs=rngs), axis=1)
                 # zero out q_val if terminated
                 max_next_qs = max_next_qs * jnp.logical_not(sampled_transitions.terminated)
 

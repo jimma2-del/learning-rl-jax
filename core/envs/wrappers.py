@@ -1,4 +1,4 @@
-from typing import Any, Generic
+from typing import Any, Generic, Callable
 from typing_extensions import TypeVar
 from abc import ABC, abstractmethod
 
@@ -22,6 +22,7 @@ class Wrapper(
     Generic[TEnvState, TEnvObs, TEnvAction, TRenderFrame],
     Environment[TEnvState, TEnvObs, TEnvAction, TRenderFrame]
 ):
+    """Abstract base class for wrappers, which modify environment attributes in some way."""
 
     def __init__(self, env: Environment[TEnvState, TEnvObs, TEnvAction, TRenderFrame]):
         self.env = env
@@ -62,6 +63,9 @@ class Wrapper(
     def name(self) -> str:
         """Environment name."""
         return self.env.name
+
+    def __getattr__(self, name):
+        return getattr(self.env, name)
 
 class ObsRangeNormalizeWrapper(
     Generic[TEnvState, TEnvObs, TEnvAction, TRenderFrame],
@@ -105,3 +109,27 @@ class ObsRangeNormalizeWrapper(
             high = jax.tree.map(lambda leaf, range: jnp.where(jnp.isfinite(range), jnp.ones_like(leaf), leaf),
                 self.normalize_obs_space.high, self.obs_ranges)
         )
+
+class AutoResetWrapper(
+    Generic[TEnvState, TEnvObs, TEnvAction, TRenderFrame],
+    Wrapper[TEnvState, TEnvObs, TEnvAction, TRenderFrame]
+):
+    """Automatically resets environments if terminated or truncated, returning the resetted state as the next state
+    Places the original, unresetted terminal state into `info[NEXT_STATE_INFO_KEY]` (useful eg. for truncation)
+    Should usually be placed last, after most other wrappers.
+    """
+
+    NEXT_STATE_INFO_KEY = 'next_state'
+
+    def step(self, key: chex.PRNGKey, state: TEnvState, action: TEnvAction) \
+        -> tuple[TEnvState, jax.Array, jax.Array, jax.Array, dict[Any, Any]]:
+        step_key, reset_key = jax.random.split(key)
+
+        next_state, reward, terminated, truncated, info = super().step(step_key, state, action)
+        info[self.NEXT_STATE_INFO_KEY] = next_state
+
+        # reset env if terminated/truncated, don't otherwise
+        new_state = jax.lax.cond(jnp.logical_or(terminated, truncated), 
+            lambda: super().reset(reset_key)[0], lambda: next_state)
+
+        return new_state, reward, terminated, truncated, info

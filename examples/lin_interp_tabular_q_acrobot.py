@@ -23,7 +23,10 @@ env = GymnaxWrapper(gymnax_env)
 
 class AcrobotWrapper(Wrapper):
     def step(self, key, state, action):
-        obs, state, reward, terminated, info = super().step(key, state, action, self.gymnax_params)
+        step_key, obs_key = jax.random.split(key)
+
+        state, reward, terminated, truncated, info = super().step(step_key, state, action)
+        obs = super().get_obs(obs_key)
 
         height = (-obs[0] - (obs[0] * obs[2] - obs[1] * obs[3])) / 2 # [-1, 0.5]
         h_d = ((obs[1] * (1 + obs[2]) + obs[0] * obs[3]) * obs[4] 

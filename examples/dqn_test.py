@@ -20,7 +20,7 @@ from core.utils import LinearlyInterpolatedTable
 
 rngs = nnx.Rngs(0, params=1, env=2, actions=3, transitions=4)
 
-gymnax_env = MinBreakout()#CartPole()
+gymnax_env = CartPole()#MinBreakout()#CartPole()
 gymnax_env_params = gymnax_env.default_params
 
 #env = CustomGymnaxWrapper(gymnax_env, gymnax_env_params)
@@ -33,7 +33,7 @@ env = GymnaxWrapper(gymnax_env)
 
 ### TRAIN ###
 
-STEPS = 10_000_000
+STEPS = 1_000_000
 LOG_INTERVAL_STEPS = 100_000
 
 hyperparameters = DQNHyperparameters(
@@ -104,7 +104,7 @@ while True:
 
 cum_rewards = jnp.cumsum(jnp.array(rewards))
 vis = Visualizer(gymnax_env, gymnax_env_params, states, cum_rewards)
-vis.animate("./examples/dqn_minbreakout_anim.gif")
+vis.animate("./examples/dqn_cartpole_anim.gif")
 #vis.animate(save_fname=None, view=True)
 
 # import numpy as np
