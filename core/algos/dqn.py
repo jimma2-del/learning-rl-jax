@@ -158,32 +158,15 @@ class DQN(Generic[TEnvState, TEnvObs]):
     
     @functools.partial(nnx.jit, static_argnames=('self', 'prefill_steps'))
     def prefill_replay_buffer(self, rngs: nnx.Rngs, prefill_steps: int) -> ReplayBufferState:
+        transitions, env_states = rollout_auto_reset(rngs, 
+            self.env, 
+            lambda rngs, obs: self.get_random_action(rngs), 
+            math.ceil(prefill_steps / self.hyperparameters.n_envs), self.hyperparameters.n_envs
+        )
 
-        def batched_env_step(env_states: TEnvState, rngs: nnx.Rngs) -> tuple[TEnvState, DQN.Transition]:
-            cur_obs = self.vmap_auto_reset_env.get_obs(rngs.env(), env_states)
-
-            actions = nnx.vmap(self.get_random_action)(rngs.fork(split=self.hyperparameters.n_envs))
-
-            new_states, rewards, terminated, truncated, infos = self.vmap_auto_reset_env.step(
-                rngs.env(), env_states, actions)
-
-            next_obs = self.vmap_auto_reset_env.get_obs(rngs.env(), infos[self.vmap_auto_reset_env.NEXT_STATE_INFO_KEY])
-
-            return (
-                new_states,
-                self.Transition(obs=cur_obs, action=actions, reward=rewards, next_obs=next_obs, terminated=terminated)
-            )
-        
-        reset_keys = jax.random.split(rngs.env(), self.hyperparameters.n_envs)
-        env_states, info = jax.vmap(self.env.reset)(reset_keys)
-
-        env_states, transitions = nnx.scan(batched_env_step)(env_states, 
-            rngs.fork(split = math.ceil(prefill_steps / self.hyperparameters.n_envs)))
+        transitions = jax.vmap(lambda x: DQN.Transition())
 
         replay_buffer_state = self.replay_buffer.init()
-
-        transitions: DQN.Transition = jax.tree_util.tree_map(lambda x: x.reshape(-1, *x.shape[2:]), 
-            transitions) # flatten to remove axis 0
 
         return self.replay_buffer.insert(replay_buffer_state, transitions)
 

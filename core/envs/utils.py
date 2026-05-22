@@ -32,8 +32,18 @@ class Transition(Generic[TEnvState, TEnvObs, TEnvAction]):
 def rollout_auto_reset(rngs: nnx.Rngs, 
     env: Environment[TEnvState, TEnvObs, TEnvAction, TRenderFrame], 
     policy: Callable[[nnx.Rngs, TEnvObs], TEnvAction], 
-    iter: int, n_envs: int
+    iter: int, n_envs: int,
+    initial_env_states: TEnvState | None = None
 ) -> Transition[TEnvState, TEnvObs, TEnvAction]:
+    """Collect a rollout of `Transition` samples.
+
+    Runs `n_envs` environments in parallel for `iter` iterations,
+        for a total of `iter * n_envs` transitions.
+    Samples actions according to `policy`.
+    Initializes initial environment states if none given.
+
+    Returns: transitions, final environment states
+    """
 
     env = VmapAutoResetWrapper(env)
 
@@ -50,8 +60,11 @@ def rollout_auto_reset(rngs: nnx.Rngs,
                 terminated=terminated, truncated=truncated, info=infos
             )
         )
-    
-    env_states, info = env.reset(rngs.env(), num=n_envs)
-    env_states, transitions = nnx.scan(batched_env_step)(env_states, rngs.fork(split=iter))
 
-    return jax.tree.map(lambda x: x.reshape(-1, *x.shape[2:]), transitions) # flatten to remove axis 0
+    if initial_env_states is None:
+        initial_env_states, info = env.reset(rngs.env(), num=n_envs)
+
+    env_states, transitions = nnx.scan(batched_env_step)(initial_env_states, rngs.fork(split=iter))
+    transitions = jax.tree.map(lambda x: x.reshape(-1, *x.shape[2:]), transitions) # flatten to remove axis 0
+
+    return transitions, env_states
