@@ -1,5 +1,3 @@
-"""Abstract base class for environments."""
-
 from typing import Any, Generic
 from typing_extensions import TypeVar
 from abc import ABC, abstractmethod
@@ -118,6 +116,7 @@ class Environment(ABC, Generic[TEnvState, TEnvObs, TEnvAction, TRenderFrame]):
     def render(self, state: TEnvState, action: ArrayLike) -> TRenderFrame:
         """Compute a render frame from the state-action pair.
         Intended for human interpretation (visualization, debugging); should not be used as a policy input.
+        Implementations may or may not be jittable.
         Unimplemented by default, returning None."""
         return None
 

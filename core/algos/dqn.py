@@ -15,7 +15,7 @@ import optax
 from core.algos.base import Scheduleable, resolve_scheduleable
 
 from core.envs.base import Environment
-from core.envs.wrappers import AutoResetWrapper
+from core.envs.utils import rollout_auto_reset
 from core.utils import ReplayBuffer, ReplayBufferState
 
 from core.sample_networks import MLP, MLPFeatureExtractor
@@ -49,7 +49,7 @@ class DQN(Generic[TEnvState, TEnvObs]):
 
     @dataclass(frozen=True)
     class Transition:
-        cur_obs: TEnvObs
+        obs: TEnvObs
         action: ArrayLike
         reward: ArrayLike
         next_obs: TEnvObs
@@ -74,14 +74,14 @@ class DQN(Generic[TEnvState, TEnvObs]):
             and env.action_space.low == 0
         ), "Action space for Q-Learning must be discrete (jnp integer scalar, min=0)."
 
-        self.env = AutoResetWrapper(env)
+        self.env = env
         self.num_actions = env.action_space.high + 1
 
         self.hyperparameters = hyperparameters
 
         # make replay buffer
         self.transition_shapes_dtypes = DQN.Transition(
-            cur_obs = self.env.observation_space.shapes_dtypes,
+            obs = self.env.observation_space.shapes_dtypes,
             action = self.env.action_space.shapes_dtypes,
             reward = jax.ShapeDtypeStruct(shape=(), dtype=jnp.float32),
             next_obs = self.env.observation_space.shapes_dtypes,
@@ -158,22 +158,21 @@ class DQN(Generic[TEnvState, TEnvObs]):
     
     @functools.partial(nnx.jit, static_argnames=('self', 'prefill_steps'))
     def prefill_replay_buffer(self, rngs: nnx.Rngs, prefill_steps: int) -> ReplayBufferState:
-       
-        def env_step(env_state: TEnvState, rngs: nnx.Rngs) -> tuple[TEnvState, DQN.Transition]:
-            cur_obs = self.env.get_obs(rngs.env(), env_state)
-
-            action = self.get_random_action(rngs)
-            new_state, reward, terminated, truncated, info = self.env.step(rngs.env(), env_state, action)
-
-            next_obs = self.env.get_obs(rngs.env(), info[self.env.NEXT_STATE_INFO_KEY])
-
-            return (
-                new_state,
-                self.Transition(cur_obs=cur_obs, action=action, reward=reward, next_obs=next_obs, terminated=terminated)
-            )
 
         def batched_env_step(env_states: TEnvState, rngs: nnx.Rngs) -> tuple[TEnvState, DQN.Transition]:
-            return nnx.vmap(env_step)(env_states, rngs.fork(split=self.hyperparameters.n_envs))
+            cur_obs = self.vmap_auto_reset_env.get_obs(rngs.env(), env_states)
+
+            actions = nnx.vmap(self.get_random_action)(rngs.fork(split=self.hyperparameters.n_envs))
+
+            new_states, rewards, terminated, truncated, infos = self.vmap_auto_reset_env.step(
+                rngs.env(), env_states, actions)
+
+            next_obs = self.vmap_auto_reset_env.get_obs(rngs.env(), infos[self.vmap_auto_reset_env.NEXT_STATE_INFO_KEY])
+
+            return (
+                new_states,
+                self.Transition(obs=cur_obs, action=actions, reward=rewards, next_obs=next_obs, terminated=terminated)
+            )
         
         reset_keys = jax.random.split(rngs.env(), self.hyperparameters.n_envs)
         env_states, info = jax.vmap(self.env.reset)(reset_keys)
@@ -258,7 +257,7 @@ class DQN(Generic[TEnvState, TEnvObs]):
                     + resolve_scheduleable(self.hyperparameters.discount_rate, steps)*max_next_qs
 
                 def loss_func(policy_q_net: nnx.Module, rngs: nnx.Rngs):
-                    pred_qs_all_actions = policy_q_net(sampled_transitions.cur_obs, rngs=rngs)
+                    pred_qs_all_actions = policy_q_net(sampled_transitions.obs, rngs=rngs)
                         # q-net returns a q-value for every action
                     pred_qs = pred_qs_all_actions[jnp.arange(self.hyperparameters.batch_size), sampled_transitions.action]
                         # take only the q-value corresponding to the chosen action
