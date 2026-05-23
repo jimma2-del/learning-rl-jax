@@ -1,5 +1,5 @@
 """
-Utility for converting a gymnax Environment/Space into an Environment/Space following the API of this repository.
+Utility for converting a jumanji Environment/Spec into an Environment/Space following the API of this repository.
 NOTE: these "wrappers" are unrelated to the Wrapper type in wrappers.py, which take in an Environment from this repository.
 """
 

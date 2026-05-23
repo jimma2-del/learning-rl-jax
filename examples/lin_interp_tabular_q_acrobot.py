@@ -2,7 +2,7 @@ import jax
 import jax.numpy as jnp
 
 from gymnax.environments import Acrobot, CartPole
-from core.envs.gymnax_wrapper import GymnaxWrapper, Space
+from core.envs.gymnax import GymnaxWrapper, Space
 
 from core.envs.wrappers import Wrapper
 
@@ -26,7 +26,7 @@ class AcrobotWrapper(Wrapper):
         step_key, obs_key = jax.random.split(key)
 
         state, reward, terminated, truncated, info = super().step(step_key, state, action)
-        obs = super().get_obs(obs_key)
+        obs = super().get_obs(obs_key, state)
 
         height = (-obs[0] - (obs[0] * obs[2] - obs[1] * obs[3])) / 2 # [-1, 0.5]
         h_d = ((obs[1] * (1 + obs[2]) + obs[0] * obs[3]) * obs[4] 
@@ -117,8 +117,8 @@ algo = LinearlyInterpolatedTabularQ(env, q_table, hyperparameters)
 
 #q_vals = algo.init_q_table_vals()
 
-STEPS = 1_000_000_000
-LOG_INTERVAL_STEPS = 10_000_000
+STEPS = 10_000_000#1_000_000_000
+LOG_INTERVAL_STEPS = 1_000_000#10_000_000
 
 key, train_key = jax.random.split(key, 2)
 q_vals = algo.train(train_key, STEPS, log_interval_steps=LOG_INTERVAL_STEPS)
@@ -128,74 +128,46 @@ q_vals = algo.train(train_key, STEPS, log_interval_steps=LOG_INTERVAL_STEPS)
 # NOTE: visualizer is broken in gymnax main branch; use PR https://github.com/RobertTLange/gymnax/pull/84
     # edit  _render_and_close() to remove 'with env:' statement to avoid closing pygame early
 from gymnax.visualize import Visualizer
-
 from gymnax.visualize.vis_gym import render_acrobot
 
-import pygame
-pygame.init()
+from flax import nnx
+from core.envs.utils import rollout_episode, visualize_pygame
 
-DT = 0.2
-FPS = round(1/DT)
-clock = pygame.time.Clock()
+rngs = nnx.Rngs(0, params=1, env=5, actions=3, transitions=4)
 
-states = []
-rewards = []
+def policy(rngs, obs):
+    return algo.get_greedy_action(q_vals, obs)
 
-key, reset_key = jax.random.split(key)
-state, info = env.reset(reset_key)
+VISUALIZE_METHOD = "pygame"
 
-steps = 0
-MAX_STEPS = 500
-truncated = False
+if VISUALIZE_METHOD == 'gif':
+    NUM_EPISODES = 1
 
-# pygame.display.set_caption("Environment Visualization")
-# screen = pygame.display.set_mode(render_acrobot(None, gymnax_env_params, state).swapaxes(0,1).shape[:2])
+    comb_states = []
+    comb_cum_rewards = jnp.array((0,))
 
-while True:
-    for event in pygame.event.get():
-        if event.type == pygame.QUIT:
-            truncated = True
+    for _ in range(NUM_EPISODES):
+        timesteps, truncated = rollout_episode(rngs, env, policy)
+        cum_rewards = jnp.cumsum(timesteps.reward)
+        steps = len(timesteps.reward)
 
-    states.append(state)
+        print(f"{'Truncated' if truncated else 'Terminated'} at steps={steps}, return={cum_rewards[-1]}.")
 
-    # get agent action
-    key, obs_key = jax.random.split(key, 2)
-    obs = env.get_obs(obs_key, state)
-    #print(obs)
+        comb_states += [ jax.tree.map(lambda x: x[i], timesteps.state) for i in range(steps + 1) ]
+        comb_cum_rewards = jnp.concatenate((comb_cum_rewards, jnp.array((0,)), cum_rewards), axis=0)
 
-    action = algo.get_greedy_action(q_vals, obs)
+    vis = Visualizer(gymnax_env, gymnax_env_params, comb_states, comb_cum_rewards)
+    #vis.animate("./examples/lin_interp_tabular_q_acrobot_anim.gif")
+    vis.animate("./examples/lin_interp_tabular_q_cartpole_anim.gif")
+    #vis.animate(save_fname=None, view=True)
 
-    # get human action
-    # action = 1
+elif VISUALIZE_METHOD == 'pygame':
+    FPS = 10
+    window_size = render_acrobot(None, gymnax_env_params, env.reset(rngs.env())[0]).swapaxes(0,1).shape[:2]
 
-    # keys = pygame.key.get_pressed()
-    
-    # if keys[pygame.K_a]:
-    #     action -= 1
-    # else:
-    #     action += 1
-
-    key, step_key = jax.random.split(key, 2)
-    state, reward, terminated, truncated, info = env.step(step_key, state, action)
-    rewards.append(reward)
-
-    #print(reward)
-
-    steps += 1
-
-    # image_array = render_acrobot(None, gymnax_env_params, state)
-
-    # pygame_surface = pygame.surfarray.make_surface(image_array.swapaxes(0,1))
-    # screen.blit(pygame_surface, (0,0))
-    # pygame.display.flip()
-
-    # clock.tick(FPS)
-
-    if terminated or truncated or steps >= MAX_STEPS:
-        if terminated: print("terminated at steps=" + str(steps))
-        break
-
-cum_rewards = jnp.cumsum(jnp.array(rewards))
-vis = Visualizer(gymnax_env, gymnax_env_params, states, cum_rewards)
-vis.animate("./examples/lin_interp_tabular_q_acrobot_anim.gif")
-#vis.animate(save_fname=None, view=True)
+    visualize_pygame(
+        rngs, env, policy, 
+        window_size, FPS, 
+        lambda state, action: render_acrobot(None, gymnax_env_params, state),
+        verbose=False
+    )

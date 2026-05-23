@@ -110,6 +110,24 @@ class ObsRangeNormalizeWrapper(
                 self.normalize_obs_space.high, self.obs_ranges)
         )
 
+class JITWrapper(
+    Generic[TEnvState, TEnvObs, TEnvAction, TRenderFrame],
+    Wrapper[TEnvState, TEnvObs, TEnvAction, TRenderFrame]
+):
+    """JITs the `reset`, `step`, and `get_obs` methods.
+    Does not alter `observation_space` or `action_space`.
+    Does not alter the `render` method as it may not be jittable."""
+
+    def reset(self, key: chex.PRNGKey) -> tuple[TEnvState, dict[Any, Any]]:
+        return jax.jit(super().reset)(key)
+
+    def step(self, key: chex.PRNGKey, state: TEnvState, action: TEnvAction) \
+            -> tuple[TEnvState, jax.Array, jax.Array, jax.Array, dict[Any, Any]]:
+        return jax.jit(super().step)(key, state, action)
+
+    def get_obs(self, key: chex.PRNGKey, state: TEnvState) -> TEnvObs:
+        return jax.jit(super().get_obs)(key, state)
+
 class VmapWrapper(
     Generic[TEnvState, TEnvObs, TEnvAction, TRenderFrame],
     Wrapper[TEnvState, TEnvObs, TEnvAction, TRenderFrame]

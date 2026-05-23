@@ -7,7 +7,7 @@ from flax import nnx
 from optax import schedules
 
 from gymnax.environments import Acrobot, CartPole, MinBreakout
-from core.envs.gymnax_wrapper import GymnaxWrapper
+from core.envs.gymnax import GymnaxWrapper
 
 from core.envs.flappy_bird import FlappyBirdEnv, State as FlappyBirdState
 
@@ -20,16 +20,19 @@ from core.utils import LinearlyInterpolatedTable
 
 rngs = nnx.Rngs(0, params=1, env=2, actions=3, transitions=4)
 
-gymnax_env = CartPole()#MinBreakout()#CartPole()
-gymnax_env_params = gymnax_env.default_params
+## Gymnax
 
-#env = CustomGymnaxWrapper(gymnax_env, gymnax_env_params)
-env = GymnaxWrapper(gymnax_env)
+# gymnax_env = Acrobot()#MinBreakout()#CartPole()
+# gymnax_env_params = gymnax_env.default_params
 
-# DT = 0.1
-# env = FlappyBirdEnv(DT)
+#env = GymnaxWrapper(gymnax_env)
 
-# #env = ObsRangeNormalizeWrapper(env)
+## Flappy Bird
+
+DT = 0.1
+env = FlappyBirdEnv(DT)
+
+#env = ObsRangeNormalizeWrapper(env)
 
 ### TRAIN ###
 
@@ -50,114 +53,70 @@ q_net = algo.train(rngs, STEPS, log_interval_steps=LOG_INTERVAL_STEPS)
 
 ### ENJOY ###
 
-rngs = nnx.Rngs(0, params=1, env=2, actions=3, transitions=4)
-
 # # NOTE: visualizer is broken in gymnax main branch; use PR https://github.com/RobertTLange/gymnax/pull/84
 #     # edit  _render_and_close() to remove 'with env:' statement to avoid closing pygame early
 from gymnax.visualize import Visualizer
-
 from gymnax.visualize.vis_gym import render_acrobot
 
-import pygame
-pygame.init()
+from core.envs.utils import rollout_episode, visualize_pygame, evaluate_episodes
 
-DT = 0.2
-FPS = round(1/DT)
-clock = pygame.time.Clock()
+rngs = nnx.Rngs(0, params=1, env=5, actions=3, transitions=4)
 
-states = []
-rewards = []
+def policy(rngs, obs):
+    return algo.get_greedy_action(rngs, q_net, obs)
 
-state, info = env.reset(rngs.env())
-
-steps = 0
 MAX_STEPS = 500
-truncated = False
 
-# pygame.display.set_caption("Environment Visualization")
-# screen = pygame.display.set_mode(render_acrobot(None, gymnax_env_params, state).swapaxes(0,1).shape[:2])
+EVAL_EPS = 256
+returns, lengths = nnx.jit(evaluate_episodes, static_argnums=(1, 2, 3, 4, 5))(
+    rngs, env, policy, EVAL_EPS, hyperparameters.n_envs)
+print(returns)
+print(lengths)
+print(f"Episode Return: mean={jnp.mean(returns)} std={jnp.std(returns, ddof=1)}")
+print(f"Episode Length: mean={jnp.mean(lengths)} std={jnp.std(lengths, ddof=1)}")
 
-while True:
-    for event in pygame.event.get():
-        if event.type == pygame.QUIT:
-            truncated = True
+VISUALIZE_METHOD = "pygame"
+rngs = nnx.Rngs(0, params=1, env=5, actions=3, transitions=4)
 
-    states.append(state)
+if VISUALIZE_METHOD == 'gif':
+    NUM_EPISODES = 1
 
-    # get agent action
-    obs = env.get_obs(rngs.env(), state)
-    #print(obs)
+    comb_states = []
+    comb_cum_rewards = jnp.array((0,))
 
-    action = algo.get_greedy_action(rngs, q_net, obs)
+    for _ in range(NUM_EPISODES):
+        timesteps, truncated = rollout_episode(rngs, env, policy, MAX_STEPS)
+        cum_rewards = jnp.cumsum(timesteps.reward)
+        steps = len(timesteps.reward)
 
+        print(f"{'Truncated' if truncated else 'Terminated'} at steps={steps}, return={cum_rewards[-1]}.")
 
-    state, reward, terminated, truncated, info = env.step(rngs.env(), state, action)
-    rewards.append(reward)
+        comb_states += [ jax.tree.map(lambda x: x[i], timesteps.state) for i in range(steps + 1) ]
+        comb_cum_rewards = jnp.concatenate((comb_cum_rewards, jnp.array((0,)), cum_rewards), axis=0)
 
-    #print(reward)
+    vis = Visualizer(gymnax_env, gymnax_env_params, comb_states, comb_cum_rewards)
+    vis.animate("./examples/dqn_test_anim.gif")
+    #vis.animate(save_fname=None, view=True)
 
-    steps += 1
+elif VISUALIZE_METHOD == 'pygame':
+    # Acrobot
+    # FPS = 10
+    # window_size = render_acrobot(None, gymnax_env_params, env.reset(rngs.env())[0]).swapaxes(0,1).shape[:2]
 
-    if terminated or truncated or steps >= MAX_STEPS:
-        if terminated: print("terminated at steps=" + str(steps))
-        break
+    # visualize_pygame(
+    #     rngs, env, policy, 
+    #     window_size, FPS, 
+    #     lambda state, action: render_acrobot(None, gymnax_env_params, state),
+    #     episode_steps_limit=MAX_STEPS,
+    #     verbose=False
+    # )
 
-cum_rewards = jnp.cumsum(jnp.array(rewards))
-vis = Visualizer(gymnax_env, gymnax_env_params, states, cum_rewards)
-vis.animate("./examples/dqn_test_anim.gif")
-#vis.animate(save_fname=None, view=True)
+    ## Flappy Bird
+    FPS = round(1/DT)
+    window_size = (env.settings.window_size[1], env.settings.window_size[0])
 
-# import numpy as np
-
-# import pygame, sys
-# pygame.init()
-
-# FPS = round(1/DT)
-# clock = pygame.time.Clock()
-
-# state, info = env.reset(rngs.env())
-
-# cur_return = 0
-# done = False
-# done_pause = 0
-
-# pygame.display.set_caption("Flappy Bird")
-# screen = pygame.display.set_mode((env.settings.window_size[1], env.settings.window_size[0]))
-
-# prev_flap_pressed = False
-
-# while True:
-#     for event in pygame.event.get():
-#         if event.type == pygame.QUIT:
-#             sys.exit()
-    
-#     if done_pause == 0:
-#         obs = env.get_obs(rngs.env(), state)
-#         q_vals = q_net(obs, rngs=rngs)
-#         print(q_vals)
-#         action = jnp.argmax(q_vals)
-#         state, reward, terminated, truncated, info = env.step(rngs.env(), state, action)
-
-#         cur_return += reward
-#         done = terminated or truncated
-
-#         if reward != 0:
-#             print(cur_return)
-
-#     image_array = np.array(env.render(state, 0))
-#     pygame_surface = pygame.surfarray.make_surface(image_array.swapaxes(0,1))
-#     screen.blit(pygame_surface, (0,0))
-#     pygame.display.flip()
-
-#     if done and done_pause == 0:
-#         done_pause = 30
-
-#     if done and done_pause == 10:
-#         state, info = env.reset(rngs.env())
-#         cur_return = 0
-#         done = False
-
-#     if done_pause > 0:
-#         done_pause -= 1
-
-#     clock.tick(FPS)
+    visualize_pygame(
+        rngs, env, policy, 
+        window_size, FPS, 
+        verbose=False
+    )

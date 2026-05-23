@@ -73,60 +73,19 @@ key, train_key = jax.random.split(key, 2)
 q_vals = algo.train(train_key, STEPS, log_interval_steps=LOG_INTERVAL_STEPS)
 
 ### ENJOY ###
-import numpy as np
+from flax import nnx
+from core.envs.utils import visualize_pygame
 
-import pygame, sys
-pygame.init()
+rngs = nnx.Rngs(0, params=1, env=5, actions=3, transitions=4)
+
+def policy(rngs, obs):
+    return algo.get_greedy_action(q_vals, obs)
 
 FPS = round(1/DT)
-clock = pygame.time.Clock()
+window_size = (env.settings.window_size[1], env.settings.window_size[0])
 
-ENJOY_SEED = 0
-key = jax.random.key(ENJOY_SEED)
-
-key, reset_key = jax.random.split(key, 2)
-state, info = env.reset(reset_key)
-
-cur_return = 0
-done = False
-done_pause = 0
-
-pygame.display.set_caption("Flappy Bird")
-screen = pygame.display.set_mode((env.unwrapped.settings.window_size[1], env.unwrapped.settings.window_size[0]))
-
-prev_flap_pressed = False
-
-while True:
-    for event in pygame.event.get():
-        if event.type == pygame.QUIT:
-            sys.exit()
-    
-    if done_pause == 0:
-        key, obs_key, step_key = jax.random.split(key, 3)
-        action = algo.get_greedy_action(q_vals, env.get_obs(obs_key, state))
-        state, reward, terminated, truncated, info = env.step(step_key, state, action)
-
-        cur_return += reward
-        done = terminated or truncated
-
-        if reward != 0:
-            print(cur_return)
-
-    image_array = np.array(env.render(state, 0))
-    pygame_surface = pygame.surfarray.make_surface(image_array.swapaxes(0,1))
-    screen.blit(pygame_surface, (0,0))
-    pygame.display.flip()
-
-    if done and done_pause == 0:
-        done_pause = 30
-
-    if done and done_pause == 10:
-        key, reset_key = jax.random.split(key, 2)
-        state, info = env.reset(reset_key)
-        cur_return = 0
-        done = False
-
-    if done_pause > 0:
-        done_pause -= 1
-
-    clock.tick(FPS)
+visualize_pygame(
+    rngs, env, policy, 
+    window_size, FPS, 
+    verbose=False
+)
