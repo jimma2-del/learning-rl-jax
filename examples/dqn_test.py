@@ -104,7 +104,7 @@ while True:
 
 cum_rewards = jnp.cumsum(jnp.array(rewards))
 vis = Visualizer(gymnax_env, gymnax_env_params, states, cum_rewards)
-vis.animate("./examples/dqn_cartpole_anim.gif")
+vis.animate("./examples/dqn_test_anim.gif")
 #vis.animate(save_fname=None, view=True)
 
 # import numpy as np

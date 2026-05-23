@@ -155,7 +155,7 @@ class AutoResetWrapper(
 
         # reset env if terminated/truncated, don't otherwise
         new_state = jax.lax.cond(jnp.logical_or(terminated, truncated), 
-            lambda: super().reset(reset_key)[0], lambda: next_state)
+            lambda: super(AutoResetWrapper, self).reset(reset_key)[0], lambda: next_state)
 
         return new_state, reward, terminated, truncated, info
 
@@ -188,20 +188,23 @@ class VmapAutoResetWrapper(
             -> tuple[TEnvState, jax.Array, jax.Array, jax.Array, dict[Any, Any]]:
 
         if jnp.isscalar(key): key = jax.random.split(key, jax.tree.leaves(state)[0].shape[0])
-        step_key, reset_key = jax.vmap(jax.random.split)(key)
+        step_key, reset_key = jax.vmap(jax.random.split)(key).T
 
         next_state, reward, terminated, truncated, info = jax.vmap(super().step)(step_key, state, action)
         info[self.NEXT_STATE_INFO_KEY] = next_state
 
-        # reset env if terminated/truncated, don't otherwise; jax.map instead of jax.vmap to allow for branching
-        new_state = jax.map(self._conditionally_reset)(
-            reset_key, next_state, jnp.logical_or(terminated, truncated))
+        # reset env if terminated/truncated, don't otherwise; jax.lax.map instead of jax.vmap to allow for branching
+        # new_state = jax.lax.map(self._conditionally_reset,
+        #     (reset_key, next_state, jnp.logical_or(terminated, truncated)))
+        new_state = jax.vmap(self._conditionally_reset)((reset_key, next_state, jnp.logical_or(terminated, truncated)))
 
         return new_state, reward, terminated, truncated, info
 
-    def _conditionally_reset(key: chex.PRNGKey, state: TEnvState, do_reset: ArrayLike) -> TEnvState:
+    def _conditionally_reset(self, x: tuple[chex.PRNGKey, TEnvState, ArrayLike]) -> TEnvState:
+        key, state, do_reset = x
+
         return jax.lax.cond(do_reset, 
-            lambda key: super().reset(key)[0], lambda key: state,
+            lambda key: super(VmapAutoResetWrapper, self).reset(key)[0], lambda key: state,
             key)
 
     def get_obs(self, key: chex.PRNGKey, state: TEnvState) -> TEnvObs:

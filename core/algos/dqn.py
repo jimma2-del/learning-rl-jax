@@ -15,7 +15,7 @@ import optax
 from core.algos.base import Scheduleable, resolve_scheduleable
 
 from core.envs.base import Environment
-from core.envs.utils import rollout_auto_reset
+from core.envs.wrappers import VmapAutoResetWrapper, VmapWrapper, AutoResetWrapper
 from core.utils import ReplayBuffer, ReplayBufferState
 
 from core.sample_networks import MLP, MLPFeatureExtractor
@@ -116,6 +116,47 @@ class DQN(Generic[TEnvState, TEnvObs]):
             MLP(rngs, input_dim=FEATURE_EXTRACTOR_OUTPUT_DIM, output_dim=self.num_actions)
         )
 
+    def rollout(self,
+        rngs: nnx.Rngs, 
+        q_net: nnx.module, epsilon: ArrayLike, 
+        iter: int,
+        initial_env_states: TEnvState | None = None
+    ) -> Transition:
+        """Collect a rollout of `Transition`s.
+
+        Runs `n_envs` environments in parallel for `iter` iterations,
+            for a total of `iter * n_envs` transitions.
+
+        Initializes initial environment states if none given.
+
+        Returns: transitions, final environment states
+        """
+
+        #env = VmapWrapper(AutoResetWrapper(self.env))
+        env = VmapAutoResetWrapper(self.env)
+
+        def batched_env_step(states: TEnvState, rngs: nnx.Rngs) -> tuple[TEnvState, DQN.Transition]:
+            obs = env.get_obs(rngs.env(), states)
+
+            actions = nnx.vmap(lambda rngs, obs: self.get_action(rngs, q_net, epsilon, obs))(
+                rngs.fork(split=self.hyperparameters.n_envs), obs)
+
+            new_states, rewards, terminated, truncated, infos = env.step(rngs.env(), states, actions)
+            next_obs = env.get_obs(rngs.env(), infos.pop(env.NEXT_STATE_INFO_KEY))
+
+            return (
+                new_states,
+                DQN.Transition(obs=obs, action=actions, reward=rewards, next_obs=next_obs,terminated=terminated)
+            )
+
+        if initial_env_states is None:
+            initial_env_states, info = env.reset(rngs.env(), num=self.hyperparameters.n_envs)
+
+        env_states, transitions = nnx.scan(batched_env_step)(initial_env_states, rngs.fork(split=iter))
+        transitions = jax.tree.map(lambda x: x.reshape(-1, *x.shape[2:]), transitions) # flatten to remove axis 0
+
+        return transitions, env_states
+
     def train(self,
         rngs: nnx.Rngs,
         steps: int,
@@ -134,10 +175,15 @@ class DQN(Generic[TEnvState, TEnvObs]):
         #optimizer = nnx.Optimizer(q_net, optax.adamw(learning_rate=2.5e-4))
 
         ## initialize ##
-        replay_buffer_state = self.prefill_replay_buffer(rngs, prefill_steps)
 
-        reset_keys = jax.random.split(rngs.env(), self.hyperparameters.n_envs)
-        env_states, info = jax.vmap(self.env.reset)(reset_keys)
+        # prefill replay buffer
+        transitions, env_states = nnx.jit(self.rollout, static_argnames=('iter'))(rngs,
+            q_net, 1,
+            math.ceil(prefill_steps / self.hyperparameters.n_envs)
+        )
+
+        replay_buffer_state = self.replay_buffer.init()
+        replay_buffer_state = self.replay_buffer.insert(replay_buffer_state, transitions)
 
         training_state = DQN.TrainingState(
             steps = jnp.array(0, dtype=jnp.int32),
@@ -156,20 +202,6 @@ class DQN(Generic[TEnvState, TEnvObs]):
 
         return training_state.policy_q_net
     
-    @functools.partial(nnx.jit, static_argnames=('self', 'prefill_steps'))
-    def prefill_replay_buffer(self, rngs: nnx.Rngs, prefill_steps: int) -> ReplayBufferState:
-        transitions, env_states = rollout_auto_reset(rngs, 
-            self.env, 
-            lambda rngs, obs: self.get_random_action(rngs), 
-            math.ceil(prefill_steps / self.hyperparameters.n_envs), self.hyperparameters.n_envs
-        )
-
-        transitions = jax.vmap(lambda x: DQN.Transition())
-
-        replay_buffer_state = self.replay_buffer.init()
-
-        return self.replay_buffer.insert(replay_buffer_state, transitions)
-
     @functools.partial(nnx.jit, static_argnames=('self', 'steps'))
     def train_epoch(
         self, rngs: nnx.Rngs, steps: int,
@@ -193,35 +225,19 @@ class DQN(Generic[TEnvState, TEnvObs]):
             
             ## sample transitions from environment ##
 
-            def env_step(env_state: TEnvState, rngs: nnx.Rngs) -> tuple[TEnvState, DQN.Transition]:
-                cur_obs = self.env.get_obs(rngs.env(), env_state)
+            transitions, env_states = self.rollout(rngs, 
+                policy_q_net, resolve_scheduleable(self.hyperparameters.epsilon, steps),
+                steps_per_env_per_iter,
+                env_states
+            )
 
-                action = self.get_action(rngs, policy_q_net, 
-                    resolve_scheduleable(self.hyperparameters.epsilon, steps), cur_obs)
-
-                next_state, reward, terminated, truncated, info = self.env.step(rngs.env(), env_state, action)
-                next_obs = self.env.get_obs(rngs.env(), info[self.env.NEXT_STATE_INFO_KEY])
-
-                return (
-                    next_state,
-                    self.Transition(cur_obs=cur_obs, action=action, reward=reward, next_obs=next_obs, terminated=terminated)
-                )
-
-            def batched_env_step(env_states: TEnvState, rngs: nnx.Rngs) -> tuple[TEnvState, DQN.Transition]:
-                return nnx.vmap(env_step)(env_states, rngs.fork(split=self.hyperparameters.n_envs))
-            
-            env_states, transitions = nnx.scan(batched_env_step)(env_states, 
-                rngs.fork(split=steps_per_env_per_iter))
+            replay_buffer_state = self.replay_buffer.insert(replay_buffer_state, transitions)
 
             steps += total_steps_per_iter
 
             # update optimizer schedules using env steps (rather than default grad steps)
             optimizer.opt_state.hyperparams['learning_rate'].value \
                 = resolve_scheduleable(self.hyperparameters.learning_rate, steps)
-
-            transitions: DQN.Transition = jax.tree_util.tree_map(lambda x: x.reshape(-1, *x.shape[2:]), 
-                transitions) # flatten to remove axis 0
-            replay_buffer_state = self.replay_buffer.insert(replay_buffer_state, transitions)
 
             ## update policy q-table ##
 
