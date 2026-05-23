@@ -13,6 +13,8 @@ from core.envs.flappy_bird import FlappyBirdEnv, State as FlappyBirdState
 
 from core.envs.wrappers import ObsRangeNormalizeWrapper
 
+from core.envs.utils import rollout_episode, visualize_pygame, evaluate_episodes
+
 from core.algos.dqn import DQN, DQNHyperparameters
 from core.utils import LinearlyInterpolatedTable
 
@@ -49,7 +51,19 @@ hyperparameters = DQNHyperparameters(
 
 algo = DQN(env, hyperparameters)
 
-q_net = algo.train(rngs, STEPS, log_interval_steps=LOG_INTERVAL_STEPS)
+def eval_callback(training_state: DQN.TrainingState):
+    EVAL_EPS = 32
+
+    returns, lengths = nnx.jit(evaluate_episodes, static_argnums=(1, 2, 3, 4, 5))(
+        rngs, env, 
+        lambda rngs, obs: algo.get_greedy_action(rngs, training_state.policy_q_net, obs), 
+        EVAL_EPS, hyperparameters.n_envs
+    )
+
+    print(f"Episode Return: mean={jnp.mean(returns)} std={jnp.std(returns, ddof=1)}")
+    print(f"Episode Length: mean={jnp.mean(lengths)} std={jnp.std(lengths, ddof=1)}")
+
+q_net = algo.train(rngs, STEPS, log_interval_steps=LOG_INTERVAL_STEPS, callbacks=[eval_callback])
 
 ### ENJOY ###
 
@@ -57,8 +71,6 @@ q_net = algo.train(rngs, STEPS, log_interval_steps=LOG_INTERVAL_STEPS)
 #     # edit  _render_and_close() to remove 'with env:' statement to avoid closing pygame early
 from gymnax.visualize import Visualizer
 from gymnax.visualize.vis_gym import render_acrobot
-
-from core.envs.utils import rollout_episode, visualize_pygame, evaluate_episodes
 
 rngs = nnx.Rngs(0, params=1, env=5, actions=3, transitions=4)
 

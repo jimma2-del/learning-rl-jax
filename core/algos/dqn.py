@@ -5,7 +5,7 @@ import jax
 
 from jax.typing import ArrayLike
 from chex import dataclass
-from typing import TypeVar, Generic
+from typing import TypeVar, Generic, Sequence, Callable
 
 import functools
 
@@ -162,7 +162,8 @@ class DQN(Generic[TEnvState, TEnvObs]):
         steps: int,
         q_net: nnx.Module = None,
         log_interval_steps: int = 100_000,
-        prefill_steps: int = 10_000
+        prefill_steps: int = 10_000,
+        callbacks: Sequence[Callable[[TrainingState], None]] = []
     ) -> jax.Array:
         """Train the q-network. Returns the trained q-network."""
 
@@ -199,6 +200,9 @@ class DQN(Generic[TEnvState, TEnvObs]):
                 log_interval_steps, training_state, replay_buffer_state)
 
             print(f"Completed steps={training_state.steps}")
+
+            for callback in callbacks:
+                callback(training_state)
 
         return training_state.policy_q_net
     
