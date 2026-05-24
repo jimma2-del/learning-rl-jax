@@ -11,13 +11,13 @@ import jax.numpy as jnp
 
 from core.utils import jax_utils
 
+TReplayBufferItem = TypeVar("TReplayBufferItem")
+
 @dataclass(frozen=True)
-class ReplayBufferState:
-    data: jax.Array
+class ReplayBufferState(Generic[TReplayBufferItem]):
+    data: TReplayBufferItem
     insert_i: ArrayLike
     filled_len: ArrayLike
-
-TReplayBufferItem = TypeVar("TReplayBufferItem")
 
 class ReplayBuffer(Generic[TReplayBufferItem]):
     def __init__(self, item_shapes_dtypes, capacity: int = 10000) -> None:
@@ -26,7 +26,7 @@ class ReplayBuffer(Generic[TReplayBufferItem]):
         self.capacity = capacity
 
     #@functools.partial(jax.jit, static_argnames=('self'))
-    def init(self) -> ReplayBufferState:
+    def init(self) -> ReplayBufferState[TReplayBufferItem]:
 
         data = jax.tree.map(
             lambda shape_dtype: jnp.empty((self.capacity, *shape_dtype.shape), dtype=shape_dtype.dtype),
@@ -40,7 +40,8 @@ class ReplayBuffer(Generic[TReplayBufferItem]):
         )
 
     #@functools.partial(jax.jit, static_argnames=('self'))
-    def insert(self, state: ReplayBufferState, items: TReplayBufferItem) -> None:
+    def insert(self, state: ReplayBufferState[TReplayBufferItem], items: TReplayBufferItem) \
+        -> ReplayBufferState[TReplayBufferItem]:
         '''samples: farther back means newer'''
         
         # flatten/add batch axis if number of batch axes is not 1
@@ -70,7 +71,8 @@ class ReplayBuffer(Generic[TReplayBufferItem]):
         )
 
     #@functools.partial(jax.jit, static_argnames=('self', 'num_samples'))
-    def sample(self, key: chex.PRNGKey, state: ReplayBufferState, num_samples: int) -> TReplayBufferItem:
+    def sample(self, key: chex.PRNGKey, state: ReplayBufferState[TReplayBufferItem], num_samples: int) \
+        -> TReplayBufferItem:
         indices = jax.random.randint(key, (num_samples, ), minval=0, maxval=state.filled_len)
         return jax.tree.map(lambda x: x[indices], state.data)
 

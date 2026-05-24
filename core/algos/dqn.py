@@ -21,7 +21,7 @@ from core.utils import ReplayBuffer, ReplayBufferState
 from core.sample_networks import MLP, MLPFeatureExtractor
 
 @dataclass(frozen=True)
-class DQNHyperparameters:
+class Hyperparameters:
     n_envs: int = 32
 
     discount_rate: Scheduleable[float] = 0.99
@@ -44,29 +44,30 @@ class DQNHyperparameters:
 TEnvState = TypeVar("TEnvState")
 TEnvObs = TypeVar("TEnvObs")
 
+@dataclass(frozen=True)
+class Transition(Generic[TEnvObs]):
+    obs: TEnvObs
+    action: ArrayLike
+    reward: ArrayLike
+    next_obs: TEnvObs
+    terminated: ArrayLike
+
+@dataclass(frozen=True)
+class TrainingState(Generic[TEnvState, TEnvObs]):
+    steps: ArrayLike
+    env_states: TEnvState
+    replay_buffer_state: ReplayBufferState[Transition[TEnvObs]]
+
+    policy_q_net: nnx.Module
+    target_q_net: nnx.Module
+    optimizer: nnx.Optimizer
+
 class DQN(Generic[TEnvState, TEnvObs]):
     """Implementation of DQN."""
 
-    @dataclass(frozen=True)
-    class Transition:
-        obs: TEnvObs
-        action: ArrayLike
-        reward: ArrayLike
-        next_obs: TEnvObs
-        terminated: ArrayLike
-
-    @dataclass(frozen=True)
-    class TrainingState:
-        steps: ArrayLike
-        env_states: TEnvState
-
-        policy_q_net: nnx.Module
-        target_q_net: nnx.Module
-        optimizer: nnx.Optimizer
-
     def __init__(self, 
         env: Environment[TEnvState, TEnvObs, ArrayLike],
-        hyperparameters: DQNHyperparameters = DQNHyperparameters()
+        hyperparameters: Hyperparameters = Hyperparameters()
     ) -> None:
         assert (
             jnp.isscalar(env.action_space.low) 
@@ -80,7 +81,7 @@ class DQN(Generic[TEnvState, TEnvObs]):
         self.hyperparameters = hyperparameters
 
         # make replay buffer
-        self.transition_shapes_dtypes = DQN.Transition(
+        self.transition_shapes_dtypes = Transition(
             obs = self.env.observation_space.shapes_dtypes,
             action = self.env.action_space.shapes_dtypes,
             reward = jax.ShapeDtypeStruct(shape=(), dtype=jnp.float32),
@@ -88,7 +89,7 @@ class DQN(Generic[TEnvState, TEnvObs]):
             terminated = jax.ShapeDtypeStruct(shape=(), dtype=jnp.bool)
         )
 
-        self.replay_buffer = ReplayBuffer[DQN.Transition](
+        self.replay_buffer = ReplayBuffer[Transition[TEnvObs]](
             self.transition_shapes_dtypes, self.hyperparameters.replay_buffer_size)
 
     def get_greedy_action(self, rngs: nnx.Rngs, q_net: nnx.module, obs: TEnvObs) -> ArrayLike:
@@ -121,7 +122,7 @@ class DQN(Generic[TEnvState, TEnvObs]):
         q_net: nnx.module, epsilon: ArrayLike, 
         iter: int,
         initial_env_states: TEnvState | None = None
-    ) -> Transition:
+    ) -> Transition[TEnvObs]:
         """Collect a rollout of `Transition`s.
 
         Runs `n_envs` environments in parallel for `iter` iterations,
@@ -135,7 +136,7 @@ class DQN(Generic[TEnvState, TEnvObs]):
         #env = VmapWrapper(AutoResetWrapper(self.env))
         env = VmapAutoResetWrapper(self.env)
 
-        def batched_env_step(states: TEnvState, rngs: nnx.Rngs) -> tuple[TEnvState, DQN.Transition]:
+        def batched_env_step(states: TEnvState, rngs: nnx.Rngs) -> tuple[TEnvState, Transition[TEnvObs]]:
             obs = env.get_obs(rngs.env(), states)
 
             actions = nnx.vmap(lambda rngs, obs: self.get_action(rngs, q_net, epsilon, obs))(
@@ -146,7 +147,7 @@ class DQN(Generic[TEnvState, TEnvObs]):
 
             return (
                 new_states,
-                DQN.Transition(obs=obs, action=actions, reward=rewards, next_obs=next_obs,terminated=terminated)
+                Transition(obs=obs, action=actions, reward=rewards, next_obs=next_obs,terminated=terminated)
             )
 
         if initial_env_states is None:
@@ -157,16 +158,11 @@ class DQN(Generic[TEnvState, TEnvObs]):
 
         return transitions, env_states
 
-    def train(self,
+    def init_training_state(self,
         rngs: nnx.Rngs,
-        steps: int,
         q_net: nnx.Module = None,
-        log_interval_steps: int = 100_000,
-        prefill_steps: int = 10_000,
-        callbacks: Sequence[Callable[[TrainingState], None]] = []
-    ) -> jax.Array:
-        """Train the q-network. Returns the trained q-network."""
-
+        prefill_steps: int = 10_000
+    ) -> TrainingState[TEnvState, TEnvObs]:
         # create default network if none given
         if q_net is None:
             q_net = self.create_default_q_net(rngs)
@@ -186,42 +182,32 @@ class DQN(Generic[TEnvState, TEnvObs]):
         replay_buffer_state = self.replay_buffer.init()
         replay_buffer_state = self.replay_buffer.insert(replay_buffer_state, transitions)
 
-        training_state = DQN.TrainingState(
+        return TrainingState(
             steps = jnp.array(0, dtype=jnp.int32),
             env_states = env_states,
+            replay_buffer_state = replay_buffer_state,
 
             policy_q_net = q_net,
             target_q_net = nnx.clone(q_net),
             optimizer = optimizer
         )
-
-        while training_state.steps < steps:
-            training_state, replay_buffer_state = self.train_epoch(rngs, 
-                log_interval_steps, training_state, replay_buffer_state)
-
-            print(f"Completed steps={training_state.steps}")
-
-            for callback in callbacks:
-                callback(training_state)
-
-        return training_state.policy_q_net
     
-    @functools.partial(nnx.jit, static_argnames=('self', 'steps'))
-    def train_epoch(
-        self, rngs: nnx.Rngs, steps: int,
-        training_state: TrainingState, replay_buffer_state: ReplayBufferState
-    ) -> tuple[TrainingState, ReplayBufferState]:
+    @functools.partial(nnx.jit, static_argnames=('self', 'epoch_steps'))
+    def train_epoch(self, 
+        rngs: nnx.Rngs,
+        training_state: TrainingState[TEnvState, TEnvObs],
+        epoch_steps: int,
+    ) -> TrainingState[TEnvState, TEnvObs]:
         """Train for one 'epoch' -- one fully JIT compiled segment."""
 
         steps_per_env_per_iter = math.ceil(self.hyperparameters.train_freq / self.hyperparameters.n_envs)
         total_steps_per_iter = steps_per_env_per_iter * self.hyperparameters.n_envs
         grad_steps_per_iter = math.ceil(self.hyperparameters.n_envs / self.hyperparameters.train_freq)
 
-        def train_iteration(carry: tuple[DQN.TrainingState, ReplayBufferState], rngs: nnx.Rngs):
-            training_state, replay_buffer_state = carry
-
+        def train_iteration(training_state: TrainingState[TEnvState, TEnvObs], rngs: nnx.Rngs):
             env_states = training_state.env_states
             steps = training_state.steps
+            replay_buffer_state = training_state.replay_buffer_state
 
             policy_q_net = training_state.policy_q_net
             target_q_net = training_state.target_q_net
@@ -286,18 +272,17 @@ class DQN(Generic[TEnvState, TEnvObs]):
                 policy_q_net, target_q_net
             ))
 
-            return (DQN.TrainingState(
+            return TrainingState(
                 steps=steps,
                 env_states=env_states,
+                replay_buffer_state=replay_buffer_state,
 
                 policy_q_net=policy_q_net,
                 target_q_net=target_q_net,
                 optimizer=optimizer
-            ), replay_buffer_state), None
+            ), losses
 
-        iterations = math.ceil(steps / total_steps_per_iter)
+        iterations = math.ceil(epoch_steps / total_steps_per_iter)
+        training_state, losses = nnx.scan(train_iteration)(training_state, rngs.fork(split=iterations))
 
-        (training_state, replay_buffer_state), _ = nnx.scan(train_iteration)((training_state, replay_buffer_state), 
-            rngs.fork(split=iterations))
-
-        return training_state, replay_buffer_state
+        return training_state

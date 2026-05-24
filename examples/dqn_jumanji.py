@@ -1,3 +1,5 @@
+import time
+
 import jax
 import jax.numpy as jnp
 
@@ -12,10 +14,10 @@ from jumanji.environments.logic.game_2048 import Game2048, State, Observation
 from core.envs.jumanji import JumanjiWrapper
 
 from core.envs.wrappers import ObsRangeNormalizeWrapper, Wrapper
-from core.envs.utils import rollout_episode
+from core.envs.utils import rollout_episode, evaluate_episodes
 from core.envs.base import Space
 
-from core.algos.dqn import DQN, DQNHyperparameters
+from core.algos import dqn
 
 #jax.config.update("jax_log_compiles", True)
 
@@ -48,8 +50,9 @@ env = CustomWrapper(env)
 
 STEPS = 1_000_000
 LOG_INTERVAL_STEPS = 100_000
+EVAL_EPS = 32
 
-hyperparameters = DQNHyperparameters(
+hyperparameters = dqn.Hyperparameters(
     learning_rate = 2.5e-4,
     train_freq = 4,
     n_envs = 64,#32,
@@ -58,9 +61,30 @@ hyperparameters = DQNHyperparameters(
     replay_buffer_size = 100_000
 )
 
-algo = DQN(env, hyperparameters)
+algo = dqn.DQN(env, hyperparameters)
 
-q_net = algo.train(rngs, STEPS, log_interval_steps=LOG_INTERVAL_STEPS)
+training_state = algo.init_training_state(rngs)
+
+while training_state.steps < STEPS:
+    start_time = time.perf_counter()
+
+    training_state = algo.train_epoch(rngs, training_state, LOG_INTERVAL_STEPS)
+
+    elasped_time = time.perf_counter() - start_time
+    sps = LOG_INTERVAL_STEPS / elasped_time
+    print(f"Completed steps={training_state.steps}; sps={sps:,.1f}")
+
+    # eval
+    returns, lengths = nnx.jit(evaluate_episodes, static_argnums=(1, 2, 3, 4, 5))(
+        rngs, env, 
+        lambda rngs, obs: algo.get_greedy_action(rngs, training_state.policy_q_net, obs), 
+        EVAL_EPS, hyperparameters.n_envs
+    )
+
+    print(f"Episode Return: mean={jnp.mean(returns)} std={jnp.std(returns, ddof=1)}")
+    print(f"Episode Length: mean={jnp.mean(lengths)} std={jnp.std(lengths, ddof=1)}")
+
+q_net = training_state.policy_q_net
 
 ### ENJOY ###
 
