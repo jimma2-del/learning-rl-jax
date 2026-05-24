@@ -29,9 +29,11 @@ class Algo(Generic[TTrainingState, TPolicy, TEnvState, TEnvObs, TEnvAction]):
 
     methods:
         __init__(env, *nonstandard params (eg. hyperparameters))
-        get_action(rngs, policy, obs, optional params) -> TEnvAction
+        get_action(rngs, policy, obs, deterministic flag?, optional params) -> TEnvAction
         init_training_state(rngs, optional params (eg. network, replay buffer state, prefill steps)) -> TTrainingState
         train_epoch(rngs, training_state, epoch_steps) -> TTrainingState, metrics (probably dict? dataclass overkill?)
+
+        create_default_policy(rngs)? can be used as dummy for loading
 
         rollout(rngs, policy, iter, initial_env_states (optional), optional params) -> Transition?
             - should this be standardized/public? or private implementation detail

@@ -78,7 +78,7 @@ class DQN(Generic[TEnvState, TEnvObs]):
         ), "Action space for Q-Learning must be discrete (jnp integer scalar, min=0)."
 
         self.env = env
-        self.num_actions = env.action_space.high + 1
+        self.num_actions = int(env.action_space.high + 1)
 
         self.hyperparameters = hyperparameters
 
@@ -94,21 +94,21 @@ class DQN(Generic[TEnvState, TEnvObs]):
         self.replay_buffer = ReplayBuffer[Transition[TEnvObs]](
             self.transition_shapes_dtypes, self.hyperparameters.replay_buffer_size)
 
-    def get_greedy_action(self, rngs: nnx.Rngs, q_net: nnx.module, obs: TEnvObs) -> ArrayLike:
-        q_vals = q_net(obs, rngs=rngs)
+    def get_greedy_action(self, rngs: nnx.Rngs, policy: nnx.module, obs: TEnvObs) -> ArrayLike:
+        q_vals = policy(obs, rngs=rngs)
         return jnp.argmax(q_vals)
 
     def get_random_action(self, rngs: nnx.Rngs) -> ArrayLike:
         return jax.random.randint(rngs.actions(), shape=(), minval=0, maxval=self.num_actions)
 
-    def get_action(self, rngs: nnx.Rngs, q_net: nnx.module, obs: TEnvObs, epsilon: ArrayLike = 0) -> ArrayLike:
+    def get_action(self, rngs: nnx.Rngs, policy: nnx.module, obs: TEnvObs, epsilon: ArrayLike = 0) -> ArrayLike:
         random_action = self.get_random_action(rngs)
-        greedy_action = self.get_greedy_action(rngs, q_net, obs)
+        greedy_action = self.get_greedy_action(rngs, policy, obs)
 
         return jnp.where(jax.random.uniform(rngs.actions()) < epsilon, 
             random_action, greedy_action)
 
-    def create_default_q_net(self, rngs: nnx.Rngs) -> nnx.Module:
+    def create_default_policy(self, rngs: nnx.Rngs) -> nnx.Module:
         FEATURE_EXTRACTOR_OUTPUT_DIM = 256
 
         return nnx.Sequential(
@@ -119,7 +119,7 @@ class DQN(Generic[TEnvState, TEnvObs]):
 
     def rollout(self,
         rngs: nnx.Rngs, 
-        q_net: nnx.module, 
+        policy: nnx.module, 
         iter: int,
         initial_env_states: TEnvState | None = None,
         epsilon: ArrayLike = 0
@@ -140,7 +140,7 @@ class DQN(Generic[TEnvState, TEnvObs]):
         def batched_env_step(states: TEnvState, rngs: nnx.Rngs) -> tuple[TEnvState, Transition[TEnvObs]]:
             obs = env.get_obs(rngs.env(), states)
 
-            actions = nnx.vmap(lambda rngs, obs: self.get_action(rngs, q_net, obs, epsilon))(
+            actions = nnx.vmap(lambda rngs, obs: self.get_action(rngs, policy, obs, epsilon))(
                 rngs.fork(split=self.hyperparameters.n_envs), obs)
 
             new_states, rewards, terminated, truncated, infos = env.step(rngs.env(), states, actions)
@@ -161,15 +161,15 @@ class DQN(Generic[TEnvState, TEnvObs]):
 
     def init_training_state(self,
         rngs: nnx.Rngs,
-        q_net: nnx.Module = None,
+        policy: nnx.Module = None,
         replay_buffer_state: ReplayBufferState[Transition[TEnvObs]] | None = None,
         prefill_steps: int = 10_000
     ) -> TrainingState[TEnvState, TEnvObs]:
         # create default network if none given
-        if q_net is None:
-            q_net = self.create_default_q_net(rngs)
+        if policy is None:
+            policy = self.create_default_policy(rngs)
 
-        optimizer = nnx.Optimizer(q_net, optax.inject_hyperparams(optax.adamw)(
+        optimizer = nnx.Optimizer(policy, optax.inject_hyperparams(optax.adamw)(
             learning_rate=resolve_scheduleable(self.hyperparameters.learning_rate, 0)))
         #optimizer = nnx.Optimizer(q_net, optax.adamw(learning_rate=2.5e-4))
 
@@ -179,7 +179,7 @@ class DQN(Generic[TEnvState, TEnvObs]):
 
         # prefill replay buffer
         transitions, env_states = nnx.jit(self.rollout, static_argnames=('iter'))(rngs,
-            q_net,
+            policy,
             math.ceil(prefill_steps / self.hyperparameters.n_envs),
             epsilon=1
         )
@@ -191,8 +191,8 @@ class DQN(Generic[TEnvState, TEnvObs]):
             env_states = env_states,
             replay_buffer_state = replay_buffer_state,
 
-            policy = q_net,
-            target = nnx.clone(q_net),
+            policy = policy,
+            target = nnx.clone(policy),
             optimizer = optimizer
         )
     

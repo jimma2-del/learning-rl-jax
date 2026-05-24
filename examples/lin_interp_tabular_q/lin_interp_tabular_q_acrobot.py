@@ -157,8 +157,8 @@ if VISUALIZE_METHOD == 'gif':
         comb_cum_rewards = jnp.concatenate((comb_cum_rewards, jnp.array((0,)), cum_rewards), axis=0)
 
     vis = Visualizer(gymnax_env, gymnax_env_params, comb_states, comb_cum_rewards)
-    #vis.animate("./examples/lin_interp_tabular_q_acrobot_anim.gif")
-    vis.animate("./examples/lin_interp_tabular_q_cartpole_anim.gif")
+    #vis.animate("./examples/lin_interp_tabular_q/lin_interp_tabular_q_acrobot_anim.gif")
+    vis.animate("./examples/lin_interp_tabular_q/lin_interp_tabular_q_cartpole_anim.gif")
     #vis.animate(save_fname=None, view=True)
 
 elif VISUALIZE_METHOD == 'pygame':

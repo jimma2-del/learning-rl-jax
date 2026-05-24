@@ -1,4 +1,5 @@
 import time
+from os import path
 
 import jax
 import jax.numpy as jnp
@@ -40,8 +41,8 @@ env = FlappyBirdEnv(DT)
 
 ### TRAIN ###
 
-STEPS = 10_000_000#1_000_000
-LOG_INTERVAL_STEPS = 1_000_000#100_000
+STEPS = 1_000_000
+LOG_INTERVAL_STEPS = 100_000
 EVAL_EPS = 32
 
 hyperparameters = dqn.Hyperparameters(
@@ -67,18 +68,28 @@ while training_state.steps < STEPS:
     print("Metrics: " + " ".join([ f"{key}={val}" for key, val in metrics.items() ]))
 
     # eval
-    returns, lengths = nnx.jit(evaluate_episodes, static_argnums=(1, 2, 3, 4, 5))(
-        rngs, env, 
-        lambda rngs, obs: algo.get_action(rngs, training_state.policy, obs), 
-        EVAL_EPS, hyperparameters.n_envs
-    )
+    # returns, lengths = nnx.jit(evaluate_episodes, static_argnums=(1, 2, 3, 4, 5))(
+    #     rngs, env, 
+    #     lambda rngs, obs: algo.get_action(rngs, training_state.policy, obs), 
+    #     EVAL_EPS, hyperparameters.n_envs
+    # )
 
-    print(f"Episode Return: mean={jnp.mean(returns)} std={jnp.std(returns, ddof=1)}")
-    print(f"Episode Length: mean={jnp.mean(lengths)} std={jnp.std(lengths, ddof=1)}")
+    # print(f"Episode Return: mean={jnp.mean(returns)} std={jnp.std(returns, ddof=1)}")
+    # print(f"Episode Length: mean={jnp.mean(lengths)} std={jnp.std(lengths, ddof=1)}")
 
     print()
 
+import orbax.checkpoint as ocp
+
 q_net = training_state.policy
+
+SAVE_PATH = path.abspath('examples/dqn/_tmp/flappybird')
+
+# test save
+_, state = nnx.split(q_net)
+checkpointer_save = ocp.StandardCheckpointer()
+checkpointer_save.save(SAVE_PATH, state)
+
 
 ### ENJOY ###
 
@@ -122,7 +133,7 @@ if VISUALIZE_METHOD == 'gif':
         comb_cum_rewards = jnp.concatenate((comb_cum_rewards, jnp.array((0,)), cum_rewards), axis=0)
 
     vis = Visualizer(gymnax_env, gymnax_env_params, comb_states, comb_cum_rewards)
-    vis.animate("./examples/dqn_test_anim.gif")
+    vis.animate("./examples/dqn/dqn_test_anim.gif")
     #vis.animate(save_fname=None, view=True)
 
 elif VISUALIZE_METHOD == 'pygame':

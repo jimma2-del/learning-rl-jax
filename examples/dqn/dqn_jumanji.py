@@ -113,4 +113,4 @@ for _ in range(NUM_EPISODES):
 
     comb_states += [ jax.tree.map(lambda x: x[i], timesteps.state) for i in range(steps + 1) ]
 
-jumanji_env.animate(comb_states[:ANIMATE_LIMIT], 100, f"./examples/dqn_{ENV_NAME}_animation.gif")
+jumanji_env.animate(comb_states[:ANIMATE_LIMIT], 100, f"./examples/dqn/dqn_{ENV_NAME}_animation.gif")
