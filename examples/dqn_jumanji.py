@@ -68,11 +68,12 @@ training_state = algo.init_training_state(rngs)
 while training_state.steps < STEPS:
     start_time = time.perf_counter()
 
-    training_state = algo.train_epoch(rngs, training_state, LOG_INTERVAL_STEPS)
+    training_state, metrics = algo.train_epoch(rngs, training_state, LOG_INTERVAL_STEPS)
 
     elasped_time = time.perf_counter() - start_time
     sps = LOG_INTERVAL_STEPS / elasped_time
     print(f"Completed steps={training_state.steps}; sps={sps:,.1f}")
+    print("Metrics: " + " ".join([ f"{key}={val}" for key, val in metrics.items() ]))
 
     # eval
     returns, lengths = nnx.jit(evaluate_episodes, static_argnums=(1, 2, 3, 4, 5))(
@@ -83,6 +84,8 @@ while training_state.steps < STEPS:
 
     print(f"Episode Return: mean={jnp.mean(returns)} std={jnp.std(returns, ddof=1)}")
     print(f"Episode Length: mean={jnp.mean(lengths)} std={jnp.std(lengths, ddof=1)}")
+
+    print()
 
 q_net = training_state.policy
 

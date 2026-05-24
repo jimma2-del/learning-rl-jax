@@ -5,7 +5,7 @@ import jax
 
 from jax.typing import ArrayLike
 from chex import dataclass
-from typing import TypeVar, Generic, Sequence, Callable
+from typing import TypeVar, Generic, Any
 
 import functools
 
@@ -201,14 +201,15 @@ class DQN(Generic[TEnvState, TEnvObs]):
         rngs: nnx.Rngs,
         training_state: TrainingState[TEnvState, TEnvObs],
         epoch_steps: int,
-    ) -> TrainingState[TEnvState, TEnvObs]:
+    ) -> tuple[TrainingState[TEnvState, TEnvObs], dict[Any, Any]]:
         """Train for one 'epoch' -- one fully JIT compiled segment."""
 
         steps_per_env_per_iter = math.ceil(self.hyperparameters.train_freq / self.hyperparameters.n_envs)
         total_steps_per_iter = steps_per_env_per_iter * self.hyperparameters.n_envs
         grad_steps_per_iter = math.ceil(self.hyperparameters.n_envs / self.hyperparameters.train_freq)
 
-        def train_iteration(training_state: TrainingState[TEnvState, TEnvObs], rngs: nnx.Rngs):
+        def train_iteration(training_state: TrainingState[TEnvState, TEnvObs], rngs: nnx.Rngs) \
+                -> tuple[TrainingState[TEnvState, TEnvObs], dict[Any, Any]]:
             env_states = training_state.env_states
             steps = training_state.steps
             replay_buffer_state = training_state.replay_buffer_state
@@ -237,7 +238,7 @@ class DQN(Generic[TEnvState, TEnvObs]):
             ## update policy q-table ##
 
             def grad_update(carry: tuple[nnx.Module, nnx.Optimizer], rngs: nnx.Rngs) \
-                -> tuple[tuple[nnx.Module, nnx.Optimizer], ArrayLike]:
+                -> tuple[tuple[nnx.Module, nnx.Optimizer], dict[Any, Any]]:
                 policy_q_net, optimizer = carry
 
                 sampled_transitions = self.replay_buffer.sample(rngs.transitions(), 
@@ -263,9 +264,9 @@ class DQN(Generic[TEnvState, TEnvObs]):
                 loss, grads = loss_grad_func(policy_q_net, rngs)
                 optimizer.update(grads) 
 
-                return (policy_q_net, optimizer), loss
+                return (policy_q_net, optimizer), { 'critic_loss': loss }
 
-            (policy_q_net, optimizer), losses = nnx.scan(grad_update)((policy_q_net, optimizer), 
+            (policy_q_net, optimizer), metrics = nnx.scan(grad_update)((policy_q_net, optimizer), 
                 rngs.fork(split=grad_steps_per_iter))
 
             # update target_q_vals if enough steps have passed
@@ -285,9 +286,9 @@ class DQN(Generic[TEnvState, TEnvObs]):
                 policy=policy_q_net,
                 target=target_q_net,
                 optimizer=optimizer
-            ), losses
+            ), jax.tree.map(lambda x: jnp.mean(x), metrics)
 
         iterations = math.ceil(epoch_steps / total_steps_per_iter)
-        training_state, losses = nnx.scan(train_iteration)(training_state, rngs.fork(split=iterations))
+        training_state, metrics = nnx.scan(train_iteration)(training_state, rngs.fork(split=iterations))
 
-        return training_state
+        return training_state, jax.tree.map(lambda x: jnp.mean(x), metrics)

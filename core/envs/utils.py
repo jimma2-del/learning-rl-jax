@@ -217,8 +217,6 @@ def visualize_pygame(rngs: nnx.Rngs,
                 
                 print()
 
-        steps += 1
-
         image_array = np.asarray(render_func(state, action))
         pygame_surface = pygame.surfarray.make_surface(image_array.swapaxes(0,1))
         screen.blit(pygame_surface, (0,0))
