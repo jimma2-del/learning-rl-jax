@@ -77,14 +77,14 @@ while training_state.steps < STEPS:
     # eval
     returns, lengths = nnx.jit(evaluate_episodes, static_argnums=(1, 2, 3, 4, 5))(
         rngs, env, 
-        lambda rngs, obs: algo.get_greedy_action(rngs, training_state.policy_q_net, obs), 
+        lambda rngs, obs: algo.get_action(rngs, training_state.policy, obs), 
         EVAL_EPS, hyperparameters.n_envs
     )
 
     print(f"Episode Return: mean={jnp.mean(returns)} std={jnp.std(returns, ddof=1)}")
     print(f"Episode Length: mean={jnp.mean(lengths)} std={jnp.std(lengths, ddof=1)}")
 
-q_net = training_state.policy_q_net
+q_net = training_state.policy
 
 ### ENJOY ###
 
@@ -97,7 +97,7 @@ rngs = nnx.Rngs(0, params=1, env=2, actions=3, transitions=4)
 
 #@nnx.jit
 def policy(rngs, obs):
-    return algo.get_greedy_action(rngs, q_net, obs)
+    return algo.get_action(rngs, q_net, obs)
 
 comb_states = []
 

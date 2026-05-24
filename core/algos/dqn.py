@@ -58,8 +58,10 @@ class TrainingState(Generic[TEnvState, TEnvObs]):
     env_states: TEnvState
     replay_buffer_state: ReplayBufferState[Transition[TEnvObs]]
 
-    policy_q_net: nnx.Module
-    target_q_net: nnx.Module
+    policy: nnx.Module 
+        # perhaps named confusingly; policy_q_net, used for getting actions, though not directly an actor
+        # named like this so api matches with other algos
+    target: nnx.Module
     optimizer: nnx.Optimizer
 
 class DQN(Generic[TEnvState, TEnvObs]):
@@ -99,9 +101,7 @@ class DQN(Generic[TEnvState, TEnvObs]):
     def get_random_action(self, rngs: nnx.Rngs) -> ArrayLike:
         return jax.random.randint(rngs.actions(), shape=(), minval=0, maxval=self.num_actions)
 
-    def get_action(self, rngs: nnx.Rngs, q_net: nnx.module, 
-        epsilon: ArrayLike, obs: TEnvObs) -> ArrayLike:
-
+    def get_action(self, rngs: nnx.Rngs, q_net: nnx.module, obs: TEnvObs, epsilon: ArrayLike = 0) -> ArrayLike:
         random_action = self.get_random_action(rngs)
         greedy_action = self.get_greedy_action(rngs, q_net, obs)
 
@@ -119,9 +119,10 @@ class DQN(Generic[TEnvState, TEnvObs]):
 
     def rollout(self,
         rngs: nnx.Rngs, 
-        q_net: nnx.module, epsilon: ArrayLike, 
+        q_net: nnx.module, 
         iter: int,
-        initial_env_states: TEnvState | None = None
+        initial_env_states: TEnvState | None = None,
+        epsilon: ArrayLike = 0
     ) -> Transition[TEnvObs]:
         """Collect a rollout of `Transition`s.
 
@@ -139,7 +140,7 @@ class DQN(Generic[TEnvState, TEnvObs]):
         def batched_env_step(states: TEnvState, rngs: nnx.Rngs) -> tuple[TEnvState, Transition[TEnvObs]]:
             obs = env.get_obs(rngs.env(), states)
 
-            actions = nnx.vmap(lambda rngs, obs: self.get_action(rngs, q_net, epsilon, obs))(
+            actions = nnx.vmap(lambda rngs, obs: self.get_action(rngs, q_net, obs, epsilon))(
                 rngs.fork(split=self.hyperparameters.n_envs), obs)
 
             new_states, rewards, terminated, truncated, infos = env.step(rngs.env(), states, actions)
@@ -161,6 +162,7 @@ class DQN(Generic[TEnvState, TEnvObs]):
     def init_training_state(self,
         rngs: nnx.Rngs,
         q_net: nnx.Module = None,
+        replay_buffer_state: ReplayBufferState[Transition[TEnvObs]] | None = None,
         prefill_steps: int = 10_000
     ) -> TrainingState[TEnvState, TEnvObs]:
         # create default network if none given
@@ -172,14 +174,16 @@ class DQN(Generic[TEnvState, TEnvObs]):
         #optimizer = nnx.Optimizer(q_net, optax.adamw(learning_rate=2.5e-4))
 
         ## initialize ##
+        if replay_buffer_state is None:
+            replay_buffer_state = self.replay_buffer.init()
 
         # prefill replay buffer
         transitions, env_states = nnx.jit(self.rollout, static_argnames=('iter'))(rngs,
-            q_net, 1,
-            math.ceil(prefill_steps / self.hyperparameters.n_envs)
+            q_net,
+            math.ceil(prefill_steps / self.hyperparameters.n_envs),
+            epsilon=1
         )
 
-        replay_buffer_state = self.replay_buffer.init()
         replay_buffer_state = self.replay_buffer.insert(replay_buffer_state, transitions)
 
         return TrainingState(
@@ -187,8 +191,8 @@ class DQN(Generic[TEnvState, TEnvObs]):
             env_states = env_states,
             replay_buffer_state = replay_buffer_state,
 
-            policy_q_net = q_net,
-            target_q_net = nnx.clone(q_net),
+            policy = q_net,
+            target = nnx.clone(q_net),
             optimizer = optimizer
         )
     
@@ -209,16 +213,17 @@ class DQN(Generic[TEnvState, TEnvObs]):
             steps = training_state.steps
             replay_buffer_state = training_state.replay_buffer_state
 
-            policy_q_net = training_state.policy_q_net
-            target_q_net = training_state.target_q_net
+            policy_q_net = training_state.policy
+            target_q_net = training_state.target
             optimizer = training_state.optimizer    
             
             ## sample transitions from environment ##
 
             transitions, env_states = self.rollout(rngs, 
-                policy_q_net, resolve_scheduleable(self.hyperparameters.epsilon, steps),
+                policy_q_net,
                 steps_per_env_per_iter,
-                env_states
+                env_states,
+                epsilon=resolve_scheduleable(self.hyperparameters.epsilon, steps)
             )
 
             replay_buffer_state = self.replay_buffer.insert(replay_buffer_state, transitions)
@@ -277,8 +282,8 @@ class DQN(Generic[TEnvState, TEnvObs]):
                 env_states=env_states,
                 replay_buffer_state=replay_buffer_state,
 
-                policy_q_net=policy_q_net,
-                target_q_net=target_q_net,
+                policy=policy_q_net,
+                target=target_q_net,
                 optimizer=optimizer
             ), losses
 
