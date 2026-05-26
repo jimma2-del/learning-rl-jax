@@ -168,7 +168,7 @@ class LinearlyInterpolatedTabularQ(Generic[TEnvState, TEnvObs]):
             env_states = training_state.env_states
             steps = training_state.steps
             policy_q_vals = training_state.policy_q_vals
-            target_q_vals = training_state.policy_q_vals
+            target_q_vals = training_state.target_q_vals
             epsilon = training_state.epsilon
             
             ## sample transitions from environment ##

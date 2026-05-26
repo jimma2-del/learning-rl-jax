@@ -59,7 +59,7 @@ class TrainingState(Generic[TEnvState, TEnvObs]):
     replay_buffer_state: ReplayBufferState[Transition[TEnvObs]]
 
     policy: nnx.Module 
-        # perhaps named confusingly; policy_q_net, used for getting actions, though not directly an actor
+        # perhaps named confusingly; policy q-network, used for getting actions, though not directly an actor
         # named like this so api matches with other algos
     target: nnx.Module
     optimizer: nnx.Optimizer
@@ -161,7 +161,7 @@ class DQN(Generic[TEnvState, TEnvObs]):
 
     def init_training_state(self,
         rngs: nnx.Rngs,
-        policy: nnx.Module = None,
+        policy: nnx.Module | None = None,
         replay_buffer_state: ReplayBufferState[Transition[TEnvObs]] | None = None,
         prefill_steps: int = 10_000
     ) -> TrainingState[TEnvState, TEnvObs]:
@@ -173,7 +173,6 @@ class DQN(Generic[TEnvState, TEnvObs]):
             learning_rate=resolve_scheduleable(self.hyperparameters.learning_rate, 0)))
         #optimizer = nnx.Optimizer(q_net, optax.adamw(learning_rate=2.5e-4))
 
-        ## initialize ##
         if replay_buffer_state is None:
             replay_buffer_state = self.replay_buffer.init()
 
@@ -206,7 +205,7 @@ class DQN(Generic[TEnvState, TEnvObs]):
 
         steps_per_env_per_iter = math.ceil(self.hyperparameters.train_freq / self.hyperparameters.n_envs)
         total_steps_per_iter = steps_per_env_per_iter * self.hyperparameters.n_envs
-        grad_steps_per_iter = math.ceil(self.hyperparameters.n_envs / self.hyperparameters.train_freq)
+        learn_steps_per_iter = math.ceil(self.hyperparameters.n_envs / self.hyperparameters.train_freq)
 
         def train_iteration(training_state: TrainingState[TEnvState, TEnvObs], rngs: nnx.Rngs) \
                 -> tuple[TrainingState[TEnvState, TEnvObs], dict[Any, Any]]:
@@ -214,14 +213,14 @@ class DQN(Generic[TEnvState, TEnvObs]):
             steps = training_state.steps
             replay_buffer_state = training_state.replay_buffer_state
 
-            policy_q_net = training_state.policy
-            target_q_net = training_state.target
+            policy = training_state.policy
+            target = training_state.target
             optimizer = training_state.optimizer    
             
             ## sample transitions from environment ##
 
             transitions, env_states = self.rollout(rngs, 
-                policy_q_net,
+                policy,
                 steps_per_env_per_iter,
                 env_states,
                 epsilon=resolve_scheduleable(self.hyperparameters.epsilon, steps)
@@ -235,24 +234,25 @@ class DQN(Generic[TEnvState, TEnvObs]):
             optimizer.opt_state.hyperparams['learning_rate'].value \
                 = resolve_scheduleable(self.hyperparameters.learning_rate, steps)
 
-            ## update policy q-table ##
+            ## update policy ##
 
-            def grad_update(carry: tuple[nnx.Module, nnx.Optimizer], rngs: nnx.Rngs) \
-                -> tuple[tuple[nnx.Module, nnx.Optimizer], dict[Any, Any]]:
-                policy_q_net, optimizer = carry
+            def learn_step(carry: tuple[nnx.Module, nnx.Optimizer], rngs: nnx.Rngs) \
+                    -> tuple[tuple[nnx.Module, nnx.Optimizer], dict[Any, Any]]:
+                policy, optimizer = carry
 
                 sampled_transitions = self.replay_buffer.sample(rngs.transitions(), 
                     replay_buffer_state, self.hyperparameters.batch_size)
 
-                max_next_qs = jnp.max(target_q_net(sampled_transitions.next_obs, rngs=rngs), axis=1)
+                next_qs = target(sampled_transitions.next_obs, rngs=rngs)
+                max_next_qs = jnp.max(next_qs, axis=1)
                 # zero out q_val if terminated
                 max_next_qs = max_next_qs * jnp.logical_not(sampled_transitions.terminated)
 
                 target_qs = sampled_transitions.reward \
                     + resolve_scheduleable(self.hyperparameters.discount_rate, steps)*max_next_qs
 
-                def loss_func(policy_q_net: nnx.Module, rngs: nnx.Rngs):
-                    pred_qs_all_actions = policy_q_net(sampled_transitions.obs, rngs=rngs)
+                def loss_func(policy: nnx.Module, rngs: nnx.Rngs):
+                    pred_qs_all_actions = policy(sampled_transitions.obs, rngs=rngs)
                         # q-net returns a q-value for every action
                     pred_qs = pred_qs_all_actions[jnp.arange(self.hyperparameters.batch_size), sampled_transitions.action]
                         # take only the q-value corresponding to the chosen action
@@ -261,21 +261,21 @@ class DQN(Generic[TEnvState, TEnvObs]):
                     return jnp.mean(jnp.power(target_qs - pred_qs, 2))
 
                 loss_grad_func = nnx.value_and_grad(loss_func)
-                loss, grads = loss_grad_func(policy_q_net, rngs)
+                loss, grads = loss_grad_func(policy, rngs)
                 optimizer.update(grads) 
 
-                return (policy_q_net, optimizer), { 'critic_loss': loss }
+                return (policy, optimizer), { 'critic_loss': loss }
 
-            (policy_q_net, optimizer), metrics = nnx.scan(grad_update)((policy_q_net, optimizer), 
-                rngs.fork(split=grad_steps_per_iter))
+            (policy, optimizer), metrics = nnx.scan(learn_step)((policy, optimizer), 
+                rngs.fork(split=learn_steps_per_iter))
 
-            # update target_q_vals if enough steps have passed
-            update_target_net = steps % self.hyperparameters.target_update_interval < total_steps_per_iter
+            # update target if enough steps have passed
+            update_target = steps % self.hyperparameters.target_update_interval < total_steps_per_iter
 
-            nnx.update(target_q_net, nnx.cond(update_target_net, 
-                lambda policy_q_net, target_q_net: nnx.state(policy_q_net), 
-                lambda policy_q_net, target_q_net: nnx.state(target_q_net),
-                policy_q_net, target_q_net
+            nnx.update(target, nnx.cond(update_target, 
+                lambda policy, target: nnx.state(policy), 
+                lambda policy, target: nnx.state(target),
+                policy, target
             ))
 
             return TrainingState(
@@ -283,8 +283,8 @@ class DQN(Generic[TEnvState, TEnvObs]):
                 env_states=env_states,
                 replay_buffer_state=replay_buffer_state,
 
-                policy=policy_q_net,
-                target=target_q_net,
+                policy=policy,
+                target=target,
                 optimizer=optimizer
             ), jax.tree.map(lambda x: jnp.mean(x), metrics)
 

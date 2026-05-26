@@ -12,9 +12,6 @@ import jax.numpy as jnp
 
 from flax import nnx
 
-import pygame
-import numpy as np
-
 from core.envs.base import Environment
 from core.envs.wrappers import AutoResetWrapper
 
@@ -170,6 +167,8 @@ def visualize_pygame(rngs: nnx.Rngs,
     Does not JIT wrap the environment or policy. Try JIT wrapping before passing in if slow,
         though this may incur penalties due to the slow transfer of data between devices.
     """
+    import pygame
+    import numpy as np
 
     render_func = render_func if render_func is not None else env.render
 
