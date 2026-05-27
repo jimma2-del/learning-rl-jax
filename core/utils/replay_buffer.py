@@ -82,9 +82,7 @@ if __name__ == "__main__":
         a: ArrayLike
         b: ArrayLike
 
-    dummy = Sample(a=1, b=1)
-
-    buffer = ReplayBuffer(dummy, 8)
+    buffer = ReplayBuffer[Sample](jax.eval_shape(lambda: Sample(a=1, b=2)), 8)
     buffer_state = buffer.init()
     buffer_state = buffer.insert(buffer_state, Sample(a=jnp.array((1,2,3)), b=jnp.array((11,12,13))))
     buffer_state = buffer.insert(buffer_state, Sample(a=jnp.array((100,200,300)), b=jnp.array((1100,1200,1300))))

@@ -157,7 +157,8 @@ def rollout_episode(rngs: nnx.Rngs,
 def visualize_pygame(rngs: nnx.Rngs, 
     env: Environment[TEnvState, TEnvObs, TEnvAction, TRenderFrame], 
     policy: Callable[[nnx.Rngs, TEnvObs], TEnvAction],
-    window_size: tuple[int, int], fps: int = 10,
+    window_size: tuple[int, int] | None = None, 
+    fps: int = 10,
     render_func: Callable[[TEnvState, TEnvAction], ArrayLike] | None = None,
     verbose: bool = False,
     episode_steps_limit: int | None = None,
@@ -170,9 +171,15 @@ def visualize_pygame(rngs: nnx.Rngs,
     import pygame
     import numpy as np
 
-    render_func = render_func if render_func is not None else env.render
+    if render_func is None:
+        render_func = env.render
 
     state, info = env.reset(rngs.env())
+
+    if window_size is None: # infer window_size from render_func
+        dummy_img = render_func(state, env.action_space.sample(jax.random.key(0)))
+        window_size = dummy_img.shape[-2::-1] # first two dims, swapped
+
     steps = 0
     eps_return = 0
     terminated = False

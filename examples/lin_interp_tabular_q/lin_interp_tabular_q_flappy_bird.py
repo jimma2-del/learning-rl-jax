@@ -1,3 +1,5 @@
+import time
+
 import jax
 from jax.typing import ArrayLike
 import chex
@@ -6,16 +8,17 @@ import jax.numpy as jnp
 
 from optax import schedules
 
+from flax import nnx
+
 from core.envs.flappy_bird import FlappyBirdEnv, State
 
 from core.envs.wrappers import Wrapper
 from core.envs.base import Space
 
-from core.algos.linearly_interpolated_tabular_q import LinearlyInterpolatedTabularQ, TabularQHyperparameters
-from core.utils import LinearlyInterpolatedTable
+from core.envs.utils import evaluate_episodes
 
-SEED = 2
-key = jax.random.key(SEED)
+from core.algos import linearly_interpolated_tabular_q
+from core.utils import LinearlyInterpolatedTable
 
 DT = 0.1
 env = FlappyBirdEnv(DT)
@@ -50,42 +53,65 @@ q_table = LinearlyInterpolatedTable(
     step=(  50,    5 )
 ) # bird_vel_y, pipe_dy
 
+rngs = nnx.Rngs(0, params=1, env=2, actions=3, transitions=4)
+
 STEPS = 10_000_000
 LOG_INTERVAL_STEPS = 1_000_000
+EVAL_EPS = 32
 
-hyperparameters = TabularQHyperparameters(
+hyperparameters = linearly_interpolated_tabular_q.Hyperparameters(
     discount_rate = 0.95,
-    learning_rate = 0.01,
+    learning_rate = 0.1,
 
-    epsilon_final = 0.05,
+    epsilon = schedules.linear_schedule(1, 0.05, 0.1*STEPS),
 
-    replay_buffer_size = 1000,
+    replay_buffer_size = 100_000,
     batch_size = 32,
-    train_freq = 1,
-    n_envs = 16, #256,
+    train_freq = 32,#4,
+    n_envs = 32, #256,
 
-    target_update_interval = 1000,
+    target_update_interval = 1,#1000,
 )
 
-algo = LinearlyInterpolatedTabularQ(env, q_table, hyperparameters)
+algo = linearly_interpolated_tabular_q.LinearlyInterpolatedTabularQ(env, q_table, hyperparameters)
 
-key, train_key = jax.random.split(key, 2)
-q_vals = algo.train(train_key, STEPS, log_interval_steps=LOG_INTERVAL_STEPS)
+training_state = algo.init_training_state(rngs)
+
+while training_state.steps < STEPS:
+    start_time = time.perf_counter()
+
+    training_state, metrics = algo.train_epoch(rngs, training_state, LOG_INTERVAL_STEPS)
+
+    elasped_time = time.perf_counter() - start_time
+    sps = LOG_INTERVAL_STEPS / elasped_time
+    print(f"Completed steps={training_state.steps}; sps={sps:,.1f}")
+    print("Metrics: " + " ".join([ f"{key}={val}" for key, val in metrics.items() ]))
+
+    # eval
+    returns, lengths = nnx.jit(evaluate_episodes, static_argnums=(1, 2, 3, 4, 5))(
+        rngs, env, 
+        lambda rngs, obs: algo.get_action(rngs, training_state.policy, obs), 
+        EVAL_EPS, hyperparameters.n_envs
+    )
+
+    print(f"Episode Return: mean={jnp.mean(returns)} std={jnp.std(returns, ddof=1)}")
+    print(f"Episode Length: mean={jnp.mean(lengths)} std={jnp.std(lengths, ddof=1)}")
+
+    print()
 
 ### ENJOY ###
-from flax import nnx
 from core.envs.utils import visualize_pygame
 
 rngs = nnx.Rngs(0, params=1, env=5, actions=3, transitions=4)
 
 def policy(rngs, obs):
-    return algo.get_greedy_action(q_vals, obs)
+    print(jax.vmap(algo.q_table.get, in_axes=[0, None])(training_state.policy, obs))
+    return algo.get_action(rngs, training_state.policy, obs)
 
 FPS = round(1/DT)
-window_size = (env.settings.window_size[1], env.settings.window_size[0])
 
 visualize_pygame(
     rngs, env, policy, 
-    window_size, FPS, 
+    fps=FPS, 
     verbose=False
 )

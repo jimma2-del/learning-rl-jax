@@ -98,22 +98,20 @@ if VISUALIZE_METHOD == 'gif':
 elif VISUALIZE_METHOD == 'pygame':
     # Acrobot
     # FPS = 10
-    # window_size = render_acrobot(None, gymnax_env_params, env.reset(rngs.env())[0]).swapaxes(0,1).shape[:2]
 
     # visualize_pygame(
     #     rngs, env, policy, 
-    #     window_size, FPS, 
-    #     lambda state, action: render_acrobot(None, gymnax_env_params, state),
+    #     fps=FPS, 
+    #     render_func=lambda state, action: render_acrobot(None, gymnax_env_params, state),
     #     episode_steps_limit=MAX_STEPS,
     #     verbose=False
     # )
 
     ## Flappy Bird
     FPS = round(1/DT)
-    window_size = (env.settings.window_size[1], env.settings.window_size[0])
 
     visualize_pygame(
         rngs, env, policy, 
-        window_size, FPS, 
+        fps=FPS, 
         verbose=False
     )

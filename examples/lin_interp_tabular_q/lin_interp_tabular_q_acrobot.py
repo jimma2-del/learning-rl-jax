@@ -1,20 +1,25 @@
+import time
+
 import jax
 import jax.numpy as jnp
+
+from optax import schedules
+from flax import nnx
 
 from gymnax.environments import Acrobot, CartPole
 from core.envs.gymnax import GymnaxWrapper, Space
 
 from core.envs.wrappers import Wrapper
 
-from core.algos.linearly_interpolated_tabular_q import LinearlyInterpolatedTabularQ, TabularQHyperparameters
+from core.envs.utils import evaluate_episodes
+
+from core.algos import linearly_interpolated_tabular_q
 from core.utils import LinearlyInterpolatedTable
 
 #jax.config.update("jax_log_compiles", True)
 
-SEED = 2
-key = jax.random.key(SEED)
-
-gymnax_env = Acrobot()
+gymnax_env = CartPole()
+#gymnax_env = Acrobot()
 gymnax_env_params = gymnax_env.default_params
 
 env = GymnaxWrapper(gymnax_env)
@@ -55,7 +60,7 @@ class AcrobotWrapper(Wrapper):
             high=jnp.array((jnp.pi, jnp.pi, 13, 29), dtype=jnp.float32)
         )
 
-env = AcrobotWrapper(env)
+#env = AcrobotWrapper(env)
 
 ### TRAIN ###
 Q_TABLE_GRIDPOINTS_PER_AXIS = 10
@@ -78,11 +83,11 @@ Q_TABLE_GRIDPOINTS_PER_AXIS = 10
 #     step=(0.4, 0.4, 2, 4)
 # )
 
-q_table = LinearlyInterpolatedTable(
-    min=(-3.2, -3.2, -6, -15), 
-    max=(3.2, 3.2, 6, 15), 
-    step=(0.2, 0.4, 0.25, 0.25)
-)
+# q_table = LinearlyInterpolatedTable(
+#     min=(-3.2, -3.2, -6, -15), 
+#     max=(3.2, 3.2, 6, 15), 
+#     step=(0.2, 0.4, 0.25, 0.25)
+# )
 
 # # testing performance on a smaller table
 # q_table = LinearlyInterpolatedTable(
@@ -92,36 +97,58 @@ q_table = LinearlyInterpolatedTable(
 # )
 
 # # CARTPOLE
-# q_table = LinearlyInterpolatedTable(
-#     min=(-2.4, -2.4, -0.2095, -2.4), 
-#     max=(2.4, 2.4, 0.2095, 2.4), 
-#     #step=(0.1, 0.1, 0.005, 0.05)
-#     step=(0.2, 0.2, 0.02, 0.2)
-# )
+q_table = LinearlyInterpolatedTable(
+    min=(-2.4, -2.4, -0.2095, -2.4), 
+    max=(2.4, 2.4, 0.2095, 2.4), 
+    #step=(0.1, 0.1, 0.005, 0.05)
+    step=(0.2, 0.2, 0.02, 0.2)
+)
 
-hyperparameters = TabularQHyperparameters(
+rngs = nnx.Rngs(0, params=1, env=2, actions=3, transitions=4)
+
+STEPS = 10_000_000#1_000_000_000
+LOG_INTERVAL_STEPS = 1_000_000#10_000_000
+EVAL_EPS = 256
+
+hyperparameters = linearly_interpolated_tabular_q.Hyperparameters(
     discount_rate = 0.98,
-    learning_rate = 0.01,
+    learning_rate = 0.1,
 
-    epsilon_final = 0.01,
+    epsilon = schedules.linear_schedule(1, 0.05, 0.1*STEPS),
 
-    replay_buffer_size = 4096, #1024,
-    batch_size = 256, #64,
-    train_freq = 1,
+    replay_buffer_size = 100_000,#4096, #1024,
+    batch_size = 32,
+    train_freq = 4,
     n_envs = 256, #64,
 
     target_update_interval = 4096, #512,
 )
 
-algo = LinearlyInterpolatedTabularQ(env, q_table, hyperparameters)
+algo = linearly_interpolated_tabular_q.LinearlyInterpolatedTabularQ(env, q_table, hyperparameters)
 
-#q_vals = algo.init_q_table_vals()
+training_state = algo.init_training_state(rngs)
 
-STEPS = 10_000_000#1_000_000_000
-LOG_INTERVAL_STEPS = 1_000_000#10_000_000
+while training_state.steps < STEPS:
+    start_time = time.perf_counter()
 
-key, train_key = jax.random.split(key, 2)
-q_vals = algo.train(train_key, STEPS, log_interval_steps=LOG_INTERVAL_STEPS)
+    training_state, metrics = algo.train_epoch(rngs, training_state, LOG_INTERVAL_STEPS)
+
+    elasped_time = time.perf_counter() - start_time
+    sps = LOG_INTERVAL_STEPS / elasped_time
+    print(f"Completed steps={training_state.steps}; sps={sps:,.1f}")
+    print("Metrics: " + " ".join([ f"{key}={val}" for key, val in metrics.items() ]))
+
+    # eval
+    returns, lengths = nnx.jit(evaluate_episodes, static_argnums=(1, 2, 3, 4, 5))(
+        rngs, env, 
+        lambda rngs, obs: algo.get_action(rngs, training_state.policy, obs), 
+        EVAL_EPS, hyperparameters.n_envs
+    )
+
+    print(f"Episode Return: mean={jnp.mean(returns)} std={jnp.std(returns, ddof=1)}")
+    print(f"Episode Length: mean={jnp.mean(lengths)} std={jnp.std(lengths, ddof=1)}")
+
+    print()
 
 ### ENJOY ###
 
@@ -136,9 +163,9 @@ from core.envs.utils import rollout_episode, visualize_pygame
 rngs = nnx.Rngs(0, params=1, env=5, actions=3, transitions=4)
 
 def policy(rngs, obs):
-    return algo.get_greedy_action(q_vals, obs)
+    return algo.get_greedy_action(rngs, training_state.policy, obs)
 
-VISUALIZE_METHOD = "pygame"
+VISUALIZE_METHOD = "gif"
 
 if VISUALIZE_METHOD == 'gif':
     NUM_EPISODES = 1
@@ -163,11 +190,10 @@ if VISUALIZE_METHOD == 'gif':
 
 elif VISUALIZE_METHOD == 'pygame':
     FPS = 10
-    window_size = render_acrobot(None, gymnax_env_params, env.reset(rngs.env())[0]).swapaxes(0,1).shape[:2]
 
     visualize_pygame(
         rngs, env, policy, 
-        window_size, FPS, 
-        lambda state, action: render_acrobot(None, gymnax_env_params, state),
+        fps=FPS, 
+        render_func=lambda state, action: render_acrobot(None, gymnax_env_params, state),
         verbose=False
     )

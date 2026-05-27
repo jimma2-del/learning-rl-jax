@@ -29,7 +29,7 @@ class Hyperparameters:
 
     batch_size: int = 32
 
-    epsilon: Scheduleable[float] = 0.1
+    epsilon: Scheduleable[float] = 0.05
         # it is recommended to use a schedule: decay from 1 to ~0.05 over ~10% of training steps
         # eg. optax.schedules.linear_schedule(1, 0.05, 0.1*steps)
 

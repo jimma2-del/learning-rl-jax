@@ -28,11 +28,11 @@ class Hyperparameters:
 
     batch_size: int = 32
 
-    epsilon: Scheduleable[float] = 0.1
+    epsilon: Scheduleable[float] = 0.05
         # it is recommended to use a schedule: decay from 1 to ~0.05 over ~10% of training steps
         # eg. optax.schedules.linear_schedule(1, 0.05, 0.1*steps)
 
-    replay_buffer_size: int = 1000
+    replay_buffer_size: int = 10_000
 
     train_freq: int = 4 # does around 1 gradient step per train_freq env steps
         # NOTE: if n_envs > train_freq, we take 1 step in each env, followed by multiple gradient steps
