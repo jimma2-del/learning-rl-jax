@@ -70,3 +70,17 @@ def flatten_batched_tree(unbatched_shapes_dtypes, x) -> jax.Array:
     batch_dims = get_tree_batch_dims(unbatched_shapes_dtypes, x)
 
     return jnp.concatenate([ leaf.reshape((*batch_dims, -1)) for leaf in leaves_x ], axis=-1)
+
+def get_tree_vmap_dim(tree):
+    """Finds the length of the leading axis of the PyTree leaves, ensuring that these lengths are all equal.
+    This dimension would be the batch dimension if passed into a vmap'ed function.
+    """
+    
+    leaves = jax.tree.leaves(tree)
+    assert leaves, "`tree` cannot be empty"
+    dim = leaves[0].shape[0] # all leaves must be arrays to be usable in vmap
+
+    assert all([ leaf.shape[0] == leaves[0].shape[0] for leaf in leaves ] ), \
+        "Leaf batch dimensions are not the same."
+
+    return dim

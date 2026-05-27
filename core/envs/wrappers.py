@@ -12,6 +12,7 @@ from jax.typing import ArrayLike
 import jax.numpy as jnp
 
 from .base import Environment, Space
+from core.utils.batch_utils import get_tree_vmap_dim
 
 TEnvState = TypeVar("TEnvState")
 TEnvObs = TypeVar("TEnvObs")
@@ -144,11 +145,11 @@ class VmapWrapper(
 
     def step(self, key: chex.PRNGKey, state: TEnvState, action: TEnvAction) \
             -> tuple[TEnvState, jax.Array, jax.Array, jax.Array, dict[Any, Any]]:
-        if jnp.isscalar(key): key = jax.random.split(key, jax.tree.leaves(state)[0].shape[0])
+        if jnp.isscalar(key): key = jax.random.split(key, get_tree_vmap_dim(state))
         return jax.vmap(super().step)(key, state, action)
 
     def get_obs(self, key: chex.PRNGKey, state: TEnvState) -> TEnvObs:
-        if jnp.isscalar(key): key = jax.random.split(key, jax.tree.leaves(state)[0].shape[0])
+        if jnp.isscalar(key): key = jax.random.split(key, get_tree_vmap_dim(state))
         return jax.vmap(super().get_obs)(key, state)
 
 NEXT_STATE_INFO_KEY = 'next_state'
@@ -159,7 +160,9 @@ class AutoResetWrapper(
 ):
     """Automatically resets the environment if terminated or truncated, returning the resetted state as the next state
     Places the original, unresetted terminal state into `info[NEXT_STATE_INFO_KEY]` (useful eg. for truncation)
-    NOTE: Do NOT use with `jax.vmap`/`VmapWrapper`; `VmapAutoResetWrapper` provides a more efficient implementation.
+
+    In very rare cases where resetting the environment is extremely expensive, for vectorization, 
+        try `VmapConditionallyResetWrapper(env)` instead of `VmapWrapper(AutoResetWrapper((env))`.
     """
 
     NEXT_STATE_INFO_KEY = NEXT_STATE_INFO_KEY
@@ -177,22 +180,25 @@ class AutoResetWrapper(
 
         return new_state, reward, terminated, truncated, info
 
-class VmapAutoResetWrapper(
+class VmapConditionallyResetWrapper(
     Generic[TEnvState, TEnvObs, TEnvAction, TRenderFrame],
     Wrapper[TEnvState, TEnvObs, TEnvAction, TRenderFrame]
 ):
     """Vmaps the `reset`, `step`, and `get_obs` methods, and automatically resets the environment if terminated or truncated.
+
+    IMPORTANT: Only use this wrapper if resetting the environment is extremely expensive.
+        For most use cases, this will be MUCH SLOWER. Use `VmapWrapper(AutoResetWrapper(env))` instead.
+
+    Equivalent to `VmapWrapper(AutoResetWrapper(env))`, but with a possibly faster implementation of the `step` method:
+        - `jax.vmap` forces both branches of every `jax.lax.cond` inside to be run; 
+            this forces `env.reset` to run every step, even if the env is not terminated or truncated.
+        - This wrapper uses `jax.lax.map` instead, allowing conditional execution of `env.reset`
 
     Does not alter `observation_space` or `action_space` as the batch size is unknown.
     Does not alter the `render` method as it may not be jittable.
     Supports both single and batched PRNG keys.
 
     Places the original, unresetted terminal state into `info[NEXT_STATE_INFO_KEY]` (useful eg. for truncation)
-
-    Equivalent to `VmapWrapper(AutoResetWrapper(env))`, but with a more efficient implementation of the `step` method:
-        - `jax.vmap` forces both branches of every `jax.lax.cond` inside to be run; 
-            this computes `env.reset` every step, even if the env is not terminated or truncated.
-        - This wrapper uses `jax.map` instead, allowing conditional execution of `env.reset`
     """
 
     NEXT_STATE_INFO_KEY = NEXT_STATE_INFO_KEY
@@ -205,16 +211,16 @@ class VmapAutoResetWrapper(
     def step(self, key: chex.PRNGKey, state: TEnvState, action: TEnvAction) \
             -> tuple[TEnvState, jax.Array, jax.Array, jax.Array, dict[Any, Any]]:
 
-        if jnp.isscalar(key): key = jax.random.split(key, jax.tree.leaves(state)[0].shape[0])
+        if jnp.isscalar(key): key = jax.random.split(key, get_tree_vmap_dim(state))
         step_key, reset_key = jax.vmap(jax.random.split)(key).T
 
         next_state, reward, terminated, truncated, info = jax.vmap(super().step)(step_key, state, action)
         info[self.NEXT_STATE_INFO_KEY] = next_state
 
         # reset env if terminated/truncated, don't otherwise; jax.lax.map instead of jax.vmap to allow for branching
-        # new_state = jax.lax.map(self._conditionally_reset,
-        #     (reset_key, next_state, jnp.logical_or(terminated, truncated)))
-        new_state = jax.vmap(self._conditionally_reset)((reset_key, next_state, jnp.logical_or(terminated, truncated)))
+        new_state = jax.lax.map(self._conditionally_reset,
+            (reset_key, next_state, jnp.logical_or(terminated, truncated)))
+        #new_state = jax.vmap(self._conditionally_reset)((reset_key, next_state, jnp.logical_or(terminated, truncated)))
 
         return new_state, reward, terminated, truncated, info
 
@@ -222,9 +228,9 @@ class VmapAutoResetWrapper(
         key, state, do_reset = x
 
         return jax.lax.cond(do_reset, 
-            lambda key: super(VmapAutoResetWrapper, self).reset(key)[0], lambda key: state,
+            lambda key: super(VmapConditionallyResetWrapper, self).reset(key)[0], lambda key: state,
             key)
 
     def get_obs(self, key: chex.PRNGKey, state: TEnvState) -> TEnvObs:
-        if jnp.isscalar(key): key = jax.random.split(key, jax.tree.leaves(state)[0].shape[0])
+        if jnp.isscalar(key): key = jax.random.split(key, get_tree_vmap_dim(state))
         return jax.vmap(super().get_obs)(key, state)

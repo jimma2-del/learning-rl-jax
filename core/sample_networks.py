@@ -8,7 +8,7 @@ import jax
 
 from flax import nnx
 
-from core.utils import jax_utils
+from core.utils.batch_utils import flatten_batched_tree
 
 class MLP(nnx.Module):
 
@@ -88,7 +88,7 @@ class MLPFeatureExtractor(nnx.Module, Generic[TInputType]):
             self.output_norm = nnx.LayerNorm(output_dim, rngs=rngs)
 
     def __call__(self, x: Generic[TInputType], rngs: nnx.Rngs):
-        x = jax_utils.flatten_batched_tree(self.input_shapes_dtypes, x)
+        x = flatten_batched_tree(self.input_shapes_dtypes, x)
 
         x = self.mlp(x, rngs=rngs)
 

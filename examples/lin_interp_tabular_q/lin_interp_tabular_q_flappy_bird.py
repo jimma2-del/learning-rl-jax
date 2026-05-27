@@ -55,8 +55,8 @@ q_table = LinearlyInterpolatedTable(
 
 rngs = nnx.Rngs(0, params=1, env=2, actions=3, transitions=4)
 
-STEPS = 10_000_000
-LOG_INTERVAL_STEPS = 1_000_000
+STEPS = 2_000_000
+LOG_INTERVAL_STEPS = 200_000
 EVAL_EPS = 32
 
 hyperparameters = linearly_interpolated_tabular_q.Hyperparameters(
@@ -67,10 +67,10 @@ hyperparameters = linearly_interpolated_tabular_q.Hyperparameters(
 
     replay_buffer_size = 100_000,
     batch_size = 32,
-    train_freq = 32,#4,
+    train_freq = 4,
     n_envs = 32, #256,
 
-    target_update_interval = 1,#1000,
+    target_update_interval = 1000,
 )
 
 algo = linearly_interpolated_tabular_q.LinearlyInterpolatedTabularQ(env, q_table, hyperparameters)
@@ -105,7 +105,7 @@ from core.envs.utils import visualize_pygame
 rngs = nnx.Rngs(0, params=1, env=5, actions=3, transitions=4)
 
 def policy(rngs, obs):
-    print(jax.vmap(algo.q_table.get, in_axes=[0, None])(training_state.policy, obs))
+    #print(jax.vmap(algo.q_table.get, in_axes=[0, None])(training_state.policy, obs))
     return algo.get_action(rngs, training_state.policy, obs)
 
 FPS = round(1/DT)

@@ -142,10 +142,10 @@ class TabularQ(Generic[TEnvState, TEnvObs]):
         iter: int,
         initial_env_states: TEnvState | None = None,
         epsilon: ArrayLike = 0
-    ) -> Transition[TEnvObs]:
+    ) -> tuple[Transition[TEnvObs], TEnvState]:
         """Collect a rollout of `Transition`s.
 
-        Runs `n_envs` environments in parallel for `iter` iterations,
+        Runs `n_envs` environments in parallel for `iter` steps each,
             for a total of `iter * n_envs` transitions.
 
         Initializes initial environment states if none given.

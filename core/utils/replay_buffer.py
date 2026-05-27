@@ -9,7 +9,7 @@ import jax
 from jax import flatten_util
 import jax.numpy as jnp
 
-from core.utils import jax_utils
+from core.utils.batch_utils import get_tree_batch_dims
 
 TReplayBufferItem = TypeVar("TReplayBufferItem")
 
@@ -50,7 +50,7 @@ class ReplayBuffer(Generic[TReplayBufferItem]):
             self.item_shapes_dtypes, items
         )
 
-        insert_n = jax_utils.get_tree_batch_dims(self.item_shapes_dtypes, items)[0]
+        insert_n = get_tree_batch_dims(self.item_shapes_dtypes, items)[0]
 
         if insert_n > self.capacity:
             return ReplayBufferState(

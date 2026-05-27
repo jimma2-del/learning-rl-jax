@@ -12,8 +12,10 @@ import jax.numpy as jnp
 
 from flax import nnx
 
+from core.utils.batch_utils import get_tree_vmap_dim
+
 from core.envs.base import Environment
-from core.envs.wrappers import AutoResetWrapper
+from core.envs.wrappers import AutoResetWrapper, VmapWrapper, VmapConditionallyResetWrapper
 
 TEnvState = TypeVar("TEnvState")
 TEnvObs = TypeVar("TEnvObs")
@@ -29,11 +31,20 @@ def evaluate_episodes(rngs: nnx.Rngs,
     """Runs the policy in `n_envs` environments in parallel until completing `episodes` episodes, 
     returning an array of trajectory returns and and an array of trajectory lengths.
 
+    `env` does not need to already be wrapped with `VmapWrapper`/`AutoResetWrapper`/`VmapConditionallyResetWrapper`.
+        If `env` is already wrapped with these, ensure they are placed at the top level
+        so that they can be detected, avoiding duplicate wrapping.
+
     Runs at LEAST `episodes` episodes. If `episodes` is not a multiple of `n_envs`, will run the next multiple.
     """
 
     eps_per_env = math.ceil(episodes / n_envs)
-    env = AutoResetWrapper(env)
+
+    if isinstance(env, VmapWrapper) or isinstance(env, VmapConditionallyResetWrapper):
+        env = env.env
+
+    if not isinstance(env, AutoResetWrapper):
+        env = AutoResetWrapper(env)
 
     def env_step(carry):
         eps_done, rngs, env_state, cur_return, eps_returns, cur_len, eps_lens = carry
@@ -85,18 +96,22 @@ class Timestep(Generic[TEnvState, TEnvObs, TEnvAction]):
     action: TEnvAction
     reward: ArrayLike
     info: dict[Any, Any]
+    terminated: bool
+    truncated: bool
 
 def rollout_episode(rngs: nnx.Rngs, 
     env: Environment[TEnvState, TEnvObs, TEnvAction, TRenderFrame], 
     policy: Callable[[nnx.Rngs, TEnvObs], TEnvAction],
     steps_limit: int | None = None,
     chunk_size: int = 100,
-) -> tuple[Timestep, bool]:
+) -> tuple[Timestep[TEnvState, TEnvObs, TEnvAction], bool]:
     """Rollout one episode. Intended for visualization, rather than training. Do NOT JIT.
 
-    Returns: timesteps, truncated
+    Performs rollout in chunks of `chunk_size` steps for speed, combining chunks at the end.
+
+    Returns: timesteps
         length of states, infos, and observations will be one greater than actions and rewards
-        truncated is a single bool, True if the episode was truncated or `steps_limit` reached, False if terminated
+        last timestep will have either terminated=True or truncated=True
     """
 
     if steps_limit is not None:
@@ -111,10 +126,8 @@ def rollout_episode(rngs: nnx.Rngs,
         state, reward, terminated, truncated, info = env.step(rngs.env(), state, action)
         obs = env.get_obs(rngs.env(), state)
 
-        return (state, obs), (
-            Timestep(state=state, obs=obs, action=action, reward=reward, info=info), 
-            terminated, truncated
-        )
+        return (state, obs), Timestep(state=state, obs=obs, action=action, reward=reward, info=info,
+            terminated=terminated, truncated=truncated)
 
     state, info = env.reset(rngs.env())
     obs = env.get_obs(rngs.env(), state)
@@ -126,19 +139,24 @@ def rollout_episode(rngs: nnx.Rngs,
     if jax.tree.structure(info) != jax.tree.structure(dummy_step_info):
         info = dummy_step_info
 
-    comb_timesteps = Timestep(state=state, obs=obs, info=info, reward=0, action=env.action_space.low)
+    comb_timesteps = Timestep(
+        state=state, obs=obs, info=info, 
+        reward=0, action=env.action_space.low, # dummy value for first reward/action; removed later
+        terminated=False, truncated=False
+    )
+
+    # add batch dimension
     comb_timesteps = jax.tree.map(lambda x: jnp.array((x,)), comb_timesteps)
 
     done = False
     
     while not done:
-        (state, obs), (timesteps, terminateds, truncateds) = rollout(
+        (state, obs), timesteps = rollout(
             (state, obs), rngs.fork(split=chunk_size))
 
-        dones = jnp.logical_or(terminateds, truncateds)
+        dones = jnp.logical_or(timesteps.terminated, timesteps.truncated)
         done_idx = jnp.argmax(dones)
         done = dones[done_idx]
-        terminated = terminateds[done_idx]
 
         if done:
             timesteps = jax.tree.map(lambda x: x[:done_idx+1], timesteps)
@@ -148,11 +166,65 @@ def rollout_episode(rngs: nnx.Rngs,
 
         if steps_limit is not None:
             break
-
+    
+    # remove first dummy value; reward and action will have 1 fewer element
     comb_timesteps.reward = comb_timesteps.reward[1:]
     comb_timesteps.action = comb_timesteps.action[1:]
 
-    return comb_timesteps, jnp.logical_not(terminated)
+    return comb_timesteps
+
+def parallel_rollout(rngs: nnx.Rngs,
+    env: Environment[TEnvState, TEnvObs, TEnvAction, TRenderFrame],
+    policy: Callable[[nnx.Rngs, TEnvObs], TEnvAction],
+    iter: int,
+    n_envs: int | None = 32,
+    initial_env_states: TEnvState | None = None,
+) -> tuple[Timestep[TEnvState, TEnvObs, TEnvAction], TEnvState]:
+    """Runs `n_envs` environments in parallel for `iter` steps each,
+        for a total of `iter * n_envs` steps.
+
+    Automatically resets environments that finish.
+        Places original, unresetted terminal states into `info[AutoResetWrapper.NEXT_STATE_INFO_KEY]` (useful eg. for truncation)
+
+    `policy` should accept a batched input of `rngs` and `obs`. Apply `jax.vmap` before passing in if not already batched.
+
+    `env` does not need to already be wrapped with `VmapWrapper`/`AutoResetWrapper`/`VmapConditionallyResetWrapper`.
+        If `env` is already wrapped with these, ensure they are placed at the top level
+        so that they can be detected, avoiding duplicate wrapping.
+
+    Initializes `n_envs` initial environment states if none given.
+    `n_envs` can be infered from the length of the axis if `initial_env_states` is given.
+
+    Returns: Timestep's, final environment states
+        timesteps will have two extra leading axes: `shape = (iter, n_envs, ...)`
+    """
+
+    if not isinstance(env, VmapConditionallyResetWrapper):
+        if not isinstance(env, VmapWrapper):
+            if not isinstance(env, AutoResetWrapper):
+                env = AutoResetWrapper(env)
+
+            env = VmapWrapper(env)
+
+    if initial_env_states is None:
+        assert n_envs is not None, "Must specify `n_envs` if `initial_env_states` not given."
+        initial_env_states, info = env.reset(rngs.env(), num=n_envs)
+    elif n_envs is None:
+        n_envs = get_tree_vmap_dim(initial_env_states)
+
+    def batched_env_step(states: TEnvState, rngs: nnx.Rngs) -> tuple[TEnvState, Timestep[TEnvState, TEnvObs, TEnvAction]]:
+        obs = env.get_obs(rngs.env(), states)
+
+        actions = policy(rngs.fork(split=n_envs), obs)
+
+        new_states, rewards, terminateds, truncateds, infos = env.step(rngs.env(), states, actions)
+
+        return new_states, Timestep(state=states, obs=obs, action=actions, reward=rewards, 
+            info=infos, terminated=terminateds, truncated=truncateds)
+
+    env_states, timesteps = nnx.scan(batched_env_step)(initial_env_states, rngs.fork(split=iter))
+
+    return timesteps, env_states
 
 def visualize_pygame(rngs: nnx.Rngs, 
     env: Environment[TEnvState, TEnvObs, TEnvAction, TRenderFrame], 

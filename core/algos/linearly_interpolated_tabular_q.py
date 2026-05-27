@@ -116,10 +116,10 @@ class LinearlyInterpolatedTabularQ(Generic[TEnvState, TEnvObs]):
         iter: int,
         initial_env_states: TEnvState | None = None,
         epsilon: ArrayLike = 0
-    ) -> Transition[TEnvObs]:
+    ) -> tuple[Transition[TEnvObs], TEnvState]:
         """Collect a rollout of `Transition`s.
 
-        Runs `n_envs` environments in parallel for `iter` iterations,
+        Runs `n_envs` environments in parallel for `iter` steps each,
             for a total of `iter * n_envs` transitions.
 
         Initializes initial environment states if none given.
@@ -226,7 +226,7 @@ class LinearlyInterpolatedTabularQ(Generic[TEnvState, TEnvObs]):
                     jax.vmap(lambda action: 
                         self.q_table.get(target[action], obs)
                     )(jnp.arange(self.num_actions))
-                )(sampled_transitions.obs)
+                )(sampled_transitions.next_obs)
 
                 max_next_qs = jnp.max(next_qs, axis=1)
                 # zero out q_val if terminated

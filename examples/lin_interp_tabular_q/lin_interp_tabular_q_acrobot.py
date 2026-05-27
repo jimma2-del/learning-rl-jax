@@ -18,8 +18,8 @@ from core.utils import LinearlyInterpolatedTable
 
 #jax.config.update("jax_log_compiles", True)
 
-gymnax_env = CartPole()
-#gymnax_env = Acrobot()
+#gymnax_env = CartPole()
+gymnax_env = Acrobot()
 gymnax_env_params = gymnax_env.default_params
 
 env = GymnaxWrapper(gymnax_env)
@@ -60,7 +60,7 @@ class AcrobotWrapper(Wrapper):
             high=jnp.array((jnp.pi, jnp.pi, 13, 29), dtype=jnp.float32)
         )
 
-#env = AcrobotWrapper(env)
+env = AcrobotWrapper(env)
 
 ### TRAIN ###
 Q_TABLE_GRIDPOINTS_PER_AXIS = 10
@@ -83,11 +83,11 @@ Q_TABLE_GRIDPOINTS_PER_AXIS = 10
 #     step=(0.4, 0.4, 2, 4)
 # )
 
-# q_table = LinearlyInterpolatedTable(
-#     min=(-3.2, -3.2, -6, -15), 
-#     max=(3.2, 3.2, 6, 15), 
-#     step=(0.2, 0.4, 0.25, 0.25)
-# )
+q_table = LinearlyInterpolatedTable(
+    min=(-3.2, -3.2, -6, -15), 
+    max=(3.2, 3.2, 6, 15), 
+    step=(0.2, 0.4, 0.25, 0.25)
+)
 
 # # testing performance on a smaller table
 # q_table = LinearlyInterpolatedTable(
@@ -97,17 +97,17 @@ Q_TABLE_GRIDPOINTS_PER_AXIS = 10
 # )
 
 # # CARTPOLE
-q_table = LinearlyInterpolatedTable(
-    min=(-2.4, -2.4, -0.2095, -2.4), 
-    max=(2.4, 2.4, 0.2095, 2.4), 
-    #step=(0.1, 0.1, 0.005, 0.05)
-    step=(0.2, 0.2, 0.02, 0.2)
-)
+# q_table = LinearlyInterpolatedTable(
+#     min=(-2.4, -2.4, -0.2095, -2.4), 
+#     max=(2.4, 2.4, 0.2095, 2.4), 
+#     #step=(0.1, 0.1, 0.005, 0.05)
+#     step=(0.2, 0.2, 0.02, 0.2)
+# )
 
 rngs = nnx.Rngs(0, params=1, env=2, actions=3, transitions=4)
 
-STEPS = 10_000_000#1_000_000_000
-LOG_INTERVAL_STEPS = 1_000_000#10_000_000
+STEPS = 100_000_000
+LOG_INTERVAL_STEPS = 10_000_000#10_000_000
 EVAL_EPS = 256
 
 hyperparameters = linearly_interpolated_tabular_q.Hyperparameters(
@@ -121,7 +121,7 @@ hyperparameters = linearly_interpolated_tabular_q.Hyperparameters(
     train_freq = 4,
     n_envs = 256, #64,
 
-    target_update_interval = 4096, #512,
+    target_update_interval = 1024
 )
 
 algo = linearly_interpolated_tabular_q.LinearlyInterpolatedTabularQ(env, q_table, hyperparameters)
@@ -184,8 +184,8 @@ if VISUALIZE_METHOD == 'gif':
         comb_cum_rewards = jnp.concatenate((comb_cum_rewards, jnp.array((0,)), cum_rewards), axis=0)
 
     vis = Visualizer(gymnax_env, gymnax_env_params, comb_states, comb_cum_rewards)
-    #vis.animate("./examples/lin_interp_tabular_q/lin_interp_tabular_q_acrobot_anim.gif")
-    vis.animate("./examples/lin_interp_tabular_q/lin_interp_tabular_q_cartpole_anim.gif")
+    vis.animate("./examples/lin_interp_tabular_q/lin_interp_tabular_q_acrobot_anim2.gif")
+    #vis.animate("./examples/lin_interp_tabular_q/lin_interp_tabular_q_cartpole_anim.gif")
     #vis.animate(save_fname=None, view=True)
 
 elif VISUALIZE_METHOD == 'pygame':
