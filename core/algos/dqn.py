@@ -15,7 +15,7 @@ import optax
 from core.algos.base import Scheduleable, resolve_scheduleable
 
 from core.envs.base import Environment
-from core.envs.wrappers import VmapAutoResetWrapper, VmapWrapper, AutoResetWrapper
+from core.envs.wrappers import VmapWrapper, AutoResetWrapper
 from core.utils import ReplayBuffer, ReplayBufferState
 
 from core.sample_networks import MLP, MLPFeatureExtractor
@@ -134,8 +134,7 @@ class DQN(Generic[TEnvState, TEnvObs]):
         Returns: transitions, final environment states
         """
 
-        #env = VmapWrapper(AutoResetWrapper(self.env))
-        env = VmapAutoResetWrapper(self.env)
+        env = VmapWrapper(AutoResetWrapper(self.env))
 
         def batched_env_step(states: TEnvState, rngs: nnx.Rngs) -> tuple[TEnvState, Transition[TEnvObs]]:
             obs = env.get_obs(rngs.env(), states)
