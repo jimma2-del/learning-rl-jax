@@ -123,11 +123,11 @@ if VISUALIZE_METHOD == 'gif':
     comb_cum_rewards = jnp.array((0,))
 
     for _ in range(NUM_EPISODES):
-        timesteps, truncated = rollout_episode(rngs, env, policy, MAX_STEPS)
+        timesteps = rollout_episode(rngs, env, policy, MAX_STEPS)
         cum_rewards = jnp.cumsum(timesteps.reward)
         steps = len(timesteps.reward)
 
-        print(f"{'Truncated' if truncated else 'Terminated'} at steps={steps}, return={cum_rewards[-1]}.")
+        print(f"{'Truncated' if timesteps.truncated[-1] else 'Terminated'} at steps={steps}, return={cum_rewards[-1]}.")
 
         comb_states += [ jax.tree.map(lambda x: x[i], timesteps.state) for i in range(steps + 1) ]
         comb_cum_rewards = jnp.concatenate((comb_cum_rewards, jnp.array((0,)), cum_rewards), axis=0)

@@ -105,7 +105,7 @@ def policy(rngs, obs):
 comb_states = []
 
 for _ in range(NUM_EPISODES):
-    timesteps, truncated = rollout_episode(rngs, env, policy)
+    timesteps = rollout_episode(rngs, env, policy)
     eps_return = sum(timesteps.reward)
     steps = len(timesteps.reward)
 

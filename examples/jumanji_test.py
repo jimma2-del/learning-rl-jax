@@ -25,11 +25,11 @@ def policy(rngs, obs):
 comb_states = []
 
 for _ in range(NUM_EPISODES):
-    timesteps, truncated = rollout_episode(rngs, env, policy, STEPS_LIMIT)
+    timesteps = rollout_episode(rngs, env, policy, STEPS_LIMIT)
     eps_return = sum(timesteps.reward)
     steps = len(timesteps.reward)
 
-    print(f"{'Truncated' if truncated else 'Terminated'} at steps={steps}, return={eps_return}.")
+    print(f"{'Truncated' if timesteps.truncated[-1] else 'Terminated'} at steps={steps}, return={eps_return}.")
 
     comb_states += [ jax.tree.map(lambda x: x[i], timesteps.state) for i in range(steps + 1) ]
 
