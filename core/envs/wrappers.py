@@ -159,7 +159,8 @@ class AutoResetWrapper(
     Wrapper[TEnvState, TEnvObs, TEnvAction, TRenderFrame]
 ):
     """Automatically resets the environment if terminated or truncated, returning the resetted state as the next state
-    Places the original, unresetted terminal state into `info[NEXT_STATE_INFO_KEY]` (useful eg. for truncation)
+    Places the original, unresetted state into `info[NEXT_STATE_INFO_KEY]` (useful eg. for truncation)
+        This will be the same as the returned new_state if not terminated and not truncated.
 
     In very rare cases where resetting the environment is extremely expensive, for vectorization, 
         try `VmapConditionallyResetWrapper(env)` instead of `VmapWrapper(AutoResetWrapper((env))`.
@@ -198,7 +199,8 @@ class VmapConditionallyResetWrapper(
     Does not alter the `render` method as it may not be jittable.
     Supports both single and batched PRNG keys.
 
-    Places the original, unresetted terminal state into `info[NEXT_STATE_INFO_KEY]` (useful eg. for truncation)
+    Places the original, unresetted state into `info[NEXT_STATE_INFO_KEY]` (useful eg. for truncation)
+        This will be the same as the returned new_state if not terminated and not truncated.
     """
 
     NEXT_STATE_INFO_KEY = NEXT_STATE_INFO_KEY

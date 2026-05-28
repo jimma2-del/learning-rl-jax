@@ -184,7 +184,8 @@ def parallel_rollout(rngs: nnx.Rngs,
         for a total of `iter * n_envs` steps.
 
     Automatically resets environments that finish.
-        Places original, unresetted terminal states into `info[AutoResetWrapper.NEXT_STATE_INFO_KEY]` (useful eg. for truncation)
+        Places the original, unresetted state into `info[NEXT_STATE_INFO_KEY]` (useful eg. for truncation)
+        This will be the same as the returned new_state if not terminated and not truncated.
 
     `policy` should accept a batched input of `rngs` and `obs`. Apply `jax.vmap` before passing in if not already batched.
 

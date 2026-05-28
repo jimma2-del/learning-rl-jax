@@ -16,7 +16,8 @@ import functools
 from core.algos.base import Scheduleable, resolve_scheduleable
 
 from core.envs.base import Environment, Space
-from core.envs.wrappers import VmapWrapper, AutoResetWrapper
+from core.envs.wrappers import AutoResetWrapper
+from core.envs.utils import parallel_rollout
 from core.utils import ReplayBuffer, ReplayBufferState
 
 @dataclass(frozen=True)
@@ -136,7 +137,7 @@ class TabularQ(Generic[TEnvState, TEnvObs]):
         return jnp.repeat(jnp.full(self.q_table_shape, init_val, dtype=jnp.float32)[None, ...], 
             self.num_actions, axis=0)
 
-    def rollout(self,
+    def rollout_transitions(self,
         rngs: nnx.Rngs, 
         policy: jax.Array, 
         iter: int,
@@ -153,27 +154,22 @@ class TabularQ(Generic[TEnvState, TEnvObs]):
         Returns: transitions, final environment states
         """
 
-        env = VmapWrapper(AutoResetWrapper(self.env))
+        timesteps, env_states = parallel_rollout(
+            rngs, self.env,
+            nnx.vmap(lambda rngs, obs: self.get_action(rngs, policy, obs, epsilon)),
+            iter, self.hyperparameters.n_envs,
+            initial_env_states
+        )
 
-        def batched_env_step(states: TEnvState, rngs: nnx.Rngs) -> tuple[TEnvState, Transition[TEnvObs]]:
-            obs = env.get_obs(rngs.env(), states)
+        timesteps = jax.tree.map(lambda x: x.reshape(-1, *x.shape[2:]), timesteps) # flatten to remove axis 0
 
-            actions = nnx.vmap(lambda rngs, obs: self.get_action(rngs, policy, obs, epsilon))(
-                rngs.fork(split=self.hyperparameters.n_envs), obs)
+        next_obs = jax.vmap(self.env.get_obs)(
+            jax.random.split(rngs.env(), iter * self.hyperparameters.n_envs), 
+            timesteps.info[AutoResetWrapper.NEXT_STATE_INFO_KEY]
+        )
 
-            new_states, rewards, terminated, truncated, infos = env.step(rngs.env(), states, actions)
-            next_obs = env.get_obs(rngs.env(), infos.pop(env.NEXT_STATE_INFO_KEY))
-
-            return (
-                new_states,
-                Transition(obs=obs, action=actions, reward=rewards, next_obs=next_obs,terminated=terminated)
-            )
-
-        if initial_env_states is None:
-            initial_env_states, info = env.reset(rngs.env(), num=self.hyperparameters.n_envs)
-
-        env_states, transitions = nnx.scan(batched_env_step)(initial_env_states, rngs.fork(split=iter))
-        transitions = jax.tree.map(lambda x: x.reshape(-1, *x.shape[2:]), transitions) # flatten to remove axis 0
+        transitions = Transition(obs=timesteps.obs, action=timesteps.action, 
+            reward=timesteps.reward, next_obs=next_obs, terminated=timesteps.terminated)
 
         return transitions, env_states
 
@@ -190,7 +186,7 @@ class TabularQ(Generic[TEnvState, TEnvObs]):
             replay_buffer_state = self.replay_buffer.init()
 
         # prefill replay buffer
-        transitions, env_states = nnx.jit(self.rollout, static_argnames=('iter'))(rngs,
+        transitions, env_states = nnx.jit(self.rollout_transitions, static_argnames=('iter'))(rngs,
             policy,
             math.ceil(prefill_steps / self.hyperparameters.n_envs),
             epsilon=1
@@ -230,7 +226,7 @@ class TabularQ(Generic[TEnvState, TEnvObs]):
             
             ## sample transitions from environment ##
 
-            transitions, env_states = self.rollout(rngs, 
+            transitions, env_states = self.rollout_transitions(rngs, 
                 policy,
                 steps_per_env_per_iter,
                 env_states,

@@ -79,16 +79,16 @@ while training_state.steps < STEPS:
 
     print()
 
-import orbax.checkpoint as ocp
-
 q_net = training_state.policy
 
-SAVE_PATH = path.abspath('examples/dqn/_tmp/flappybird')
-
 # test save
-_, state = nnx.split(q_net)
-checkpointer_save = ocp.StandardCheckpointer()
-checkpointer_save.save(SAVE_PATH, state)
+#import orbax.checkpoint as ocp
+
+# SAVE_PATH = path.abspath('examples/dqn/_tmp/flappybird')
+
+# _, state = nnx.split(q_net)
+# checkpointer_save = ocp.StandardCheckpointer()
+# checkpointer_save.save(SAVE_PATH, state)
 
 
 ### ENJOY ###
