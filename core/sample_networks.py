@@ -5,9 +5,13 @@ from typing import Any, Generic, TypeVar
 
 from jax import flatten_util
 import jax
+import jax.numpy as jnp
+
+import numpy as np
 
 from flax import nnx
 
+from core.envs.base import Space
 from core.utils.batch_utils import flatten_batched_tree
 
 class MLP(nnx.Module):
@@ -19,7 +23,7 @@ class MLP(nnx.Module):
         num_hidden_layers: int = 1,
         do_layer_norm: bool = True,
         activation_func = nnx.swish
-    ):
+    ) -> None:
         self.input_dim = input_dim
         self.output_dim = output_dim
         self.hidden_dim = hidden_dim
@@ -37,7 +41,7 @@ class MLP(nnx.Module):
 
         self.output_layer = nnx.Linear(hidden_dim, output_dim, rngs=rngs)
 
-    def __call__(self, x: jax.Array, rngs: nnx.Rngs):
+    def __call__(self, x: jax.Array, rngs: nnx.Rngs) -> jax.Array:
 
         for i in range(self.num_hidden_layers):
             x = self.hidden_layers[i](x)
@@ -49,12 +53,12 @@ class MLP(nnx.Module):
 
         return self.output_layer(x)
 
-TInputType = TypeVar("TInputType")
+TEnvObs = TypeVar("TEnvObs")
 
-class MLPFeatureExtractor(nnx.Module, Generic[TInputType]):
+class MLPFeatureExtractor(nnx.Module, Generic[TEnvObs]):
 
     def __init__(self, rngs: nnx.Rngs, 
-        input_shapes_dtypes,
+        obs_shapes_dtypes,
 
         output_dim: int = 256,
         output_activation_func = None, # same as activation_func by default
@@ -63,15 +67,15 @@ class MLPFeatureExtractor(nnx.Module, Generic[TInputType]):
         num_hidden_layers: int = 1,
         do_layer_norm: bool = True,
         activation_func = nnx.swish,
-    ):
-        """input_shapes_dtypes: A PyTree of jax.ShapeDtypeStruct leaves, eg. from jax.eval_shape()."""
+    ) -> None:
+        """obs_shapes_dtypes: A PyTree of jax.ShapeDtypeStruct leaves, eg. from jax.eval_shape()."""
 
-        self.input_shapes_dtypes = input_shapes_dtypes
+        self.obs_shapes_dtypes = obs_shapes_dtypes
 
         self.flattened_len = jax.tree.reduce(
             lambda cum_len, shape_dtype: cum_len + (
                 1 if len(shape_dtype.shape) == 0 else math.prod(shape_dtype.shape)), 
-            input_shapes_dtypes, 0
+            obs_shapes_dtypes, 0
         )
 
         self.output_dim = output_dim
@@ -87,8 +91,8 @@ class MLPFeatureExtractor(nnx.Module, Generic[TInputType]):
         if self.do_layer_norm:
             self.output_norm = nnx.LayerNorm(output_dim, rngs=rngs)
 
-    def __call__(self, x: Generic[TInputType], rngs: nnx.Rngs):
-        x = flatten_batched_tree(self.input_shapes_dtypes, x)
+    def __call__(self, x: TEnvObs, rngs: nnx.Rngs) -> jax.Array:
+        x = flatten_batched_tree(self.obs_shapes_dtypes, x)
 
         x = self.mlp(x, rngs=rngs)
 
@@ -96,3 +100,92 @@ class MLPFeatureExtractor(nnx.Module, Generic[TInputType]):
             x = self.output_norm(x)
 
         return self.output_activation_func(x)
+
+TEnvAction = TypeVar("TEnvAction")
+
+class StochasticPolicy(nnx.Module, Generic[TEnvAction]):
+
+    def __init__(self, rngs: nnx.Rngs, 
+        action_space: Space[TEnvAction],
+
+        input_dim: int = 256,
+
+        do_state_independent_stds = True,
+
+        hidden_dim: int = 256, 
+        num_hidden_layers: int = 1,
+        do_layer_norm: bool = True,
+        activation_func = nnx.swish,
+    ):
+        self.input_dim = input_dim
+
+        self.do_state_independent_stds = do_state_independent_stds
+
+        self.output_dim = 0
+        self.num_continuous = 0
+        self._leaves_descrip = []
+
+        leaves, self.treedef = jax.tree.flatten((action_space.low, action_space.high))
+
+        for cur_low, cur_high in leaves:
+            if jnp.issubdtype(cur_low.dtype, jnp.integer):
+                n_choices = cur_high - cur_low + 1
+                output_layer_dim = int(jnp.sum(n_choices))
+                self.output_dim += output_layer_dim
+
+                self._leaves_descrip.append({ 
+                    'discrete': True, 
+                    'ouput_layer_dim': output_layer_dim,
+                    'shape': (*cur_low.shape, int(jnp.max(n_choices))),
+                    'n_choices': n_choices.tolist() # convert to list to mark as static
+                })
+            else:
+                dim = math.prod(cur_low.shape)
+                self.num_continuous += dim
+                output_layer_dim = dim * (2 - do_state_independent_stds)
+                self.output_dim += output_layer_dim
+
+                self._leaves_descrip.append({ 
+                    'discrete': False, 
+                    'output_layer_dim': output_layer_dim,
+                    'shape': (*cur_low.shape, 2), # mean, std
+                })
+        
+        if do_state_independent_stds:
+            self.state_independent_log_stds = nnx.Param(jnp.zeros(self.num_continuous))
+
+        self.mlp = MLP(rngs, input_dim, self.output_dim,
+            hidden_dim, num_hidden_layers, do_layer_norm, activation_func)
+
+    def __call__(self, x: jax.Array, rngs: nnx.Rngs):
+        x = self.mlp(x, rngs=rngs)
+
+        leaves = []
+        i = 0
+        state_indep_log_stds_i = 0
+
+        for leaf_descrip in self._leaves_descrip:
+            vals = x[i : i+leaf_descrip['output_layer_dim']]
+            i += leaf_descrip['output_layer_dim']
+
+            if leaf_descrip['discrete']:
+                leaf = jnp.zeros(leaf_descrip['shape'])
+                vals_i = 0
+                
+                for path, cur_n_choices in np.ndenumerate(np.asarray(leaf_descrip['n_choices'])):
+                    leaf[(*path, slice(cur_n_choices))] = vals[vals_i : vals_i + cur_n_choices]
+                    vals_i += cur_n_choices
+
+                leaves.append(leaf)
+
+            else:
+                if self.do_state_independent_stds:
+                    state_indep_log_stds = self.state_independent_log_stds.value \
+                        [state_indep_log_stds_i : state_indep_log_stds_i + leaf_descrip['output_layer_dim']]
+                    state_indep_log_stds_i += leaf_descrip['output_layer_dim']
+
+                    leaves.append(jnp.stack(vals.reshape(leaf_descrip['shape'][:-1]), state_indep_log_stds))
+                else:
+                    leaves.append(vals.reshape(leaf_descrip['shape']))
+
+        return jax.tree.unflatten(self.treedef, leaves)
