@@ -236,3 +236,18 @@ class VmapConditionallyResetWrapper(
     def get_obs(self, key: chex.PRNGKey, state: TEnvState) -> TEnvObs:
         if jnp.isscalar(key): key = jax.random.split(key, get_tree_vmap_dim(state))
         return jax.vmap(super().get_obs)(key, state)
+
+class SquashContinuousActionsToBoundsWrapper(
+    Generic[TEnvState, TEnvObs, TEnvAction, TRenderFrame],
+    Wrapper[TEnvState, TEnvObs, TEnvAction, TRenderFrame]
+):
+    """Squashes unbounded real values (-inf, inf) in actions to the bounds defined by the action space.
+    Ignores discrete values.
+
+    See `Space.squash_continuous_to_bounds(x)`.
+    """
+
+    def step(self, key: chex.PRNGKey, state: TEnvState, action: TEnvAction) \
+            -> tuple[TEnvState, jax.Array, jax.Array, jax.Array, dict[Any, Any]]:
+        action = self.env.action_space.squash_continuous_to_bounds(action)
+        return super().step(key, state, action)

@@ -11,7 +11,8 @@ from jax.typing import ArrayLike
 
 import jax.numpy as jnp
 
-from core.utils.math import inv_softplus
+from core.utils.math import inv_softplus, normal_entropy
+from core.utils.batch_utils import get_tree_batch_dims
 
 TSpaceElement = TypeVar("TSpaceElement")
 
@@ -162,7 +163,7 @@ class Space(Generic[TSpaceElement]):
         return jax.tree.map(map_func, x, self.low, self.high, self.shapes_dtypes)
 
     def sample_distribution(self, key: chex.PRNGKey, distribution: TSpaceElement, 
-            ignore_continuous_bounds=False, deterministic=False) -> TSpaceElement:
+            ignore_continuous_bounds=False, deterministic=False, log_stds=False) -> TSpaceElement:
         """Samples a single element from the space, according to the given distribution.
         
         The distribution should have the same treedef as the Space. Each leaf should have the same shape,
@@ -172,7 +173,7 @@ class Space(Generic[TSpaceElement]):
                 Trailing axis should have size equal to the maximum number of possible values 
                     for any feature in the Space in that leaf: `max(high - low + 1)`
                 Values along trailing axis should be logits. The 0th logit should correspond to the
-                    mininum possible value of that feature. Pad with zeros at the end as necessary.
+                    mininum possible value of that feature. Pad with `-jnp.inf` at the end as necessary.
 
             If continuous (jnp.floating): values will be sampled according to a normal distribution.
                 Trailing axis should have size 2. The first element should be the mean, 
@@ -186,6 +187,8 @@ class Space(Generic[TSpaceElement]):
         `deterministic`: If True, takes the mode.
             Discrete (jnp.integer) leaves: selects the choice with the highest probability.
             Continuous (jnp.floating) leaves: takes the mean of the distribution.
+
+        `log_stds`: If True, treats stds as log stds: uses exp(feature[1]) as the standard deviation.
         """
 
         keys = jax.random.split(key, num=self.treedef.num_leaves)
@@ -201,7 +204,9 @@ class Space(Generic[TSpaceElement]):
                 if deterministic: z = 0
                 else: z = jax.random.normal(key, shape=shape_dtype.shape, dtype=shape_dtype.dtype)
 
-                return cur_dist[..., 0] + cur_dist[..., 1]*z
+                std = jnp.exp(cur_dist[..., 1]) if log_stds else cur_dist[..., 1]
+
+                return cur_dist[..., 0] + std*z
 
         sample = jax.tree.map(sample_leaf, distribution, self.low, self.shapes_dtypes, keys_tree)
 
@@ -210,33 +215,68 @@ class Space(Generic[TSpaceElement]):
 
         return sample
 
-    def log_probability(self, x: TSpaceElement, 
-            distribution: TSpaceElement, ignore_continuous_bounds=False) -> ArrayLike:
-        """Computes the log probability of sampling `x` from `distribution`, assuming features are independent.
+    def log_probabilities(self, x: TSpaceElement, distribution: TSpaceElement, 
+            ignore_continuous_bounds=False, log_stds=False) -> TSpaceElement:
+        """Computes the individual log probability of sampling each feature of `x` from `distribution`.
         See `space.sample_distribution` for details on the structure of `distribution`.
 
         `ignore_continuous_bounds`: If True, assumes all continuous values are unbounded.
             Useful, eg. for raw network outputs, before softplus or tanh.
+
+        `log_stds`: If True, treats stds as log stds: uses exp(feature[1]) as the standard deviation.
         """
 
-        def leaf_log_probability(x_leaf, cur_dist, cur_low, shape_dtype: jax.ShapeDtypeStruct):
-
+        def leaf_log_probabilities(x_leaf, cur_dist, cur_low, shape_dtype: jax.ShapeDtypeStruct):
             if jnp.issubdtype(shape_dtype.dtype, jnp.integer):
                 all_log_probs = jax.nn.log_softmax(cur_dist, axis=-1)
-
                 dist_is = x_leaf - cur_low
-                log_probs = jnp.take_along_axis(all_log_probs, dist_is[..., None], axis=-1).squeeze(axis=-1)
+                return jnp.take_along_axis(all_log_probs, dist_is[..., None], axis=-1).squeeze(axis=-1)
             else: 
-                log_probs = jax.scipy.stats.norm.logpdf(x_leaf, loc=cur_dist[..., 0], scale=cur_dist[..., 1])
-
-            return jnp.sum(log_probs)
+                std = jnp.exp(cur_dist[..., 1]) if log_stds else cur_dist[..., 1]
+                return jax.scipy.stats.norm.logpdf(x_leaf, loc=cur_dist[..., 0], scale=std)
 
         if not ignore_continuous_bounds:
             x = self.unsquash_continuous_from_bounds(x)
 
-        log_probabilities = jax.tree.map(leaf_log_probability, x, distribution, self.low, self.shapes_dtypes)
+        return jax.tree.map(leaf_log_probabilities, x, distribution, self.low, self.shapes_dtypes)
+
+    def log_probability(self, x: TSpaceElement, distribution: TSpaceElement, 
+            ignore_continuous_bounds=False, log_stds=False) -> ArrayLike:
+        """Computes the total log probability of sampling `x` from `distribution`, assuming features are independent.
+        See `space.sample_distribution` for details on the structure of `distribution`.
+
+        `ignore_continuous_bounds`: If True, assumes all continuous values are unbounded.
+            Useful, eg. for raw network outputs, before softplus or tanh.
+
+        `log_stds`: If True, treats stds as log stds: uses exp(feature[1]) as the standard deviation.
+        """
+
+        log_probabilities = self.log_probabilities(x, distribution, ignore_continuous_bounds, log_stds)
+
+        log_probabilities = jax.tree.map(
+            lambda leaf, s_dt: jnp.sum(leaf, axis=tuple(range(-len(s_dt.shape), 0))),
+            log_probabilities, self.shapes_dtypes
+        )
 
         return jax.tree.reduce(lambda tot, cur: tot + cur, log_probabilities)
+
+    def entropies(self, distribution: TSpaceElement, log_stds=False) -> ArrayLike:
+        """Computes the individual entropy of each feature of `distribution`.
+        See `space.sample_distribution` for details on the structure of `distribution`.
+
+        `log_stds`: If True, treats stds as log stds: uses exp(feature[1]) as the standard deviation.
+        """
+
+        def leaf_entropies(cur_dist, shape_dtype: jax.ShapeDtypeStruct):
+            if jnp.issubdtype(shape_dtype.dtype, jnp.integer):
+                log_probs = jax.nn.log_softmax(cur_dist, axis=-1)
+                log_probs = jnp.where(jnp.isneginf(log_probs), 0, log_probs) # handle 0 probability
+                return -jnp.sum(jnp.exp(log_probs) * log_probs, axis=-1)
+            else: 
+                std = jnp.exp(cur_dist[..., 1]) if log_stds else cur_dist[..., 1]
+                return normal_entropy(std)
+
+        return jax.tree.map(leaf_entropies, distribution, self.shapes_dtypes)
 
 TEnvState = TypeVar("TEnvState")
 TEnvObs = TypeVar("TEnvObs")

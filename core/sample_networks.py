@@ -121,13 +121,13 @@ class StochasticPolicy(nnx.Module, Generic[TEnvAction]):
 
         self.do_state_independent_stds = do_state_independent_stds
 
+        self.treedef = action_space.treedef
+
         self.output_dim = 0
         self.num_continuous = 0
         self._leaves_descrip = []
 
-        leaves, self.treedef = jax.tree.flatten((action_space.low, action_space.high))
-
-        for cur_low, cur_high in leaves:
+        for cur_low, cur_high in zip(jax.tree.leaves(action_space.low), jax.tree.leaves(action_space.high)):
             if jnp.issubdtype(cur_low.dtype, jnp.integer):
                 n_choices = cur_high - cur_low + 1
                 output_layer_dim = int(jnp.sum(n_choices))
@@ -135,7 +135,7 @@ class StochasticPolicy(nnx.Module, Generic[TEnvAction]):
 
                 self._leaves_descrip.append({ 
                     'discrete': True, 
-                    'ouput_layer_dim': output_layer_dim,
+                    'output_layer_dim': output_layer_dim,
                     'shape': (*cur_low.shape, int(jnp.max(n_choices))),
                     'n_choices': n_choices.tolist() # convert to list to mark as static
                 })
@@ -165,15 +165,15 @@ class StochasticPolicy(nnx.Module, Generic[TEnvAction]):
         state_indep_log_stds_i = 0
 
         for leaf_descrip in self._leaves_descrip:
-            vals = x[i : i+leaf_descrip['output_layer_dim']]
+            vals = x[..., i : i+leaf_descrip['output_layer_dim']]
             i += leaf_descrip['output_layer_dim']
 
             if leaf_descrip['discrete']:
-                leaf = jnp.zeros(leaf_descrip['shape'])
+                leaf = jnp.full(vals.shape[:-1] + leaf_descrip['shape'], -jnp.inf)
                 vals_i = 0
                 
                 for path, cur_n_choices in np.ndenumerate(np.asarray(leaf_descrip['n_choices'])):
-                    leaf[(*path, slice(cur_n_choices))] = vals[vals_i : vals_i + cur_n_choices]
+                    leaf = leaf.at[(..., *path, slice(cur_n_choices))].set(vals[..., vals_i : vals_i + cur_n_choices])
                     vals_i += cur_n_choices
 
                 leaves.append(leaf)
@@ -184,7 +184,10 @@ class StochasticPolicy(nnx.Module, Generic[TEnvAction]):
                         [state_indep_log_stds_i : state_indep_log_stds_i + leaf_descrip['output_layer_dim']]
                     state_indep_log_stds_i += leaf_descrip['output_layer_dim']
 
-                    leaves.append(jnp.stack(vals.reshape(leaf_descrip['shape'][:-1]), state_indep_log_stds))
+                    leaves.append(jnp.stack(
+                        vals.reshape(vals.shape[:-1] + leaf_descrip['shape'][:-1]), 
+                        state_indep_log_stds
+                    ))
                 else:
                     leaves.append(vals.reshape(leaf_descrip['shape']))
 
