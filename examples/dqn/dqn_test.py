@@ -14,30 +14,29 @@ from core.envs.gymnax import GymnaxWrapper
 
 from core.envs.flappy_bird import FlappyBirdEnv, State as FlappyBirdState
 
-from core.envs.wrappers import ObsRangeNormalizeWrapper
+from core.envs.wrappers import ObsRangeNormalizeWrapper, EpisodeStepCountWrapper
 
 from core.envs.utils import rollout_episode, visualize_pygame, evaluate_episodes
 
 from core.algos import dqn
-from core.utils import LinearlyInterpolatedTable
 
 #jax.config.update("jax_log_compiles", True)
 
 rngs = nnx.Rngs(0, params=1, env=2, actions=3, transitions=4)
 
-## Gymnax
+# Gymnax
 
-# gymnax_env = Acrobot()#MinBreakout()#CartPole()
-# gymnax_env_params = gymnax_env.default_params
+gymnax_env = Acrobot()#MinBreakout()#CartPole()
+gymnax_env_params = gymnax_env.default_params
 
-#env = GymnaxWrapper(gymnax_env)
+env = GymnaxWrapper(gymnax_env)
 
-## Flappy Bird
+# # Flappy Bird
 
-DT = 0.1
-env = FlappyBirdEnv(DT)
+# DT = 0.1
+# env = FlappyBirdEnv(DT)
 
-#env = ObsRangeNormalizeWrapper(env)
+# #env = ObsRangeNormalizeWrapper(env)
 
 ### TRAIN ###
 
@@ -94,7 +93,7 @@ q_net = training_state.policy
 ### ENJOY ###
 
 # # NOTE: visualizer is broken in gymnax main branch; use PR https://github.com/RobertTLange/gymnax/pull/84
-#     # edit  _render_and_close() to remove 'with env:' statement to avoid closing pygame early
+#     # edit `_render_and_close()` to remove `with env:` statement to avoid closing pygame early
 from gymnax.visualize import Visualizer
 from gymnax.visualize.vis_gym import render_acrobot
 
@@ -123,13 +122,13 @@ if VISUALIZE_METHOD == 'gif':
     comb_cum_rewards = jnp.array((0,))
 
     for _ in range(NUM_EPISODES):
-        timesteps = rollout_episode(rngs, env, policy, MAX_STEPS)
+        timesteps, state, info = rollout_episode(rngs, EpisodeStepCountWrapper(env, MAX_STEPS), policy)
         cum_rewards = jnp.cumsum(timesteps.reward)
         steps = len(timesteps.reward)
 
         print(f"{'Truncated' if timesteps.truncated[-1] else 'Terminated'} at steps={steps}, return={cum_rewards[-1]}.")
 
-        comb_states += [ jax.tree.map(lambda x: x[i], timesteps.state) for i in range(steps + 1) ]
+        comb_states += [ jax.tree.map(lambda x: x[i], timesteps.state.state) for i in range(steps + 1) ]
         comb_cum_rewards = jnp.concatenate((comb_cum_rewards, jnp.array((0,)), cum_rewards), axis=0)
 
     vis = Visualizer(gymnax_env, gymnax_env_params, comb_states, comb_cum_rewards)
@@ -138,21 +137,19 @@ if VISUALIZE_METHOD == 'gif':
 
 elif VISUALIZE_METHOD == 'pygame':
     # Acrobot
-    # FPS = 10
-
-    # visualize_pygame(
-    #     rngs, env, policy, 
-    #     fps=FPS, 
-    #     render_func=lambda state, action: render_acrobot(None, gymnax_env_params, state),
-    #     episode_steps_limit=MAX_STEPS,
-    #     verbose=False
-    # )
-
-    ## Flappy Bird
-    FPS = round(1/DT)
+    FPS = 10
 
     visualize_pygame(
         rngs, env, policy, 
         fps=FPS, 
+        render_func=lambda state, action: render_acrobot(None, gymnax_env_params, state),
+        episode_steps_limit=MAX_STEPS,
         verbose=False
     )
+
+    ## Flappy Bird
+    # visualize_pygame(
+    #     rngs, env, policy, 
+    #     fps=round(1/DT), 
+    #     verbose=False
+    # )

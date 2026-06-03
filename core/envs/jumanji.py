@@ -89,7 +89,17 @@ class JumanjiWrapper(Environment[TEnvState, TEnvObs, jax.Array, Any], Generic[TE
 
     def reset(self, key: chex.PRNGKey) -> tuple[TEnvState, dict[Any, Any]]:
         state, timestep = self.jumanji_env.reset(key)
-        return state, timestep.extras
+
+        info = timestep.extras
+
+        # # timestep.extras from env.reset and env.step should have the same structure
+        #     # however, some envs do not implement this correctly
+        #     # replace reset info with step info if not
+        # dummy_step_info = self.step(jax.random.key(0), state, self.action_space.sample(jax.random.key(0)))[4]
+        # if jax.tree.structure(info) != jax.tree.structure(dummy_step_info):
+        #     info = dummy_step_info
+
+        return state, info
 
     def step(self, key: chex.PRNGKey, state: TEnvState, action: jax.Array) \
         -> tuple[TEnvState, jax.Array, jax.Array, jax.Array, dict[Any, Any]]:

@@ -153,7 +153,7 @@ while training_state.steps < STEPS:
 ### ENJOY ###
 
 # NOTE: visualizer is broken in gymnax main branch; use PR https://github.com/RobertTLange/gymnax/pull/84
-    # edit  _render_and_close() to remove 'with env:' statement to avoid closing pygame early
+    # edit `_render_and_close()` to remove `with env:` statement to avoid closing pygame early
 from gymnax.visualize import Visualizer
 from gymnax.visualize.vis_gym import render_acrobot
 
@@ -174,7 +174,7 @@ if VISUALIZE_METHOD == 'gif':
     comb_cum_rewards = jnp.array((0,))
 
     for _ in range(NUM_EPISODES):
-        timesteps = rollout_episode(rngs, env, policy)
+        timesteps, state, info = rollout_episode(rngs, env, policy)
         cum_rewards = jnp.cumsum(timesteps.reward)
         steps = len(timesteps.reward)
 

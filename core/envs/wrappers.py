@@ -111,7 +111,7 @@ class ObsRangeNormalizeWrapper(
                 self.normalize_obs_space.high, self.obs_ranges)
         )
 
-class JITWrapper(
+class JitWrapper(
     Generic[TEnvState, TEnvObs, TEnvAction, TRenderFrame],
     Wrapper[TEnvState, TEnvObs, TEnvAction, TRenderFrame]
 ):
@@ -152,28 +152,33 @@ class VmapWrapper(
         if jnp.isscalar(key): key = jax.random.split(key, get_tree_vmap_dim(state))
         return jax.vmap(super().get_obs)(key, state)
 
-NEXT_STATE_INFO_KEY = 'next_state'
+UNRESET_STATE_INFO_KEY = 'unreset_state'
 
 class AutoResetWrapper(
     Generic[TEnvState, TEnvObs, TEnvAction, TRenderFrame],
     Wrapper[TEnvState, TEnvObs, TEnvAction, TRenderFrame]
 ):
     """Automatically resets the environment if terminated or truncated, returning the resetted state as the next state
-    Places the original, unresetted state into `info[NEXT_STATE_INFO_KEY]` (useful eg. for truncation)
+    Places the original, unresetted state into `info[UNRESET_STATE_INFO_KEY]` (useful eg. for truncation)
         This will be the same as the returned new_state if not terminated and not truncated.
 
     In very rare cases where resetting the environment is extremely expensive, for vectorization, 
         try `VmapConditionallyResetWrapper(env)` instead of `VmapWrapper(AutoResetWrapper((env))`.
     """
 
-    NEXT_STATE_INFO_KEY = NEXT_STATE_INFO_KEY
+    UNRESET_STATE_INFO_KEY = UNRESET_STATE_INFO_KEY
+
+    def reset(self, key: chex.PRNGKey) -> tuple[TEnvState, dict[Any, Any]]:
+        state, info = super().reset(key)
+        info[self.UNRESET_STATE_INFO_KEY] = state
+        return state, info
 
     def step(self, key: chex.PRNGKey, state: TEnvState, action: TEnvAction) \
             -> tuple[TEnvState, jax.Array, jax.Array, jax.Array, dict[Any, Any]]:
         step_key, reset_key = jax.random.split(key)
 
         next_state, reward, terminated, truncated, info = super().step(step_key, state, action)
-        info[self.NEXT_STATE_INFO_KEY] = next_state
+        info[self.UNRESET_STATE_INFO_KEY] = next_state
 
         # reset env if terminated/truncated, don't otherwise
         new_state = jax.lax.cond(jnp.logical_or(terminated, truncated), 
@@ -199,16 +204,18 @@ class VmapConditionallyResetWrapper(
     Does not alter the `render` method as it may not be jittable.
     Supports both single and batched PRNG keys.
 
-    Places the original, unresetted state into `info[NEXT_STATE_INFO_KEY]` (useful eg. for truncation)
+    Places the original, unresetted state into `info[UNRESET_STATE_INFO_KEY]` (useful eg. for truncation)
         This will be the same as the returned new_state if not terminated and not truncated.
     """
 
-    NEXT_STATE_INFO_KEY = NEXT_STATE_INFO_KEY
+    UNRESET_STATE_INFO_KEY = UNRESET_STATE_INFO_KEY
 
     def reset(self, key: chex.PRNGKey, num: int | None = None) -> tuple[TEnvState, dict[Any, Any]]:
         """If a single key is given, returns a batch of size `num`."""
         if jnp.isscalar(key): key = jax.random.split(key, num)
-        return jax.vmap(super().reset)(key)
+        states, infos = jax.vmap(super().reset)(key)
+        infos[self.UNRESET_STATE_INFO_KEY] = states
+        return states, infos
 
     def step(self, key: chex.PRNGKey, state: TEnvState, action: TEnvAction) \
             -> tuple[TEnvState, jax.Array, jax.Array, jax.Array, dict[Any, Any]]:
@@ -217,7 +224,7 @@ class VmapConditionallyResetWrapper(
         step_key, reset_key = jax.vmap(jax.random.split)(key).T
 
         next_state, reward, terminated, truncated, info = jax.vmap(super().step)(step_key, state, action)
-        info[self.NEXT_STATE_INFO_KEY] = next_state
+        info[self.UNRESET_STATE_INFO_KEY] = next_state
 
         # reset env if terminated/truncated, don't otherwise; jax.lax.map instead of jax.vmap to allow for branching
         new_state = jax.lax.map(self._conditionally_reset,
@@ -251,3 +258,56 @@ class SquashContinuousActionsToBoundsWrapper(
             -> tuple[TEnvState, jax.Array, jax.Array, jax.Array, dict[Any, Any]]:
         action = self.env.action_space.squash_continuous_to_bounds(action)
         return super().step(key, state, action)
+
+@chex.dataclass
+class EpisodeStepCountState(Generic[TEnvState]):
+    state: TEnvState
+    episode_steps: jax.Array
+
+class EpisodeStepCountWrapper(
+    Generic[TEnvState, TEnvObs, TEnvAction, TRenderFrame],
+    Wrapper[EpisodeStepCountState[TEnvState], TEnvObs, TEnvAction, TRenderFrame]
+):
+    """Stores the step count of the current episode in `info[STEP_COUNT_INFO_KEY]`,
+    and optionally truncates episodes upon reaching a maximum length."""
+
+    STEP_COUNT_INFO_KEY = 'episode_steps'
+
+    def __init__(self,
+        env: Environment[TEnvState, TEnvObs, TEnvAction, TRenderFrame],
+        max_eps_len: int | None = None
+    ) -> None:
+        super().__init__(env)
+        self.max_eps_len = max_eps_len
+
+    def reset(self, key: chex.PRNGKey) -> tuple[EpisodeStepCountState[TEnvState], dict[Any, Any]]:
+        state, info = super().reset(key)
+
+        info[self.STEP_COUNT_INFO_KEY] = jnp.array(0)
+
+        return EpisodeStepCountState(state=state, episode_steps=jnp.array(0)), info
+
+    def step(self, key: chex.PRNGKey, state: EpisodeStepCountState[TEnvState], action: TEnvAction) \
+            -> tuple[EpisodeStepCountState[TEnvState], jax.Array, jax.Array, jax.Array, dict[Any, Any]]:
+        next_state, reward, terminated, truncated, info = super().step(key, state.state, action)
+
+        steps = state.episode_steps + 1
+        info[self.STEP_COUNT_INFO_KEY] = steps
+
+        if self.max_eps_len is not None:
+            truncated = jnp.logical_or(
+                truncated,
+                jnp.logical_and(
+                    jnp.logical_not(terminated), # don't truncate if already terminated
+                    steps >= self.max_eps_len
+                )
+            )
+
+        return EpisodeStepCountState(state=next_state, episode_steps=steps), reward, terminated, truncated, info
+
+    def get_obs(self, key: chex.PRNGKey, state: EpisodeStepCountState[TEnvState]) -> TEnvObs:
+        return self.env.get_obs(key, state.state)
+
+    def render(self, state: EpisodeStepCountState[TEnvState], action: ArrayLike) -> TRenderFrame:
+        return self.env.render(state.state, action)
+

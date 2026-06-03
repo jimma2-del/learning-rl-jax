@@ -135,19 +135,26 @@ class DQN(Generic[TEnvState, TEnvObs]):
         Returns: transitions, final environment states
         """
 
-        timesteps, env_states = parallel_rollout(
+        timesteps, env_states, final_infos = parallel_rollout(
             rngs, self.env,
             nnx.vmap(lambda rngs, obs: self.get_action(rngs, policy, obs, epsilon)),
             iter, self.hyperparameters.n_envs,
             initial_env_states
         )
 
-        timesteps = jax.tree.map(lambda x: x.reshape(-1, *x.shape[2:]), timesteps) # flatten to remove axis 0
-
-        next_obs = jax.vmap(self.env.get_obs)(
-            jax.random.split(rngs.env(), iter * self.hyperparameters.n_envs), 
-            timesteps.info[AutoResetWrapper.NEXT_STATE_INFO_KEY]
+        next_obs = jax.vmap(jax.vmap(self.env.get_obs))(
+            jnp.reshape(
+                jax.random.split(rngs.env(), iter * self.hyperparameters.n_envs), 
+                (iter, self.hyperparameters.n_envs)
+            ), 
+            jax.tree.map(lambda middles, finals: jnp.append(middles[1:], finals[None, ...], axis=0),
+                timesteps.info[AutoResetWrapper.UNRESET_STATE_INFO_KEY],
+                final_infos[AutoResetWrapper.UNRESET_STATE_INFO_KEY]
+            )
         )
+
+        timesteps = jax.tree.map(lambda x: x.reshape(-1, *x.shape[2:]), timesteps) # flatten to remove axis 0
+        next_obs = jax.tree.map(lambda x: x.reshape(-1, *x.shape[2:]), next_obs) # flatten to remove axis 0
 
         transitions = Transition(obs=timesteps.obs, action=timesteps.action, 
             reward=timesteps.reward, next_obs=next_obs, terminated=timesteps.terminated)

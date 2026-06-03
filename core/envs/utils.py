@@ -99,79 +99,66 @@ class Timestep(Generic[TEnvState, TEnvObs, TEnvAction]):
     terminated: bool
     truncated: bool
 
+TTakeObj = TypeVar('TTakeObj', default=Timestep[TEnvState, TEnvObs, TEnvAction])
+
 def rollout_episode(rngs: nnx.Rngs, 
     env: Environment[TEnvState, TEnvObs, TEnvAction, TRenderFrame], 
     policy: Callable[[nnx.Rngs, TEnvObs], TEnvAction],
-    steps_limit: int | None = None,
     chunk_size: int = 100,
-) -> tuple[Timestep[TEnvState, TEnvObs, TEnvAction], bool]:
+    take_func: Callable[[Timestep[TEnvState, TEnvObs, TEnvAction]], TTakeObj] | None = None
+) -> tuple[TTakeObj, TEnvState, dict[Any, Any]]:
     """Rollout one episode. Intended for visualization, rather than training. Do NOT JIT.
-
     Performs rollout in chunks of `chunk_size` steps for speed, combining chunks at the end.
 
-    Returns: timesteps
-        length of states, infos, and observations will be one greater than actions and rewards
-        last timestep will have either terminated=True or truncated=True
+    `take_func`: Optional function to specify which values to take from Timestep
+        A full `Timestep` object is returned by default.
+
+    Returns: 
+        timesteps, or user defined take objs for each timestep
+        final state and final info (may be useful eg. if truncated)
     """
 
-    if steps_limit is not None:
-        chunk_size = steps_limit
+    if take_func is None:
+        take_func = lambda x: x
 
     @nnx.jit
     @nnx.scan
     def rollout(carry, rngs):
-        state, obs = carry
+        state, info = carry
 
-        action = policy(rngs, obs)
-        state, reward, terminated, truncated, info = env.step(rngs.env(), state, action)
         obs = env.get_obs(rngs.env(), state)
+        action = policy(rngs, obs)
 
-        return (state, obs), Timestep(state=state, obs=obs, action=action, reward=reward, info=info,
+        next_state, reward, terminated, truncated, next_info = env.step(rngs.env(), state, action)
+
+        timestep = Timestep(state=state, obs=obs, action=action, reward=reward, info=info,
             terminated=terminated, truncated=truncated)
 
+        return (next_state, next_info), (take_func(timestep), terminated, truncated)
+
     state, info = env.reset(rngs.env())
-    obs = env.get_obs(rngs.env(), state)
 
-    # info from env.reset and env.step should have the same structure
-    #   however, some libraries do not implement this correctly
-    #   replace reset info with step info if not
-    _, _, _, _, dummy_step_info = env.step(rngs.env(), state, env.action_space.sample(rngs.env()))
-    if jax.tree.structure(info) != jax.tree.structure(dummy_step_info):
-        info = dummy_step_info
-
-    comb_timesteps = Timestep(
-        state=state, obs=obs, info=info, 
-        reward=0, action=env.action_space.low, # dummy value for first reward/action; removed later
-        terminated=False, truncated=False
-    )
-
-    # add batch dimension
-    comb_timesteps = jax.tree.map(lambda x: jnp.array((x,)), comb_timesteps)
-
+    comb_take_vals = None
     done = False
     
     while not done:
-        (state, obs), timesteps = rollout(
-            (state, obs), rngs.fork(split=chunk_size))
+        (state, info), (take_vals, terminated, truncated) = rollout(
+            (state, info), rngs.fork(split=chunk_size))
 
-        dones = jnp.logical_or(timesteps.terminated, timesteps.truncated)
+        dones = jnp.logical_or(terminated, truncated)
         done_idx = jnp.argmax(dones)
         done = dones[done_idx]
 
         if done:
-            timesteps = jax.tree.map(lambda x: x[:done_idx+1], timesteps)
+            take_vals = jax.tree.map(lambda x: x[:done_idx+1], take_vals)
 
-        comb_timesteps = jax.tree.map(lambda comb, new: jnp.concatenate((comb, new), axis=0), 
-            comb_timesteps, timesteps)
-
-        if steps_limit is not None:
-            break
+        if comb_take_vals is None:
+            comb_take_vals = take_vals
+        else: # append to existing
+            comb_take_vals = jax.tree.map(lambda comb, new: jnp.concatenate((comb, new), axis=0), 
+                comb_take_vals, take_vals)
     
-    # remove first dummy value; reward and action will have 1 fewer element
-    comb_timesteps.reward = comb_timesteps.reward[1:]
-    comb_timesteps.action = comb_timesteps.action[1:]
-
-    return comb_timesteps
+    return comb_take_vals, state, info
 
 def parallel_rollout(rngs: nnx.Rngs,
     env: Environment[TEnvState, TEnvObs, TEnvAction, TRenderFrame],
@@ -179,12 +166,14 @@ def parallel_rollout(rngs: nnx.Rngs,
     iter: int,
     n_envs: int | None = 32,
     initial_env_states: TEnvState | None = None,
-) -> tuple[Timestep[TEnvState, TEnvObs, TEnvAction], TEnvState]:
+    initial_env_infos: dict[Any, Any] | None = None,
+    take_func: Callable[[Timestep[TEnvState, TEnvObs, TEnvAction]], TTakeObj] | None = None
+) -> tuple[TTakeObj, TEnvState, dict[Any, Any]]:
     """Runs `n_envs` environments in parallel for `iter` steps each,
         for a total of `iter * n_envs` steps.
 
     Automatically resets environments that finish.
-        Places the original, unresetted state into `info[NEXT_STATE_INFO_KEY]` (useful eg. for truncation)
+        Places the original, unresetted state into `info[UNRESET_STATE_INFO_KEY]` (useful eg. for truncation)
         This will be the same as the returned new_state if not terminated and not truncated.
 
     `policy` should accept a batched input of `rngs` and `obs`. Apply `jax.vmap` before passing in if not already batched.
@@ -196,8 +185,14 @@ def parallel_rollout(rngs: nnx.Rngs,
     Initializes `n_envs` initial environment states if none given.
     `n_envs` can be infered from the length of the axis if `initial_env_states` is given.
 
-    Returns: Timestep's, final environment states
-        timesteps will have two extra leading axes: `shape = (iter, n_envs, ...)`
+    If `initial_env_states` is given but `initial_env_infos` is not given,
+        the first infos will be a dummy value.
+
+    `take_func`: Optional function to specify which values to take from Timestep
+        A full `Timestep` object is returned by default.
+
+    Returns: timesteps, or user defined take objs for each timestep; final states; final infos
+        timesteps/take objs will have two extra leading axes: `shape = (iter, n_envs, ...)`
     """
 
     if not isinstance(env, VmapConditionallyResetWrapper):
@@ -209,23 +204,31 @@ def parallel_rollout(rngs: nnx.Rngs,
 
     if initial_env_states is None:
         assert n_envs is not None, "Must specify `n_envs` if `initial_env_states` not given."
-        initial_env_states, info = env.reset(rngs.env(), num=n_envs)
+        initial_env_states, initial_env_infos = env.reset(rngs.env(), num=n_envs)
     elif n_envs is None:
         n_envs = get_tree_vmap_dim(initial_env_states)
 
-    def batched_env_step(states: TEnvState, rngs: nnx.Rngs) -> tuple[TEnvState, Timestep[TEnvState, TEnvObs, TEnvAction]]:
-        obs = env.get_obs(rngs.env(), states)
+    if initial_env_infos is None:
+        _, initial_env_infos = env.reset(jax.random.key(0), num=n_envs) # dummy value
 
+    if take_func is None:
+        take_func = lambda x: x
+
+    def batched_env_step(carry: tuple[TEnvState, dict[Any,Any]], rngs: nnx.Rngs) -> tuple[TEnvState, TTakeObj]:
+        states, infos = carry
+
+        obs = env.get_obs(rngs.env(), states)
         actions = policy(rngs.fork(split=n_envs), obs)
 
-        new_states, rewards, terminateds, truncateds, infos = env.step(rngs.env(), states, actions)
+        new_states, rewards, terminateds, truncateds, new_infos = env.step(rngs.env(), states, actions)
 
-        return new_states, Timestep(state=states, obs=obs, action=actions, reward=rewards, 
-            info=infos, terminated=terminateds, truncated=truncateds)
+        return (new_states, new_infos), take_func(Timestep(state=states, obs=obs, action=actions, reward=rewards, 
+            info=infos, terminated=terminateds, truncated=truncateds))
 
-    env_states, timesteps = nnx.scan(batched_env_step)(initial_env_states, rngs.fork(split=iter))
+    (env_states, infos), take_values = nnx.scan(batched_env_step)(
+        (initial_env_states, initial_env_infos), rngs.fork(split=iter))
 
-    return timesteps, env_states
+    return take_values, env_states, infos
 
 def visualize_pygame(rngs: nnx.Rngs, 
     env: Environment[TEnvState, TEnvObs, TEnvAction, TRenderFrame], 

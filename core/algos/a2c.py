@@ -25,13 +25,13 @@ class Hyperparameters:
     n_envs: int = 32
 
     discount_rate: Scheduleable[float] = 0.99
-    learning_rate: Scheduleable[float] = 1e-3
+    learning_rate: Scheduleable[float] = 2.5e-4
     
     n_steps: int = 5 # steps per env per update (batch size is n_steps * n_envs)
     gae_lambda: Scheduleable[float] = 0.95
 
     vf_coef: Scheduleable[float] = 0.5 # value function coefficient for the loss calculation
-    ent_coef: Scheduleable[float] = 0.002 # conservative default; 0.01 to 0.001 (possibly schedule)
+    ent_coef: Scheduleable[float] = 0.001 # conservative default; 0.01 to 0.001 (possibly schedule)
 
     ent_weight_continuous: Scheduleable[float] = 1
         # if using both discrete and continuous actions, it may be helpful to reduce the weight
@@ -158,7 +158,7 @@ class A2C(Generic[TEnvState, TEnvObs]):
             
             ## sample transitions from environment ##
 
-            timesteps, env_states = parallel_rollout(
+            timesteps, env_states, final_infos = parallel_rollout(
                 rngs, SquashContinuousActionsToBoundsWrapper(self.env),
                 nnx.vmap(lambda rngs, obs: self.get_action(
                     rngs, networks.policy, obs, ignore_continuous_bounds=True)),
@@ -187,27 +187,29 @@ class A2C(Generic[TEnvState, TEnvObs]):
             ent_weight_continuous = resolve_scheduleable(self.hyperparameters.ent_weight_continuous, steps)
 
             def loss_func(networks: Networks, rngs: nnx.Rngs):
-                values = networks.critic(timesteps.obs, rngs=rngs).squeeze()
+                values = networks.critic(timesteps.obs, rngs=rngs).squeeze(axis=-1)
                 const_values = jax.lax.stop_gradient(values)
 
                 if bootstrap_truncated:
                     next_obs = jax.vmap(jax.vmap(self.env.get_obs))(
                         jax.random.split(rngs.env(), total_steps_per_iter).reshape((
-                            self.hyperparameters.n_steps,
+                            self.hyperparameters.n_steps - 1,
                             self.hyperparameters.n_envs
                         )),
-                        timesteps.info[AutoResetWrapper.NEXT_STATE_INFO_KEY]
+                        jax.tree.map(lambda x: x[1:], timesteps.info[AutoResetWrapper.UNRESET_STATE_INFO_KEY])
                     )
 
-                    next_values = networks.critic(next_obs, rngs=rngs)
+                    next_values = networks.critic(next_obs, rngs=rngs).squeeze(axis=-1)
                 else:
-                    final_obs = jax.vmap(self.env.get_obs)(
-                        jax.random.split(rngs.env(), self.hyperparameters.n_envs),
-                        jax.tree.map(lambda x: x[-1], timesteps.info[AutoResetWrapper.NEXT_STATE_INFO_KEY])
-                    )
+                    next_values = const_values[1:]
 
-                    final_values = networks.critic(final_obs, rngs=rngs)[None, ...].squeeze()
-                    next_values = jnp.append(const_values[1:], final_values[None, ...], axis=0)
+                final_obs = jax.vmap(self.env.get_obs)(
+                    jax.random.split(rngs.env(), self.hyperparameters.n_envs),
+                    final_infos[AutoResetWrapper.UNRESET_STATE_INFO_KEY]
+                )
+
+                final_values = networks.critic(final_obs, rngs=rngs).squeeze(axis=-1)
+                next_values = jnp.append(next_values, final_values[None, ...], axis=0)
 
                 next_values = jax.lax.stop_gradient(next_values)
 

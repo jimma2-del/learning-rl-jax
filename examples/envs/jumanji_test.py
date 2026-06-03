@@ -9,6 +9,8 @@ from jumanji.environments.routing.snake import Snake
 from core.envs.jumanji import JumanjiWrapper
 from core.envs.utils import rollout_episode
 
+from core.envs.wrappers import EpisodeStepCountWrapper
+
 NUM_EPISODES = 1
 ENV_NAME = "snake"
 STEPS_LIMIT = 600
@@ -25,12 +27,12 @@ def policy(rngs, obs):
 comb_states = []
 
 for _ in range(NUM_EPISODES):
-    timesteps = rollout_episode(rngs, env, policy, STEPS_LIMIT)
+    timesteps, state, info = rollout_episode(rngs, EpisodeStepCountWrapper(env, STEPS_LIMIT), policy)
     eps_return = sum(timesteps.reward)
     steps = len(timesteps.reward)
 
     print(f"{'Truncated' if timesteps.truncated[-1] else 'Terminated'} at steps={steps}, return={eps_return}.")
 
-    comb_states += [ jax.tree.map(lambda x: x[i], timesteps.state) for i in range(steps + 1) ]
+    comb_states += [ jax.tree.map(lambda x: x[i], timesteps.state.state) for i in range(steps + 1) ]
 
-jumanji_env.animate(comb_states, 100, f"./examples/{ENV_NAME}_animation.gif")
+jumanji_env.animate(comb_states, 100, f"./examples/envs/{ENV_NAME}_animation.gif")
