@@ -28,6 +28,11 @@ class PolicyWithRngs(Generic[TEnvObs, TEnvAction], Protocol):
 
 Policy: TypeAlias = Callable[[TEnvObs], TEnvAction] | PolicyWithRngs[TEnvObs, TEnvAction]
 
+class CriticWithRngs(Generic[TEnvObs], Protocol):
+    def __call__(self, obs: TEnvObs, rngs: nnx.Rngs) -> ArrayLike: ...
+
+Critic: TypeAlias = Callable[[TEnvObs], ArrayLike] | CriticWithRngs[TEnvObs]
+
 def evaluate_episodes(rngs: nnx.Rngs, 
     env: Environment[TEnvState, TEnvObs, TEnvAction, TRenderFrame], 
     policy: Policy[TEnvObs, TEnvAction], 

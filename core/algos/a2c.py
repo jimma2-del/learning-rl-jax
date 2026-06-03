@@ -12,7 +12,7 @@ import functools
 from flax import nnx
 import optax
 
-from core.algos.base import Scheduleable
+from core.algos.base import Scheduleable, PolicyNetwork, CriticNetwork
 from core.utils.func_utils import try_call, optionally_pass
 
 from core.envs.base import Environment
@@ -38,23 +38,23 @@ class Hyperparameters:
         # if using both discrete and continuous actions, it may be helpful to reduce the weight
             # of the continuous (differential) entropy, since it tends to have a higher scale
             # than discrete (Shannon's) entropy
-
-class Networks(nnx.Module):
-    def __init__(self, policy: nnx.Module, critic: nnx.Module) -> None:
-        self.policy = policy
-        self.critic = critic
     
 TEnvState = TypeVar("TEnvState")
 TEnvObs = TypeVar("TEnvObs")
 TEnvAction = TypeVar("TEnvAction")
 
+class Networks(Generic[TEnvObs, TEnvAction], nnx.Module):
+    def __init__(self, policy: PolicyNetwork[TEnvObs, TEnvAction], critic: CriticNetwork[TEnvObs]) -> None:
+        self.policy = policy
+        self.critic = critic
+
 @dataclass(frozen=True)
 class TrainingState(Generic[TEnvState, TEnvObs]):
     steps: ArrayLike
     env_states: TEnvState
-    policy: nnx.Module # to match standard api
+    policy: PolicyNetwork[TEnvObs, TEnvAction] # to match standard api
 
-    networks: Networks
+    networks: Networks[TEnvObs, TEnvAction]
     optimizer: nnx.Optimizer
 
 class A2C(Generic[TEnvState, TEnvObs]):
@@ -102,8 +102,8 @@ class A2C(Generic[TEnvState, TEnvObs]):
 
     def init_training_state(self,
         rngs: nnx.Rngs,
-        policy: nnx.Module | None = None,
-        critic: nnx.Module | None = None,
+        policy: PolicyNetwork[TEnvObs, TEnvAction] | None = None,
+        critic: CriticNetwork[TEnvObs] | None = None,
     ) -> TrainingState[TEnvState, TEnvObs]:
 
         # create default networks if none given
@@ -187,7 +187,7 @@ class A2C(Generic[TEnvState, TEnvObs]):
             ent_coef = try_call(self.hyperparameters.ent_coef, steps)
             ent_weight_continuous = try_call(self.hyperparameters.ent_weight_continuous, steps)
 
-            def loss_func(networks: Networks, rngs: nnx.Rngs):
+            def loss_func(networks: Networks[TEnvObs, TEnvAction], rngs: nnx.Rngs):
                 values = optionally_pass(networks.critic, rngs=rngs)(timesteps.obs).squeeze(axis=-1)
                 const_values = jax.lax.stop_gradient(values)
 

@@ -7,6 +7,10 @@ from jax.typing import ArrayLike
 from chex import dataclass
 from typing import TypeVar, Generic, Protocol, TypeAlias
 
+from flax import nnx
+
+from core.envs.utils import Policy, Critic
+
 TScheduleValue = TypeVar('TScheduleValue')
 
 class Schedule(Generic[TScheduleValue], Protocol):
@@ -14,6 +18,12 @@ class Schedule(Generic[TScheduleValue], Protocol):
         ...
 
 Scheduleable: TypeAlias = TScheduleValue | Schedule[TScheduleValue]
+
+class PolicyNetwork(Policy, nnx.Module): 
+    ...
+
+class CriticNetwork(Critic, nnx.Module): 
+    ...
 
 """UNOFFICIAL Algo spec; not currently enforced, subject to change
 
