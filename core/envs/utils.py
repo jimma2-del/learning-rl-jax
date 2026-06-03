@@ -112,11 +112,17 @@ class Timestep(Generic[TEnvState, TEnvObs, TEnvAction]):
 
 TTakeObj = TypeVar('TTakeObj', default=Timestep[TEnvState, TEnvObs, TEnvAction])
 
+class TakeFuncWithRngs(Generic[TEnvState, TEnvObs, TEnvAction, TTakeObj], Protocol):
+    def __call__(self, timestep: Timestep[TEnvState, TEnvObs, TEnvAction], rngs: nnx.Rngs) -> TTakeObj: ...
+
+TakeFunc: TypeAlias = Callable[[Timestep[TEnvState, TEnvObs, TEnvAction]], TTakeObj] \
+    | TakeFuncWithRngs[TEnvState, TEnvObs, TEnvAction, TTakeObj]
+
 def rollout_episode(rngs: nnx.Rngs, 
     env: Environment[TEnvState, TEnvObs, TEnvAction, TRenderFrame], 
     policy: Policy[TEnvObs, TEnvAction],
     chunk_size: int = 100,
-    take_func: Callable[[Timestep[TEnvState, TEnvObs, TEnvAction]], TTakeObj] | None = None
+    take_func: TakeFunc[TEnvState, TEnvObs, TEnvAction, TTakeObj] | None = None
 ) -> tuple[TTakeObj, TEnvState, dict[Any, Any]]:
     """Rollout one episode. Intended for visualization, rather than training. Do NOT JIT.
     Performs rollout in chunks of `chunk_size` steps for speed, combining chunks at the end.
@@ -145,7 +151,7 @@ def rollout_episode(rngs: nnx.Rngs,
         timestep = Timestep(state=state, obs=obs, action=action, reward=reward, info=info,
             terminated=terminated, truncated=truncated)
 
-        return (next_state, next_info), (take_func(timestep), terminated, truncated)
+        return (next_state, next_info), (optionally_pass(take_func, rngs=rngs)(timestep), terminated, truncated)
 
     state, info = env.reset(rngs.env())
 
@@ -178,7 +184,7 @@ def parallel_rollout(rngs: nnx.Rngs,
     n_envs: int | None = 32,
     initial_env_states: TEnvState | None = None,
     initial_env_infos: dict[Any, Any] | None = None,
-    take_func: Callable[[Timestep[TEnvState, TEnvObs, TEnvAction]], TTakeObj] | None = None
+    take_func: TakeFunc[TEnvState, TEnvObs, TEnvAction, TTakeObj] | None = None
 ) -> tuple[TTakeObj, TEnvState, dict[Any, Any]]:
     """Runs `n_envs` environments in parallel for `iter` steps each,
         for a total of `iter * n_envs` steps.
@@ -233,8 +239,10 @@ def parallel_rollout(rngs: nnx.Rngs,
 
         new_states, rewards, terminateds, truncateds, new_infos = env.step(rngs.env(), states, actions)
 
-        return (new_states, new_infos), take_func(Timestep(state=states, obs=obs, action=actions, reward=rewards, 
-            info=infos, terminated=terminateds, truncated=truncateds))
+        return (new_states, new_infos), optionally_pass(take_func, rngs=rngs)(Timestep(
+            state=states, obs=obs, action=actions, reward=rewards, 
+            info=infos, terminated=terminateds, truncated=truncateds)
+        )
 
     (env_states, infos), take_values = nnx.scan(batched_env_step)(
         (initial_env_states, initial_env_infos), rngs.fork(split=iter))
