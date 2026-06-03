@@ -12,7 +12,8 @@ import functools
 from flax import nnx
 import optax
 
-from core.algos.base import Scheduleable, resolve_scheduleable
+from core.algos.base import Scheduleable
+from core.utils.func_utils import try_call, optionally_pass
 
 from core.envs.base import Environment
 from core.envs.wrappers import AutoResetWrapper, SquashContinuousActionsToBoundsWrapper
@@ -69,7 +70,7 @@ class A2C(Generic[TEnvState, TEnvObs]):
 
     def get_action(self, rngs: nnx.Rngs, policy: nnx.module, obs: TEnvObs, deterministic: bool = False,
             ignore_continuous_bounds=False) -> TEnvAction:
-        action_distribution = policy(obs, rngs=rngs)
+        action_distribution = optionally_pass(policy, rngs=rngs)(obs)
 
         return self.env.action_space.sample_distribution(rngs.actions(), action_distribution, 
             ignore_continuous_bounds=ignore_continuous_bounds, log_stds=True, deterministic=deterministic)
@@ -118,7 +119,7 @@ class A2C(Generic[TEnvState, TEnvObs]):
 
         # shared optimizer
         optimizer = nnx.Optimizer(networks, optax.inject_hyperparams(optax.adamw)(
-            learning_rate=resolve_scheduleable(self.hyperparameters.learning_rate, 0)))
+            learning_rate=try_call(self.hyperparameters.learning_rate, 0)))
 
         env_states, infos = jax.vmap(self.env.reset)(
             jax.random.split(rngs.env(), self.hyperparameters.n_envs))
@@ -160,7 +161,7 @@ class A2C(Generic[TEnvState, TEnvObs]):
 
             timesteps, env_states, final_infos = parallel_rollout(
                 rngs, SquashContinuousActionsToBoundsWrapper(self.env),
-                nnx.vmap(lambda rngs, obs: self.get_action(
+                nnx.vmap(lambda obs, rngs: self.get_action(
                     rngs, networks.policy, obs, ignore_continuous_bounds=True)),
                 self.hyperparameters.n_steps, self.hyperparameters.n_envs,
                 env_states
@@ -175,19 +176,19 @@ class A2C(Generic[TEnvState, TEnvObs]):
                 # last timesteps should be considered truncated, so bootstrapping is used
 
             # update optimizer schedules using env steps (rather than default grad steps)
-            lr = resolve_scheduleable(self.hyperparameters.learning_rate, steps)
+            lr = try_call(self.hyperparameters.learning_rate, steps)
             optimizer.opt_state.hyperparams['learning_rate'].value = lr
 
             ## update policy ##
-            discount = resolve_scheduleable(self.hyperparameters.discount_rate, steps)
-            gae_lambda = resolve_scheduleable(self.hyperparameters.gae_lambda, steps)
+            discount = try_call(self.hyperparameters.discount_rate, steps)
+            gae_lambda = try_call(self.hyperparameters.gae_lambda, steps)
 
-            vf_coef = resolve_scheduleable(self.hyperparameters.vf_coef, steps)
-            ent_coef = resolve_scheduleable(self.hyperparameters.ent_coef, steps)
-            ent_weight_continuous = resolve_scheduleable(self.hyperparameters.ent_weight_continuous, steps)
+            vf_coef = try_call(self.hyperparameters.vf_coef, steps)
+            ent_coef = try_call(self.hyperparameters.ent_coef, steps)
+            ent_weight_continuous = try_call(self.hyperparameters.ent_weight_continuous, steps)
 
             def loss_func(networks: Networks, rngs: nnx.Rngs):
-                values = networks.critic(timesteps.obs, rngs=rngs).squeeze(axis=-1)
+                values = optionally_pass(networks.critic, rngs=rngs)(timesteps.obs).squeeze(axis=-1)
                 const_values = jax.lax.stop_gradient(values)
 
                 if bootstrap_truncated:
@@ -208,7 +209,7 @@ class A2C(Generic[TEnvState, TEnvObs]):
                     final_infos[AutoResetWrapper.UNRESET_STATE_INFO_KEY]
                 )
 
-                final_values = networks.critic(final_obs, rngs=rngs).squeeze(axis=-1)
+                final_values = optionally_pass(networks.critic, rngs=rngs)(final_obs).squeeze(axis=-1)
                 next_values = jnp.append(next_values, final_values[None, ...], axis=0)
 
                 next_values = jax.lax.stop_gradient(next_values)
@@ -231,7 +232,7 @@ class A2C(Generic[TEnvState, TEnvObs]):
                     timesteps, const_values, next_values
                 )
 
-                action_distribution = networks.policy(timesteps.obs, rngs=rngs)
+                action_distribution = optionally_pass(networks.policy, rngs=rngs)(timesteps.obs)
 
                 log_probabilities = self.env.action_space.log_probability(
                     timesteps.action, action_distribution, ignore_continuous_bounds=True, log_stds=True)

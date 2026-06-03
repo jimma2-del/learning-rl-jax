@@ -12,7 +12,8 @@ import functools
 from flax import nnx
 import optax
 
-from core.algos.base import Scheduleable, resolve_scheduleable
+from core.algos.base import Scheduleable
+from core.utils.func_utils import try_call, optionally_pass
 
 from core.envs.base import Environment
 from core.envs.wrappers import AutoResetWrapper
@@ -96,7 +97,7 @@ class DQN(Generic[TEnvState, TEnvObs]):
             self.transition_shapes_dtypes, self.hyperparameters.replay_buffer_size)
 
     def get_greedy_action(self, rngs: nnx.Rngs, policy: nnx.module, obs: TEnvObs) -> ArrayLike:
-        q_vals = policy(obs, rngs=rngs)
+        q_vals = optionally_pass(policy, rngs=rngs)(obs)
         return jnp.argmax(q_vals)
 
     def get_random_action(self, rngs: nnx.Rngs) -> ArrayLike:
@@ -137,9 +138,9 @@ class DQN(Generic[TEnvState, TEnvObs]):
 
         timesteps, env_states, final_infos = parallel_rollout(
             rngs, self.env,
-            nnx.vmap(lambda rngs, obs: self.get_action(rngs, policy, obs, epsilon)),
+            nnx.vmap(lambda obs, rngs: self.get_action(rngs, policy, obs, epsilon)),
             iter, self.hyperparameters.n_envs,
-            initial_env_states
+            initial_env_states,
         )
 
         next_obs = jax.vmap(jax.vmap(self.env.get_obs))(
@@ -172,7 +173,7 @@ class DQN(Generic[TEnvState, TEnvObs]):
             policy = self.create_default_policy(rngs)
 
         optimizer = nnx.Optimizer(policy, optax.inject_hyperparams(optax.adamw)(
-            learning_rate=resolve_scheduleable(self.hyperparameters.learning_rate, 0)))
+            learning_rate=try_call(self.hyperparameters.learning_rate, 0)))
         #optimizer = nnx.Optimizer(q_net, optax.adamw(learning_rate=2.5e-4))
 
         if replay_buffer_state is None:
@@ -225,7 +226,7 @@ class DQN(Generic[TEnvState, TEnvObs]):
                 policy,
                 steps_per_env_per_iter,
                 env_states,
-                epsilon=resolve_scheduleable(self.hyperparameters.epsilon, steps)
+                epsilon=try_call(self.hyperparameters.epsilon, steps)
             )
 
             replay_buffer_state = self.replay_buffer.insert(replay_buffer_state, transitions)
@@ -234,7 +235,7 @@ class DQN(Generic[TEnvState, TEnvObs]):
 
             # update optimizer schedules using env steps (rather than default grad steps)
             optimizer.opt_state.hyperparams['learning_rate'].value \
-                = resolve_scheduleable(self.hyperparameters.learning_rate, steps)
+                = try_call(self.hyperparameters.learning_rate, steps)
 
             ## update policy ##
 
@@ -245,16 +246,16 @@ class DQN(Generic[TEnvState, TEnvObs]):
                 sampled_transitions = self.replay_buffer.sample(rngs.transitions(), 
                     replay_buffer_state, self.hyperparameters.batch_size)
 
-                next_qs = target(sampled_transitions.next_obs, rngs=rngs)
+                next_qs = optionally_pass(target, rngs=rngs)(sampled_transitions.next_obs)
                 max_next_qs = jnp.max(next_qs, axis=1)
                 # zero out q_val if terminated
                 max_next_qs = max_next_qs * jnp.logical_not(sampled_transitions.terminated)
 
                 target_qs = sampled_transitions.reward \
-                    + resolve_scheduleable(self.hyperparameters.discount_rate, steps)*max_next_qs
+                    + try_call(self.hyperparameters.discount_rate, steps)*max_next_qs
 
                 def loss_func(policy: nnx.Module, rngs: nnx.Rngs):
-                    pred_qs_all_actions = policy(sampled_transitions.obs, rngs=rngs)
+                    pred_qs_all_actions = optionally_pass(policy, rngs=rngs)(sampled_transitions.obs)
                         # q-net returns a q-value for every action
                     pred_qs = pred_qs_all_actions[jnp.arange(self.hyperparameters.batch_size), sampled_transitions.action]
                         # take only the q-value corresponding to the chosen action

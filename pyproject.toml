@@ -16,9 +16,10 @@ dependencies = [
   "gymnax==0.0.9",
   "chex==0.1.90",
   "jumanji==1.1.1",
+  "requests==2.34.2",
   "orbax-checkpoint>=0.11.36",
   "playground==0.2.0",
-  "mujoco-mjx[warp]==3.9.0"
+  "mujoco-mjx[warp]==3.9.0",
 ]
 authors = [
   {name = "Jim Ma", email = "jim.majk350@gmail.com"}

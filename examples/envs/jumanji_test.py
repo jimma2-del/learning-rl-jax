@@ -21,7 +21,7 @@ jumanji_env = Snake()
 env = JumanjiWrapper(jumanji_env)
 
 #@nnx.jit
-def policy(rngs, obs):
+def policy(obs, rngs):
     return env.action_space.sample(rngs.actions())
 
 comb_states = []

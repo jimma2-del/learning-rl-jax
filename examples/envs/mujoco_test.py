@@ -33,7 +33,7 @@ mjx_env = registry.load(ENV_NAME, config)
 env = MuJoCoPlaygroundWrapper(mjx_env)
 
 #@nnx.jit
-def policy(rngs, obs):
+def policy(obs, rngs):
     return env.action_space.sample(rngs.actions())
 
 VISUALIZE_METHOD = "video"

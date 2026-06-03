@@ -12,7 +12,8 @@ import functools
 
 from flax import nnx
 
-from core.algos.base import Scheduleable, resolve_scheduleable
+from core.algos.base import Scheduleable
+from core.utils.func_utils import try_call
 
 from core.envs.base import Environment
 from core.envs.wrappers import AutoResetWrapper
@@ -130,7 +131,7 @@ class LinearlyInterpolatedTabularQ(Generic[TEnvState, TEnvObs]):
 
         timesteps, env_states, final_infos = parallel_rollout(
             rngs, self.env,
-            nnx.vmap(lambda rngs, obs: self.get_action(rngs, policy, obs, epsilon)),
+            nnx.vmap(lambda obs, rngs: self.get_action(rngs, policy, obs, epsilon)),
             iter, self.hyperparameters.n_envs,
             initial_env_states
         )
@@ -211,7 +212,7 @@ class LinearlyInterpolatedTabularQ(Generic[TEnvState, TEnvObs]):
                 policy,
                 steps_per_env_per_iter,
                 env_states,
-                epsilon=resolve_scheduleable(self.hyperparameters.epsilon, steps)
+                epsilon=try_call(self.hyperparameters.epsilon, steps)
             )
 
             replay_buffer_state = self.replay_buffer.insert(replay_buffer_state, transitions)
@@ -235,14 +236,14 @@ class LinearlyInterpolatedTabularQ(Generic[TEnvState, TEnvObs]):
                 max_next_qs = max_next_qs * jnp.logical_not(sampled_transitions.terminated)
 
                 target_qs = sampled_transitions.reward \
-                    + resolve_scheduleable(self.hyperparameters.discount_rate, steps)*max_next_qs
+                    + try_call(self.hyperparameters.discount_rate, steps)*max_next_qs
 
                 pred_qs = jax.vmap(self.q_table.get)(policy[sampled_transitions.action], sampled_transitions.obs)
 
                 # only used as a metric
                 loss = jnp.mean(jnp.power(target_qs - pred_qs, 2))
 
-                adjusts = resolve_scheduleable(self.hyperparameters.learning_rate, steps) * (target_qs - pred_qs) \
+                adjusts = try_call(self.hyperparameters.learning_rate, steps) * (target_qs - pred_qs) \
                     / self.hyperparameters.batch_size # make "learning rate" independent of batch size
 
                 ## update lin-interp q-table corners

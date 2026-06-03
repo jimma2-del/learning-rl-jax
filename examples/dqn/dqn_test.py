@@ -69,7 +69,7 @@ while training_state.steps < STEPS:
     # eval
     # returns, lengths = nnx.jit(evaluate_episodes, static_argnums=(1, 2, 3, 4, 5))(
     #     rngs, env, 
-    #     lambda rngs, obs: algo.get_action(rngs, training_state.policy, obs), 
+    #     lambda obs, rngs: algo.get_action(rngs, training_state.policy, obs), 
     #     EVAL_EPS, hyperparameters.n_envs
     # )
 
@@ -99,7 +99,7 @@ from gymnax.visualize.vis_gym import render_acrobot
 
 rngs = nnx.Rngs(0, params=1, env=5, actions=3, transitions=4)
 
-def policy(rngs, obs):
+def policy(obs, rngs):
     return algo.get_action(rngs, q_net, obs)
 
 MAX_STEPS = 500

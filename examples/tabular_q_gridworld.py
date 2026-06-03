@@ -54,7 +54,7 @@ while training_state.steps < STEPS:
     # eval
     returns, lengths = nnx.jit(evaluate_episodes, static_argnums=(1, 2, 3, 4, 5))(
         rngs, env, 
-        lambda rngs, obs: algo.get_action(rngs, training_state.policy, obs), 
+        lambda obs, rngs: algo.get_action(rngs, training_state.policy, obs), 
         EVAL_EPS, hyperparameters.n_envs
     )
 

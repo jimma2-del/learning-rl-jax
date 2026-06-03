@@ -1,6 +1,6 @@
 import math
 
-from typing import Any, Generic, Callable
+from typing import Any, Generic, Callable, Protocol, TypeAlias
 from typing_extensions import TypeVar
 
 import chex
@@ -13,6 +13,7 @@ import jax.numpy as jnp
 from flax import nnx
 
 from core.utils.batch_utils import get_tree_vmap_dim
+from core.utils.func_utils import optionally_pass
 
 from core.envs.base import Environment
 from core.envs.wrappers import AutoResetWrapper, VmapWrapper, VmapConditionallyResetWrapper
@@ -22,9 +23,14 @@ TEnvObs = TypeVar("TEnvObs")
 TEnvAction = TypeVar("TEnvAction")
 TRenderFrame = TypeVar("TRenderFrame", default=None)
 
+class PolicyWithRngs(Generic[TEnvObs, TEnvAction], Protocol):
+    def __call__(self, obs: TEnvObs, rngs: nnx.Rngs) -> TEnvAction: ...
+
+Policy: TypeAlias = Callable[[TEnvObs], TEnvAction] | PolicyWithRngs[TEnvObs, TEnvAction]
+
 def evaluate_episodes(rngs: nnx.Rngs, 
     env: Environment[TEnvState, TEnvObs, TEnvAction, TRenderFrame], 
-    policy: Callable[[nnx.Rngs, TEnvObs], TEnvAction], 
+    policy: Policy[TEnvObs, TEnvAction], 
     episodes: int, n_envs = 32,
     eps_steps_limit: int = None
 ) -> tuple[jax.Array, jax.Array]:
@@ -51,7 +57,7 @@ def evaluate_episodes(rngs: nnx.Rngs,
 
         # step env
         obs = env.get_obs(rngs.env(), env_state)
-        action = policy(rngs, obs)
+        action = optionally_pass(policy, rngs=rngs)(obs)
         env_state, reward, terminated, truncated, info = env.step(rngs.env(), env_state, action)
 
         if eps_steps_limit is not None:
@@ -103,7 +109,7 @@ TTakeObj = TypeVar('TTakeObj', default=Timestep[TEnvState, TEnvObs, TEnvAction])
 
 def rollout_episode(rngs: nnx.Rngs, 
     env: Environment[TEnvState, TEnvObs, TEnvAction, TRenderFrame], 
-    policy: Callable[[nnx.Rngs, TEnvObs], TEnvAction],
+    policy: Policy[TEnvObs, TEnvAction],
     chunk_size: int = 100,
     take_func: Callable[[Timestep[TEnvState, TEnvObs, TEnvAction]], TTakeObj] | None = None
 ) -> tuple[TTakeObj, TEnvState, dict[Any, Any]]:
@@ -127,7 +133,7 @@ def rollout_episode(rngs: nnx.Rngs,
         state, info = carry
 
         obs = env.get_obs(rngs.env(), state)
-        action = policy(rngs, obs)
+        action = optionally_pass(policy, rngs=rngs)(obs)
 
         next_state, reward, terminated, truncated, next_info = env.step(rngs.env(), state, action)
 
@@ -162,7 +168,7 @@ def rollout_episode(rngs: nnx.Rngs,
 
 def parallel_rollout(rngs: nnx.Rngs,
     env: Environment[TEnvState, TEnvObs, TEnvAction, TRenderFrame],
-    policy: Callable[[nnx.Rngs, TEnvObs], TEnvAction],
+    policy: Policy[TEnvObs, TEnvAction],
     iter: int,
     n_envs: int | None = 32,
     initial_env_states: TEnvState | None = None,
@@ -218,7 +224,7 @@ def parallel_rollout(rngs: nnx.Rngs,
         states, infos = carry
 
         obs = env.get_obs(rngs.env(), states)
-        actions = policy(rngs.fork(split=n_envs), obs)
+        actions = optionally_pass(policy, rngs=rngs.fork(split=n_envs))(obs)
 
         new_states, rewards, terminateds, truncateds, new_infos = env.step(rngs.env(), states, actions)
 
@@ -232,7 +238,7 @@ def parallel_rollout(rngs: nnx.Rngs,
 
 def visualize_pygame(rngs: nnx.Rngs, 
     env: Environment[TEnvState, TEnvObs, TEnvAction, TRenderFrame], 
-    policy: Callable[[nnx.Rngs, TEnvObs], TEnvAction],
+    policy: Policy[TEnvObs, TEnvAction],
     window_size: tuple[int, int] | None = None, 
     fps: int = 10,
     render_func: Callable[[TEnvState, TEnvAction], ArrayLike] | None = None,
@@ -284,7 +290,7 @@ def visualize_pygame(rngs: nnx.Rngs,
         
         else:
             obs = env.get_obs(rngs.env(), state)
-            action = policy(rngs, obs)
+            action = optionally_pass(policy, rngs=rngs)(obs)
 
             state, reward, terminated, truncated, info = env.step(rngs.env(), state, action)
 

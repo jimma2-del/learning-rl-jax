@@ -15,10 +15,6 @@ class Schedule(Generic[TScheduleValue], Protocol):
 
 Scheduleable: TypeAlias = TScheduleValue | Schedule[TScheduleValue]
 
-def resolve_scheduleable(scheduleable: Scheduleable[TScheduleValue], steps: int) -> TScheduleValue:
-    if callable(scheduleable): return scheduleable(steps)
-    return scheduleable
-
 """UNOFFICIAL Algo spec; not currently enforced, subject to change
 
 class Algo(Generic[TTrainingState, TPolicy, TEnvState, TEnvObs, TEnvAction]):

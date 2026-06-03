@@ -13,7 +13,8 @@ from typing import TypeVar, Generic, Any
 
 import functools
 
-from core.algos.base import Scheduleable, resolve_scheduleable
+from core.algos.base import Scheduleable
+from core.utils.func_utils import try_call
 
 from core.envs.base import Environment, Space
 from core.envs.wrappers import AutoResetWrapper
@@ -156,7 +157,7 @@ class TabularQ(Generic[TEnvState, TEnvObs]):
 
         timesteps, env_states, final_infos = parallel_rollout(
             rngs, self.env,
-            nnx.vmap(lambda rngs, obs: self.get_action(rngs, policy, obs, epsilon)),
+            nnx.vmap(lambda obs, rngs: self.get_action(rngs, policy, obs, epsilon)),
             iter, self.hyperparameters.n_envs,
             initial_env_states
         )
@@ -237,7 +238,7 @@ class TabularQ(Generic[TEnvState, TEnvObs]):
                 policy,
                 steps_per_env_per_iter,
                 env_states,
-                epsilon=resolve_scheduleable(self.hyperparameters.epsilon, steps)
+                epsilon=try_call(self.hyperparameters.epsilon, steps)
             )
 
             replay_buffer_state = self.replay_buffer.insert(replay_buffer_state, transitions)
@@ -259,7 +260,7 @@ class TabularQ(Generic[TEnvState, TEnvObs]):
                 max_next_qs = max_next_qs * jnp.logical_not(sampled_transitions.terminated)
 
                 target_qs = sampled_transitions.reward \
-                    + resolve_scheduleable(self.hyperparameters.discount_rate, steps)*max_next_qs
+                    + try_call(self.hyperparameters.discount_rate, steps)*max_next_qs
 
                 adjust_is = (sampled_transitions.action, ) \
                     + tuple(jax.vmap(self.get_q_table_index)(sampled_transitions.obs).T)
@@ -268,7 +269,7 @@ class TabularQ(Generic[TEnvState, TEnvObs]):
                 # only used as a metric
                 loss = jnp.mean(jnp.power(target_qs - pred_qs, 2))
 
-                adjusts = resolve_scheduleable(self.hyperparameters.learning_rate, steps) * (target_qs - pred_qs) \
+                adjusts = try_call(self.hyperparameters.learning_rate, steps) * (target_qs - pred_qs) \
                     / self.hyperparameters.batch_size # make "learning rate" independent of batch size
                 policy = policy.at[adjust_is].add(adjusts)
 
