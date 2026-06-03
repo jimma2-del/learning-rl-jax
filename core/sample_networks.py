@@ -184,10 +184,12 @@ class StochasticPolicy(nnx.Module, Generic[TEnvAction]):
                         [state_indep_log_stds_i : state_indep_log_stds_i + leaf_descrip['output_layer_dim']]
                     state_indep_log_stds_i += leaf_descrip['output_layer_dim']
 
-                    leaves.append(jnp.stack(
-                        vals.reshape(vals.shape[:-1] + leaf_descrip['shape'][:-1]), 
-                        state_indep_log_stds
-                    ))
+                    means = vals.reshape(vals.shape[:-1] + leaf_descrip['shape'][:-1])
+
+                    leaves.append(jnp.stack((
+                        means, 
+                        jnp.broadcast_to(state_indep_log_stds, means.shape)
+                    ), axis=-1))
                 else:
                     leaves.append(vals.reshape(leaf_descrip['shape']))
 

@@ -23,18 +23,12 @@ from core.algos import a2c
 rngs = nnx.Rngs(0, params=1, env=2, actions=3)
 
 ENV_NAME = "WalkerWalk"
+N_ENVS = 32
 
 rngs = nnx.Rngs(0, params=1, env=5, actions=3)
 
 config = registry.get_default_config(ENV_NAME)
-
-#config.impl = 'jax'
-
-# for the 'warp' backend (impl): maximum num of contacts in ALL (parallel) worlds
-    # very big by default because it is for large batches
-    # here, we don't parallelize, so we should reduce them drastically
-    # to avoid being out of memory in rollout_episode
-#config.naconmax = 240 
+config.impl = 'jax'
 
 mjx_env = registry.load(ENV_NAME, config)
 
@@ -48,7 +42,7 @@ EVAL_EPS = 32
 
 hyperparameters = a2c.Hyperparameters(
     learning_rate = 2.5e-4,#10e-4,
-    n_envs = 32,
+    n_envs = N_ENVS,
     n_steps = 5,
     ent_coef = 0.001
 )

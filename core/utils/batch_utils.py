@@ -80,7 +80,8 @@ def get_tree_vmap_dim(tree):
     assert leaves, "`tree` cannot be empty"
     dim = leaves[0].shape[0] # all leaves must be arrays to be usable in vmap
 
-    assert all([ leaf.shape[0] == leaves[0].shape[0] for leaf in leaves ] ), \
-        "Leaf batch dimensions are not the same."
+    # assert all([ leaf.shape[0] == leaves[0].shape[0] for leaf in leaves ] ), \
+    #     "Leaf batch dimensions are not the same."
+        # NOT TRUE for mjx warp backend
 
     return dim

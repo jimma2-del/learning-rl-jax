@@ -20,7 +20,7 @@ from core.envs.utils import rollout_episode, visualize_pygame, evaluate_episodes
 
 from core.algos import a2c
 
-#jax.config.update("jax_log_compiles", True)
+jax.config.update("jax_log_compiles", True)
 
 rngs = nnx.Rngs(0, params=1, env=2, actions=3)
 
