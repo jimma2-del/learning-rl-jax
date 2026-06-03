@@ -129,23 +129,25 @@ class LinearlyInterpolatedTabularQ(Generic[TEnvState, TEnvObs]):
         Returns: transitions, final environment states
         """
 
-        timesteps, env_states, final_infos = parallel_rollout(
+        vmapped_get_obs = lambda rngs, obs: jax.vmap(self.env.get_obs)(
+            jax.random.split(rngs.env(), self.hyperparameters.n_envs), obs)
+
+        (unreset_obs, timesteps), env_states, final_infos = parallel_rollout(
             rngs, self.env,
             nnx.vmap(lambda obs, rngs: self.get_action(rngs, policy, obs, epsilon)),
             iter, self.hyperparameters.n_envs,
-            initial_env_states
-        )
+            initial_env_states,
 
-        next_obs = jax.vmap(jax.vmap(self.env.get_obs))(
-            jnp.reshape(
-                jax.random.split(rngs.env(), iter * self.hyperparameters.n_envs), 
-                (iter, self.hyperparameters.n_envs)
-            ), 
-            jax.tree.map(lambda middles, finals: jnp.append(middles[1:], finals[None, ...], axis=0),
-                timesteps.info[AutoResetWrapper.UNRESET_STATE_INFO_KEY],
-                final_infos[AutoResetWrapper.UNRESET_STATE_INFO_KEY]
+            take_func = lambda timesteps, rngs: (
+                vmapped_get_obs(rngs, timesteps.info[AutoResetWrapper.UNRESET_STATE_INFO_KEY]), 
+                timesteps.replace(state=None, info=None)
             )
         )
+
+        final_obs = vmapped_get_obs(rngs, final_infos[AutoResetWrapper.UNRESET_STATE_INFO_KEY])
+        next_obs = jax.tree.map(lambda middles, finals: 
+                jnp.concatenate((middles[1:], finals[None, ...]), axis=0),
+            unreset_obs, final_obs)
 
         timesteps = jax.tree.map(lambda x: x.reshape(-1, *x.shape[2:]), timesteps) # flatten to remove axis 0
         next_obs = jax.tree.map(lambda x: x.reshape(-1, *x.shape[2:]), next_obs) # flatten to remove axis 0

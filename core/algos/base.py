@@ -9,7 +9,7 @@ from typing import TypeVar, Generic, Protocol, TypeAlias
 
 from flax import nnx
 
-from core.envs.utils import Policy, Critic
+from core.envs.utils import PolicyWithRngs, PolicyWithoutRngs, CriticWithRngs, CriticWithoutRngs
 
 TScheduleValue = TypeVar('TScheduleValue')
 
@@ -19,11 +19,29 @@ class Schedule(Generic[TScheduleValue], Protocol):
 
 Scheduleable: TypeAlias = TScheduleValue | Schedule[TScheduleValue]
 
-class PolicyNetwork(Policy, nnx.Module): 
-    ...
+TEnvObs = TypeVar("TEnvObs")
+TEnvAction = TypeVar("TEnvAction")
 
-class CriticNetwork(Critic, nnx.Module): 
-    ...
+# class PolicyNetworkWithRngs(Generic[TEnvObs, TEnvAction], PolicyWithRngs[TEnvObs, TEnvAction], nnx.Module): ...
+# class PolicyNetworkWithoutRngs(Generic[TEnvObs, TEnvAction], PolicyWithoutRngs[TEnvObs, TEnvAction], nnx.Module): ...
+# PolicyNetwork: TypeAlias = PolicyNetworkWithRngs[TEnvObs, TEnvAction] | PolicyNetworkWithoutRngs[TEnvObs, TEnvAction]
+
+# class CriticNetworkWithRngs(Generic[TEnvObs], CriticWithRngs[TEnvObs], nnx.Module): ...
+# class CriticNetworkWithoutRngs(Generic[TEnvObs], CriticWithoutRngs[TEnvObs], nnx.Module): ...
+# CriticNetwork: TypeAlias = CriticNetworkWithRngs[TEnvObs] | CriticNetworkWithoutRngs[TEnvObs]
+
+# Python's type checker is not advanced enough for stuff like above yet
+class PolicyNetworkWithRngs(Generic[TEnvObs, TEnvAction], nnx.Module):
+    def __call__(self, obs: TEnvObs, rngs: nnx.Rngs) -> TEnvAction: ...
+class PolicyNetworkWithoutRngs(Generic[TEnvObs, TEnvAction], nnx.Module):
+    def __call__(self, obs: TEnvObs) -> TEnvAction: ...
+PolicyNetwork: TypeAlias = PolicyNetworkWithRngs[TEnvObs, TEnvAction] | PolicyNetworkWithoutRngs[TEnvObs, TEnvAction]
+
+class CriticNetworkWithRngs(Generic[TEnvObs], nnx.Module):
+    def __call__(self, obs: TEnvObs, rngs: nnx.Rngs) -> ArrayLike: ...
+class CriticNetworkWithoutRngs(Generic[TEnvObs], nnx.Module):
+    def __call__(self, obs: TEnvObs) -> ArrayLike: ...
+CriticNetwork: TypeAlias = CriticNetworkWithRngs[TEnvObs] | CriticNetworkWithoutRngs[TEnvObs]
 
 """UNOFFICIAL Algo spec; not currently enforced, subject to change
 

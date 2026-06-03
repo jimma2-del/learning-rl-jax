@@ -25,13 +25,15 @@ TRenderFrame = TypeVar("TRenderFrame", default=None)
 
 class PolicyWithRngs(Generic[TEnvObs, TEnvAction], Protocol):
     def __call__(self, obs: TEnvObs, rngs: nnx.Rngs) -> TEnvAction: ...
-
-Policy: TypeAlias = Callable[[TEnvObs], TEnvAction] | PolicyWithRngs[TEnvObs, TEnvAction]
+class PolicyWithoutRngs(Generic[TEnvObs, TEnvAction], Protocol):
+    def __call__(self, obs: TEnvObs) -> TEnvAction: ...
+Policy: TypeAlias = PolicyWithoutRngs[TEnvObs, TEnvAction] | PolicyWithRngs[TEnvObs, TEnvAction]
 
 class CriticWithRngs(Generic[TEnvObs], Protocol):
     def __call__(self, obs: TEnvObs, rngs: nnx.Rngs) -> ArrayLike: ...
-
-Critic: TypeAlias = Callable[[TEnvObs], ArrayLike] | CriticWithRngs[TEnvObs]
+class CriticWithoutRngs(Generic[TEnvObs], Protocol):
+    def __call__(self, obs: TEnvObs) -> ArrayLike: ...
+Critic: TypeAlias = CriticWithoutRngs[TEnvObs] | CriticWithRngs[TEnvObs]
 
 def evaluate_episodes(rngs: nnx.Rngs, 
     env: Environment[TEnvState, TEnvObs, TEnvAction, TRenderFrame], 
@@ -114,8 +116,9 @@ TTakeObj = TypeVar('TTakeObj', default=Timestep[TEnvState, TEnvObs, TEnvAction])
 
 class TakeFuncWithRngs(Generic[TEnvState, TEnvObs, TEnvAction, TTakeObj], Protocol):
     def __call__(self, timestep: Timestep[TEnvState, TEnvObs, TEnvAction], rngs: nnx.Rngs) -> TTakeObj: ...
-
-TakeFunc: TypeAlias = Callable[[Timestep[TEnvState, TEnvObs, TEnvAction]], TTakeObj] \
+class TakeFuncWithoutRngs(Generic[TEnvState, TEnvObs, TEnvAction, TTakeObj], Protocol):
+    def __call__(self, timestep: Timestep[TEnvState, TEnvObs, TEnvAction]) -> TTakeObj: ...
+TakeFunc: TypeAlias = TakeFuncWithoutRngs[TEnvState, TEnvObs, TEnvAction, TTakeObj] \
     | TakeFuncWithRngs[TEnvState, TEnvObs, TEnvAction, TTakeObj]
 
 def rollout_episode(rngs: nnx.Rngs, 
