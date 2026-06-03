@@ -58,7 +58,8 @@ training_state = algo.init_training_state(rngs)
 while training_state.steps < STEPS:
     start_time = time.perf_counter()
 
-    training_state, metrics = algo.train_epoch(rngs, training_state, LOG_INTERVAL_STEPS)
+    training_state, metrics = algo.train_epoch(rngs, 
+        training_state, LOG_INTERVAL_STEPS, bootstrap_truncated=True)
 
     elasped_time = time.perf_counter() - start_time
     sps = LOG_INTERVAL_STEPS / elasped_time

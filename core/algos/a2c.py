@@ -133,7 +133,7 @@ class A2C(Generic[TEnvState, TEnvObs]):
             optimizer = optimizer,
         )
     
-    @functools.partial(nnx.jit, static_argnames=('self', 'epoch_steps'))
+    @functools.partial(nnx.jit, static_argnames=('self', 'epoch_steps', 'bootstrap_truncated'))
     def train_epoch(self, 
         rngs: nnx.Rngs,
         training_state: TrainingState[TEnvState, TEnvObs],
@@ -159,12 +159,20 @@ class A2C(Generic[TEnvState, TEnvObs]):
             
             ## sample transitions from environment ##
 
-            timesteps, env_states, final_infos = parallel_rollout(
+            vmapped_get_obs = lambda rngs, obs: jax.vmap(self.env.get_obs)(
+                jax.random.split(rngs.env(), self.hyperparameters.n_envs), obs)
+
+            (unreset_obs, timesteps), env_states, final_infos = parallel_rollout(
                 rngs, SquashContinuousActionsToBoundsWrapper(self.env),
                 nnx.vmap(lambda obs, rngs: self.get_action(
                     rngs, networks.policy, obs, ignore_continuous_bounds=True)),
                 self.hyperparameters.n_steps, self.hyperparameters.n_envs,
-                env_states
+                env_states,
+
+                take_func = lambda timesteps, rngs: (
+                    vmapped_get_obs(rngs, timesteps.info[AutoResetWrapper.UNRESET_STATE_INFO_KEY]), 
+                    timesteps.replace(state=None, info=None) # remove unnecessary fields to save memory
+                )
             )
 
             steps += total_steps_per_iter
@@ -192,15 +200,8 @@ class A2C(Generic[TEnvState, TEnvObs]):
                 const_values = jax.lax.stop_gradient(values)
 
                 if bootstrap_truncated:
-                    next_obs = jax.vmap(jax.vmap(self.env.get_obs))(
-                        jax.random.split(rngs.env(), total_steps_per_iter).reshape((
-                            self.hyperparameters.n_steps - 1,
-                            self.hyperparameters.n_envs
-                        )),
-                        jax.tree.map(lambda x: x[1:], timesteps.info[AutoResetWrapper.UNRESET_STATE_INFO_KEY])
-                    )
-
-                    next_values = networks.critic(next_obs, rngs=rngs).squeeze(axis=-1)
+                    next_values = optionally_pass(networks.critic, rngs=rngs)(
+                        jax.tree.map(lambda x: x[1:], unreset_obs)).squeeze(axis=-1)
                 else:
                     next_values = const_values[1:]
 

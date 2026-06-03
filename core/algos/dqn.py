@@ -147,7 +147,7 @@ class DQN(Generic[TEnvState, TEnvObs]):
 
             take_func = lambda timesteps, rngs: (
                 vmapped_get_obs(rngs, timesteps.info[AutoResetWrapper.UNRESET_STATE_INFO_KEY]), 
-                timesteps.replace(state=None, info=None)
+                timesteps.replace(state=None, info=None) # remove unnecessary fields to save memory
             )
         )
 
