@@ -56,6 +56,14 @@ algo = dqn.DQN(env, hyperparameters)
 
 training_state = algo.init_training_state(rngs)
 
+@nnx.jit
+def evaluate(rngs, policy):
+    return evaluate_episodes(
+        rngs, env, 
+        lambda obs, rngs: algo.get_action(rngs, policy, obs), 
+        EVAL_EPS, hyperparameters.n_envs
+    )
+
 while training_state.steps < STEPS:
     start_time = time.perf_counter()
 
@@ -66,15 +74,11 @@ while training_state.steps < STEPS:
     print(f"Completed steps={training_state.steps}; sps={sps:,.1f}")
     print("Metrics: " + " ".join([ f"{key}={val}" for key, val in metrics.items() ]))
 
-    # eval
-    # returns, lengths = nnx.jit(evaluate_episodes, static_argnums=(1, 2, 3, 4, 5))(
-    #     rngs, env, 
-    #     lambda obs, rngs: algo.get_action(rngs, training_state.policy, obs), 
-    #     EVAL_EPS, hyperparameters.n_envs
-    # )
+    #eval
+    returns, lengths = evaluate(rngs, training_state.policy)
 
-    # print(f"Episode Return: mean={jnp.mean(returns)} std={jnp.std(returns, ddof=1)}")
-    # print(f"Episode Length: mean={jnp.mean(lengths)} std={jnp.std(lengths, ddof=1)}")
+    print(f"Episode Return: mean={jnp.mean(returns)} std={jnp.std(returns, ddof=1)}")
+    print(f"Episode Length: mean={jnp.mean(lengths)} std={jnp.std(lengths, ddof=1)}")
 
     print()
 

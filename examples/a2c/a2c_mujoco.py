@@ -51,6 +51,14 @@ algo = a2c.A2C(env, hyperparameters)
 
 training_state = algo.init_training_state(rngs)
 
+@nnx.jit
+def evaluate(rngs, policy):
+    return evaluate_episodes(
+        rngs, env, 
+        lambda obs, rngs: algo.get_action(rngs, policy, obs, deterministic=True), 
+        EVAL_EPS, hyperparameters.n_envs
+    )
+
 while training_state.steps < STEPS:
     start_time = time.perf_counter()
 
@@ -62,11 +70,7 @@ while training_state.steps < STEPS:
     print("Metrics: " + " ".join([ f"{key}={val}" for key, val in metrics.items() ]))
 
     # eval
-    returns, lengths = nnx.jit(evaluate_episodes, static_argnums=(1, 2, 3, 4, 5))(
-        rngs, env, 
-        lambda obs, rngs: algo.get_action(rngs, training_state.policy, obs, deterministic=True), 
-        EVAL_EPS, hyperparameters.n_envs
-    )
+    returns, lengths = evaluate(rngs, training_state.policy)
 
     print(f"Episode Return: mean={jnp.mean(returns)} std={jnp.std(returns, ddof=1)}")
     print(f"Episode Length: mean={jnp.mean(lengths)} std={jnp.std(lengths, ddof=1)}")
