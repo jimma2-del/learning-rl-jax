@@ -242,7 +242,7 @@ class A2C(Generic[TEnvState, TEnvObs]):
                 target_values = advantages + const_values
                 value_loss = jnp.mean(jnp.power(target_values - values, 2)) # MSE
 
-                feature_entropies = self.env.action_space.entropies(action_distribution)
+                feature_entropies = self.env.action_space.entropies(action_distribution, log_stds=True)
 
                 scaled_ents = jax.tree.map(
                     lambda leaf, s_dt: 

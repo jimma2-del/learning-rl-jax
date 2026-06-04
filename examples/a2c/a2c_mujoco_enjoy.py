@@ -20,10 +20,12 @@ from core.algos import a2c
 
 #jax.config.update("jax_log_compiles", True)
 
-ENV_NAME = "WalkerRun"
-N_ENVS = 2048#32
-
 rngs = nnx.Rngs(0, params=1, env=2, actions=3)
+
+ENV_NAME = "WalkerRun"
+N_ENVS = 256
+EVAL_EPS = 256
+MAX_STEPS = 500
 
 config = registry.get_default_config(ENV_NAME)
 config.impl = 'jax' # 'warp' backend currently does not work
@@ -32,61 +34,19 @@ mjx_env = registry.load(ENV_NAME, config)
 
 env = MuJoCoPlaygroundWrapper(mjx_env)
 
-### TRAIN ###
+algo = a2c.A2C(env)
 
-STEPS = 50_000_000 #1_000_000
-LOG_INTERVAL_STEPS = 10_000_000 #100_000
-
-MAX_STEPS = 500
-
-EVAL_EPS = 2048 # 
-EVAL_N_ENVS = 2048
-
-hyperparameters = a2c.Hyperparameters(
-    learning_rate = 2.5e-4,#schedules.linear_schedule(4e-4, 1e-4, STEPS),
-    n_envs = N_ENVS,
-    n_steps = 5,
-    ent_coef = 0.001#schedules.linear_schedule(0.0015, 0.0001, STEPS)
-)
-
-algo = a2c.A2C(env, hyperparameters)
-
-training_state = algo.init_training_state(rngs)
-
-@nnx.jit
-def evaluate(rngs, policy):
-    return evaluate_episodes(
-        rngs, EpisodeStepCountWrapper(env, max_eps_len=MAX_STEPS), 
-        lambda obs, rngs: algo.get_action(rngs, policy, obs, deterministic=True), 
-        EVAL_EPS, EVAL_N_ENVS
-    )
-
-while training_state.steps < STEPS:
-    start_time = time.perf_counter()
-
-    training_state, metrics = algo.train_epoch(rngs, training_state, LOG_INTERVAL_STEPS)
-
-    elasped_time = time.perf_counter() - start_time
-    sps = LOG_INTERVAL_STEPS / elasped_time
-    print(f"Completed steps={training_state.steps}; sps={sps:,.1f}")
-    print("Metrics: " + " ".join([ f"{key}={val}" for key, val in metrics.items() ]))
-
-    # eval
-    returns, lengths = evaluate(rngs, training_state.policy)
-
-    print(f"Episode Return: mean={jnp.mean(returns)} std={jnp.std(returns, ddof=1)}")
-    print(f"Episode Length: mean={jnp.mean(lengths)} std={jnp.std(lengths, ddof=1)}")
-
-    print()
-
-# test save
 import orbax.checkpoint as ocp
 
-SAVE_PATH = path.abspath(f'examples/a2c/_tmp/{ENV_NAME}')
+SAVE_PATH = path.abspath('examples/a2c/_tmp/WalkerRun')
 
-_, state = nnx.split(training_state.policy)
-checkpointer_save = ocp.StandardCheckpointer()
-checkpointer_save.save(SAVE_PATH, state)
+# test load
+abstract_model = nnx.eval_shape(lambda: algo.create_default_policy(rngs=nnx.Rngs(0)))
+graphdef, abstract_state = nnx.split(abstract_model)
+checkpointer_load = ocp.StandardCheckpointer()
+state_restored = checkpointer_load.restore(SAVE_PATH, abstract_state)
+
+policy_state = nnx.merge(graphdef, state_restored)
 
 ### ENJOY ###
 import mediapy
@@ -94,12 +54,11 @@ import mediapy
 rngs = nnx.Rngs(0, params=1, env=5, actions=3)
 
 def policy(obs, rngs):
-    #print(training_state.policy(obs, rngs=rngs))
-    return algo.get_action(rngs, training_state.policy, obs, deterministic=True)
+    #print(policy_state(obs, rngs=rngs))
+    return algo.get_action(rngs, policy_state, obs, deterministic=True)
 
-EVAL_EPS = 256
 returns, lengths = nnx.jit(evaluate_episodes, static_argnums=(1, 2, 3, 4, 5))(
-    rngs, EpisodeStepCountWrapper(env, max_eps_len=MAX_STEPS), policy, EVAL_EPS, EVAL_N_ENVS)
+    rngs, EpisodeStepCountWrapper(env, max_eps_len=MAX_STEPS), policy, EVAL_EPS, N_ENVS)
 print(returns)
 print(lengths)
 print(f"Episode Return: mean={jnp.mean(returns)} std={jnp.std(returns, ddof=1)}")

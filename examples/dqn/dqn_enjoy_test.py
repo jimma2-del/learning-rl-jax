@@ -37,7 +37,6 @@ algo = dqn.DQN(env)
 
 import orbax.checkpoint as ocp
 
-
 SAVE_PATH = path.abspath('examples/dqn/_tmp/flappybird')
 
 # test load

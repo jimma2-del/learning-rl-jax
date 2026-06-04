@@ -58,7 +58,7 @@ if VISUALIZE_METHOD == 'video':
         print(f"{'Truncated' if timesteps.truncated[-1] else 'Terminated'} at steps={steps}, return={eps_return}.")
 
         states = [ jax.tree.map(lambda x: x[i], timesteps.state.state) for i in range(steps + 1) ]
-        frames += mjx_env.render(states)
+        frames += mjx_env.render(states, camera='side')
 
     mediapy.write_video(f"./examples/envs/{ENV_NAME}_render.mp4", frames, fps=FPS)
 

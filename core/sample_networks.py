@@ -22,7 +22,7 @@ class MLP(nnx.Module):
         hidden_dim: int = 256, 
         num_hidden_layers: int = 1,
         do_layer_norm: bool = True,
-        activation_func = nnx.swish
+        activation_func = nnx.relu
     ) -> None:
         self.input_dim = input_dim
         self.output_dim = output_dim
@@ -66,7 +66,7 @@ class MLPFeatureExtractor(nnx.Module, Generic[TEnvObs]):
         hidden_dim: int = 256, 
         num_hidden_layers: int = 1,
         do_layer_norm: bool = True,
-        activation_func = nnx.swish,
+        activation_func = nnx.relu,
     ) -> None:
         """obs_shapes_dtypes: A PyTree of jax.ShapeDtypeStruct leaves, eg. from jax.eval_shape()."""
 
@@ -115,7 +115,8 @@ class StochasticPolicy(nnx.Module, Generic[TEnvAction]):
         hidden_dim: int = 256, 
         num_hidden_layers: int = 1,
         do_layer_norm: bool = True,
-        activation_func = nnx.swish,
+        activation_func = nnx.tanh,
+            # tanh is better for policy networks? https://arxiv.org/abs/2006.05990
     ):
         self.input_dim = input_dim
 
@@ -152,7 +153,8 @@ class StochasticPolicy(nnx.Module, Generic[TEnvAction]):
                 })
         
         if do_state_independent_stds:
-            self.state_independent_log_stds = nnx.Param(jnp.zeros(self.num_continuous))
+            self.state_independent_log_stds = nnx.Param(jnp.full(self.num_continuous, jnp.log(0.5)))
+                # stds should be initialized small, 0.5 is best; https://arxiv.org/abs/2006.05990
 
         self.mlp = MLP(rngs, input_dim, self.output_dim,
             hidden_dim, num_hidden_layers, do_layer_norm, activation_func)
