@@ -243,12 +243,12 @@ class Space(Generic[TSpaceElement]):
         `log_stds`: If True, treats stds as log stds: uses exp(feature[1]) as the standard deviation.
         """
 
-        def leaf_log_probabilities(unsquashed_leaf, squashed_leaf, cur_dist, 
+        def leaf_log_probabilities(unsquashed_leaf, cur_dist, 
                 cur_low, cur_high, shape_dtype: jax.ShapeDtypeStruct) -> TSpaceElement:
 
             if jnp.issubdtype(shape_dtype.dtype, jnp.integer):
                 all_log_probs = jax.nn.log_softmax(cur_dist, axis=-1)
-                dist_is = squashed_leaf - cur_low # squashed same as unsquashed
+                dist_is = unsquashed_leaf - cur_low # unsquashed and squashed are the same
                 return jnp.take_along_axis(all_log_probs, dist_is[..., None], axis=-1).squeeze(axis=-1)
 
             else: 
@@ -258,12 +258,11 @@ class Space(Generic[TSpaceElement]):
                 # NOTE: extra sanitization due to issue with jnp.where and NaNs for gradients
                     # must ensure no NaNs ever get created in either branch; replace infs with dummy values
 
-                # adjust for squashing transformation for bounded features using jacobian
-                safe_squashed_leaf = jnp.clip(squashed_leaf, -1, 1)
-                adjust = -jnp.log(1 - jnp.square(safe_squashed_leaf) + 1e-6) # handle tanh
+                ## adjust for squashing transformation for bounded features using jacobian
+                adjust = -jnp.log(1 - jnp.square(jnp.tanh(unsquashed_leaf)) + 1e-6) # neither side unbounded -> tanh
 
                 adjust = jnp.where(jnp.logical_or(jnp.isinf(cur_low), jnp.isinf(cur_high)), 
-                    squashed_leaf - unsquashed_leaf, adjust) # handle one side unbounded -> softplus
+                    jnp.logaddexp(0, -unsquashed_leaf), adjust) # handle one side unbounded -> softplus
                     
                 adjust = jnp.where(jnp.logical_and(jnp.isinf(cur_low), jnp.isinf(cur_high)), 
                     0, adjust) # handle both unbounded -> no transformation
@@ -271,13 +270,9 @@ class Space(Generic[TSpaceElement]):
                 return norm_prob + adjust
 
         if continuous_squashed:
-            squashed = x
-            unsquashed = self.unsquash_continuous_from_bounds(x)
-        else:
-            squashed = self.squash_continuous_to_bounds(x)
-            unsquashed = x
-        
-        return jax.tree.map(leaf_log_probabilities, unsquashed, squashed, distribution, self.low, self.high, self.shapes_dtypes)
+            x = self.unsquash_continuous_from_bounds(x)
+
+        return jax.tree.map(leaf_log_probabilities, x, distribution, self.low, self.high, self.shapes_dtypes)
 
     def log_probability(self, x: TSpaceElement, distribution: TSpaceElement, 
             continuous_squashed=True, log_stds=False) -> ArrayLike:
