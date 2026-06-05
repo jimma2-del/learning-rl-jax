@@ -9,7 +9,7 @@ from jax.typing import ArrayLike
 from flax import nnx
 from optax import schedules
 
-from gymnax.environments import Acrobot, CartPole, MinBreakout
+from gymnax.environments import Acrobot, CartPole, MinBreakout, MountainCar
 from core.envs.gymnax import GymnaxWrapper
 
 from core.envs.flappy_bird import FlappyBirdEnv, State as FlappyBirdState
@@ -26,7 +26,7 @@ rngs = nnx.Rngs(0, params=1, env=2, actions=3, transitions=4)
 
 # Gymnax
 
-gymnax_env = Acrobot()#MinBreakout()#CartPole()
+gymnax_env = MountainCar()#Acrobot()#MinBreakout()#CartPole()
 gymnax_env_params = gymnax_env.default_params
 
 env = GymnaxWrapper(gymnax_env)
@@ -116,7 +116,7 @@ print(lengths)
 print(f"Episode Return: mean={jnp.mean(returns)} std={jnp.std(returns, ddof=1)}")
 print(f"Episode Length: mean={jnp.mean(lengths)} std={jnp.std(lengths, ddof=1)}")
 
-VISUALIZE_METHOD = "pygame"
+VISUALIZE_METHOD = "gif"
 rngs = nnx.Rngs(0, params=1, env=5, actions=3, transitions=4)
 
 if VISUALIZE_METHOD == 'gif':

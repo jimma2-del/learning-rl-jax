@@ -24,7 +24,6 @@ class Space(Generic[TSpaceElement]):
 
     Integer bounds denote discrete values, while float bounds denote continuous values.
     Float bounds can be infinite to indicate an unbounded leaf.
-        However, sampling is currently not supported for unbounded leaves.
 
     `low`: Lower bound, inclusive.
     `high`: Upper bound. Inclusive for integer type, exclusive for float type.
@@ -53,6 +52,20 @@ class Space(Generic[TSpaceElement]):
             lambda leaf, shape_dtype: jnp.broadcast_to(leaf, shape_dtype.shape).astype(shape_dtype.dtype),
             high, self.shapes_dtypes
         )
+
+        # assert low != +inf and high != -inf
+        assert jax.tree.all(jax.tree.map(lambda cur_low: jnp.all(jnp.logical_not(jnp.isposinf(cur_low))), self.low)), \
+            "`low` values cannot be positive infinity (`+jnp.inf`)."
+        assert jax.tree.all(jax.tree.map(lambda cur_high: jnp.all(jnp.logical_not(jnp.isneginf(cur_high))), self.high)), \
+            "`high` values cannot be negative infinity (`-jnp.inf`)."
+
+        # assert low != high for continuous leafs
+        assert jax.tree.all(jax.tree.map(
+            lambda cur_low, cur_high: 
+                not (jnp.issubdtype(cur_low.dtype, jnp.floating) \
+                    and jnp.any(cur_low == cur_high)), 
+            self.low, self.high
+        )), "`low` cannot equal `high` for continuous leaves, since `high` bound is exclusive while `low` is inclusive."
 
     def contains(self, x: TSpaceElement, batched: bool = False) -> bool:
         """Check if `x` is a valid member of this space. 
@@ -115,19 +128,22 @@ class Space(Generic[TSpaceElement]):
         def map_func(leaf, cur_low, cur_high, shape_dtype: jax.ShapeDtypeStruct):
             if jnp.issubdtype(shape_dtype.dtype, jnp.integer): return leaf
 
-            # extra sanitization due to issue with jnp.where and NaNs for gradients
-            safe_cur_low = jnp.where(jnp.isinf(cur_low), 1, cur_low)
-            safe_cur_high = jnp.where(jnp.isinf(cur_high), 2, cur_high)
+            # NOTE: extra sanitization due to issue with jnp.where and NaNs for gradients
+                # must ensure no NaNs ever get created in either branch; replace infs with dummy values
 
-            leaf = jnp.where(jnp.isinf(cur_low), safe_cur_high - jax.nn.softplus(leaf), leaf)
-            leaf = jnp.where(jnp.isinf(cur_high), safe_cur_low + jax.nn.softplus(leaf), leaf)
+            safe_cur_low = jnp.where(jnp.isinf(cur_low), -0.5, cur_low)
+            safe_cur_high = jnp.where(jnp.isinf(cur_high), 0.5, cur_high)
+            squashed = (safe_cur_low+safe_cur_high)/2 + jnp.tanh(leaf)*(safe_cur_high - safe_cur_low)/2
+                # handle both NOT unbounded -> tanh
 
-            leaf = jnp.where(jnp.logical_or(jnp.isinf(cur_low), jnp.isinf(cur_high)), 
-                leaf,
-                safe_cur_low + jnp.tanh(leaf)*(safe_cur_high - safe_cur_low)
-            )
+            softplused = jax.nn.softplus(leaf) # only one side unbounded
+            squashed = jnp.where(jnp.isinf(cur_low), cur_high - softplused, squashed)
+            squashed = jnp.where(jnp.isinf(cur_high), cur_low + softplused, squashed)
 
-            return leaf
+            squashed = jnp.where(jnp.logical_and(jnp.isinf(cur_low), jnp.isinf(cur_high)),
+                leaf, squashed) # handle both unbounded -> no-op, return original
+
+            return squashed
 
         return jax.tree.map(map_func, x, self.low, self.high, self.shapes_dtypes)
 
@@ -137,33 +153,34 @@ class Space(Generic[TSpaceElement]):
         def map_func(leaf, cur_low, cur_high, shape_dtype: jax.ShapeDtypeStruct):
             if jnp.issubdtype(shape_dtype.dtype, jnp.integer): return leaf
 
-            # extra sanitization due to issue with jnp.where and NaNs for gradients
-            safe_cur_low = jnp.where(jnp.isinf(cur_low), 1, cur_low)
-            safe_cur_high = jnp.where(jnp.isinf(cur_high), 2, cur_high)
+            # NOTE: extra sanitization due to issue with jnp.where and NaNs for gradients
+                # must ensure no NaNs ever get created in either branch; replace infs with dummy values
+    
+            # both NOT unbounded -> tanh
+            safe_cur_low = jnp.where(jnp.isinf(cur_low), -0.5, cur_low)
+            safe_cur_high = jnp.where(jnp.isinf(cur_high), 0.5, cur_high)
+            mid = (safe_cur_low+safe_cur_high)/2
+            unsquashed = jnp.arctanh(jnp.clip(
+                (leaf - jnp.where(jnp.isinf(mid), 0, mid)) / (safe_cur_high-safe_cur_low) * 2,
+                min=-1, max=1
+            ))
 
-            leaf = jnp.where(jnp.isinf(cur_low), 
-                inv_softplus(jnp.where(jnp.isinf(cur_low), safe_cur_high - leaf, 10)), 
-                leaf
-            )
+            # only one side unbounded -> softplus
+            unsquashed = jnp.where(jnp.isinf(cur_low), 
+                inv_softplus(jnp.maximum(0, cur_high - leaf)), unsquashed)
+            unsquashed = jnp.where(jnp.isinf(cur_high), 
+                inv_softplus(jnp.maximum(0, leaf - cur_low)), unsquashed)
 
-            leaf = jnp.where(jnp.isinf(cur_high), 
-                inv_softplus(jnp.where(jnp.isinf(cur_high), leaf - safe_cur_low, 10)), 
-                leaf
-            )
+            # both unbounded -> no-op, return original
+            unsquashed = jnp.where(jnp.logical_and(jnp.isinf(cur_low), jnp.isinf(cur_high)),
+                leaf, unsquashed)
 
-            any_inf = jnp.logical_or(jnp.isinf(cur_low), jnp.isinf(cur_high))
-            safe_ranges = jnp.where(any_inf, 1, safe_cur_high - safe_cur_low)
-            leaf = jnp.where(any_inf, 
-                leaf,
-                jnp.arctanh(jnp.where(any_inf, 0.5, (leaf - safe_cur_low) / safe_ranges))
-            )
-
-            return leaf
+            return unsquashed
 
         return jax.tree.map(map_func, x, self.low, self.high, self.shapes_dtypes)
 
     def sample_distribution(self, key: chex.PRNGKey, distribution: TSpaceElement, 
-            ignore_continuous_bounds=False, deterministic=False, log_stds=False) -> TSpaceElement:
+            squash_continuous=True, deterministic=False, log_stds=False) -> TSpaceElement:
         """Samples a single element from the space, according to the given distribution.
         
         The distribution should have the same treedef as the Space. Each leaf should have the same shape,
@@ -178,11 +195,11 @@ class Space(Generic[TSpaceElement]):
             If continuous (jnp.floating): values will be sampled according to a normal distribution.
                 Trailing axis should have size 2. The first element should be the mean, 
                     and the second should be the standard deviation.
-                If bounded, values will be clamped using the softplus (one side bounded) 
+                If bounded, values will be squashed to bounds using the softplus (one side bounded) 
                     or tanh (both sides bounded) function.
 
-        `ignore_continuous_bounds`: If True, assumes all continuous values are unbounded.
-            Useful, eg. for raw network outputs, before softplus or tanh.
+        `squash_continuous`: If False, does not squash continuous values, leaving them unbounded.
+            Useful, eg. for sampling raw outputs, before softplus or tanh.
 
         `deterministic`: If True, takes the mode.
             Discrete (jnp.integer) leaves: selects the choice with the highest probability.
@@ -210,48 +227,70 @@ class Space(Generic[TSpaceElement]):
 
         sample = jax.tree.map(sample_leaf, distribution, self.low, self.shapes_dtypes, keys_tree)
 
-        if not ignore_continuous_bounds:
+        if squash_continuous:
             sample = self.squash_continuous_to_bounds(sample)
 
         return sample
 
     def log_probabilities(self, x: TSpaceElement, distribution: TSpaceElement, 
-            ignore_continuous_bounds=False, log_stds=False) -> TSpaceElement:
+            continuous_squashed=True, log_stds=False) -> TSpaceElement:
         """Computes the individual log probability of sampling each feature of `x` from `distribution`.
         See `space.sample_distribution` for details on the structure of `distribution`.
 
-        `ignore_continuous_bounds`: If True, assumes all continuous values are unbounded.
-            Useful, eg. for raw network outputs, before softplus or tanh.
+        `continuous_squashed`: If False, assumes all continuous values are unsquashed and unbounded.
+            Useful, eg. for processing raw outputs, before softplus or tanh.
 
         `log_stds`: If True, treats stds as log stds: uses exp(feature[1]) as the standard deviation.
         """
 
-        def leaf_log_probabilities(x_leaf, cur_dist, cur_low, shape_dtype: jax.ShapeDtypeStruct):
+        def leaf_log_probabilities(unsquashed_leaf, squashed_leaf, cur_dist, 
+                cur_low, cur_high, shape_dtype: jax.ShapeDtypeStruct) -> TSpaceElement:
+
             if jnp.issubdtype(shape_dtype.dtype, jnp.integer):
                 all_log_probs = jax.nn.log_softmax(cur_dist, axis=-1)
-                dist_is = x_leaf - cur_low
+                dist_is = squashed_leaf - cur_low # squashed same as unsquashed
                 return jnp.take_along_axis(all_log_probs, dist_is[..., None], axis=-1).squeeze(axis=-1)
+
             else: 
                 std = jnp.exp(cur_dist[..., 1]) if log_stds else cur_dist[..., 1]
-                return jax.scipy.stats.norm.logpdf(x_leaf, loc=cur_dist[..., 0], scale=std)
+                norm_prob = jax.scipy.stats.norm.logpdf(unsquashed_leaf, loc=cur_dist[..., 0], scale=std)
 
-        if not ignore_continuous_bounds:
-            x = self.unsquash_continuous_from_bounds(x)
+                # NOTE: extra sanitization due to issue with jnp.where and NaNs for gradients
+                    # must ensure no NaNs ever get created in either branch; replace infs with dummy values
 
-        return jax.tree.map(leaf_log_probabilities, x, distribution, self.low, self.shapes_dtypes)
+                # adjust for squashing transformation for bounded features using jacobian
+                safe_squashed_leaf = jnp.clip(squashed_leaf, -1, 1)
+                adjust = -jnp.log(1 - jnp.square(safe_squashed_leaf) + 1e-6) # handle tanh
+
+                adjust = jnp.where(jnp.logical_or(jnp.isinf(cur_low), jnp.isinf(cur_high)), 
+                    squashed_leaf - unsquashed_leaf, adjust) # handle one side unbounded -> softplus
+                    
+                adjust = jnp.where(jnp.logical_and(jnp.isinf(cur_low), jnp.isinf(cur_high)), 
+                    0, adjust) # handle both unbounded -> no transformation
+
+                return norm_prob + adjust
+
+        if continuous_squashed:
+            squashed = x
+            unsquashed = self.unsquash_continuous_from_bounds(x)
+        else:
+            squashed = self.squash_continuous_to_bounds(x)
+            unsquashed = x
+        
+        return jax.tree.map(leaf_log_probabilities, unsquashed, squashed, distribution, self.low, self.high, self.shapes_dtypes)
 
     def log_probability(self, x: TSpaceElement, distribution: TSpaceElement, 
-            ignore_continuous_bounds=False, log_stds=False) -> ArrayLike:
+            continuous_squashed=True, log_stds=False) -> ArrayLike:
         """Computes the total log probability of sampling `x` from `distribution`, assuming features are independent.
         See `space.sample_distribution` for details on the structure of `distribution`.
 
-        `ignore_continuous_bounds`: If True, assumes all continuous values are unbounded.
-            Useful, eg. for raw network outputs, before softplus or tanh.
+        `continuous_squashed`: If False, assumes all continuous values are unsquashed and unbounded.
+            Useful, eg. for processing raw outputs, before softplus or tanh.
 
         `log_stds`: If True, treats stds as log stds: uses exp(feature[1]) as the standard deviation.
         """
 
-        log_probabilities = self.log_probabilities(x, distribution, ignore_continuous_bounds, log_stds)
+        log_probabilities = self.log_probabilities(x, distribution, continuous_squashed, log_stds)
 
         log_probabilities = jax.tree.map(
             lambda leaf, s_dt: jnp.sum(leaf, axis=tuple(range(-len(s_dt.shape), 0))),
@@ -260,23 +299,44 @@ class Space(Generic[TSpaceElement]):
 
         return jax.tree.reduce(lambda tot, cur: tot + cur, log_probabilities)
 
-    def entropies(self, distribution: TSpaceElement, log_stds=False) -> ArrayLike:
-        """Computes the individual entropy of each feature of `distribution`.
+    def try_compute_entropies(self, distribution: TSpaceElement, 
+            approximate_entropies: TSpaceElement | None = None, log_stds=False) -> tuple[TSpaceElement, TSpaceElement]:
+        """Computes the individual entropy of each feature of `distribution`,
+        if an analytical solution is available: discrete and unbounded continuous features.
+
+        Returns 0 if an analytical solution is not available: bounded (one or both sides) continuous features.
+        Returns a mask containing True if an analytical solution available, otherwise false.
+
         See `space.sample_distribution` for details on the structure of `distribution`.
 
+        `approximate_entropies`: If given, returns the specified approximated entropy instead of 0 
+            if no analytical solution available.
         `log_stds`: If True, treats stds as log stds: uses exp(feature[1]) as the standard deviation.
         """
 
-        def leaf_entropies(cur_dist, shape_dtype: jax.ShapeDtypeStruct):
+        def leaf_entropies(cur_dist, approx_ent, cur_low, cur_high, shape_dtype: jax.ShapeDtypeStruct):
             if jnp.issubdtype(shape_dtype.dtype, jnp.integer):
                 log_probs = jax.nn.log_softmax(cur_dist, axis=-1)
                 log_probs = jnp.where(jnp.isneginf(log_probs), 0, log_probs) # handle 0 probability
-                return -jnp.sum(jnp.exp(log_probs) * log_probs, axis=-1)
+                return - jnp.exp(log_probs) * log_probs
             else: 
                 std = jnp.exp(cur_dist[..., 1]) if log_stds else cur_dist[..., 1]
-                return normal_entropy(std)
+                return jnp.where(jnp.logical_and(jnp.isinf(cur_low), jnp.isinf(cur_high)), 
+                    normal_entropy(std), approx_ent)
 
-        return jax.tree.map(leaf_entropies, distribution, self.shapes_dtypes)
+        if approximate_entropies is None:
+            approximate_entropies = jax.tree.map(lambda sd: jnp.zeros(sd.shape), self.shapes_dtypes)
+
+        ents = jax.tree.map(leaf_entropies, distribution, approximate_entropies, self.low, self.high, self.shapes_dtypes)
+
+        mask = jax.tree.map(
+            lambda cur_low, cur_high, sdt: 
+                jnp.full(sdt.shape, True) if jnp.issubdtype(sdt.dtype, jnp.integer)
+                    else jnp.logical_and(jnp.isinf(cur_low), jnp.isinf(cur_high)),
+            self.low, self.high, self.shapes_dtypes
+        )
+
+        return ents, mask
 
 TEnvState = TypeVar("TEnvState")
 TEnvObs = TypeVar("TEnvObs")

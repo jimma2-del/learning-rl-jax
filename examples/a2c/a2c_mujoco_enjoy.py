@@ -22,23 +22,25 @@ from core.algos import a2c
 
 rngs = nnx.Rngs(0, params=1, env=2, actions=3)
 
-ENV_NAME = "WalkerRun"
+ENV_NAME = "CartpoleBalance"#"WalkerRun"
 N_ENVS = 256
 EVAL_EPS = 256
 MAX_STEPS = 500
+
+CAMERA = None#'side'
 
 config = registry.get_default_config(ENV_NAME)
 config.impl = 'jax' # 'warp' backend currently does not work
 
 mjx_env = registry.load(ENV_NAME, config)
 
-env = MuJoCoPlaygroundWrapper(mjx_env)
+env = MuJoCoPlaygroundWrapper(mjx_env, { 'camera': CAMERA })
 
 algo = a2c.A2C(env)
 
 import orbax.checkpoint as ocp
 
-SAVE_PATH = path.abspath('examples/a2c/_tmp/WalkerRun')
+SAVE_PATH = path.abspath(f'examples/a2c/_tmp/{ENV_NAME}')
 
 # test load
 abstract_model = nnx.eval_shape(lambda: algo.create_default_policy(rngs=nnx.Rngs(0)))
@@ -88,7 +90,7 @@ if VISUALIZE_METHOD == 'video':
         print(f"{'Truncated' if timesteps.truncated[-1] else 'Terminated'} at steps={steps}, return={eps_return}.")
 
         states = [ jax.tree.map(lambda x: x[i], timesteps.state.state) for i in range(steps + 1) ]
-        frames += mjx_env.render(states, camera='side')
+        frames += mjx_env.render(states, camera=CAMERA)
 
     mediapy.write_video(f"./examples/a2c/visualizations/a2c_{ENV_NAME}.mp4", frames, fps=FPS)
 

@@ -9,10 +9,10 @@ from jax.typing import ArrayLike
 from flax import nnx
 from optax import schedules
 
-from gymnax.environments import Acrobot, CartPole, MinBreakout
+from gymnax.environments import Acrobot, CartPole, MinBreakout, Reacher, Swimmer
 from core.envs.gymnax import GymnaxWrapper
 
-from core.envs.flappy_bird import FlappyBirdEnv, State as FlappyBirdState
+from core.envs.flappy_bird import FlappyBirdEnv
 
 from core.envs.wrappers import ObsRangeNormalizeWrapper, EpisodeStepCountWrapper
 
@@ -26,7 +26,7 @@ rngs = nnx.Rngs(0, params=1, env=2, actions=3)
 
 ## Gymnax
 
-gymnax_env = Acrobot()
+gymnax_env = Swimmer()
 gymnax_env_params = gymnax_env.default_params
 
 env = GymnaxWrapper(gymnax_env)
@@ -48,7 +48,7 @@ hyperparameters = a2c.Hyperparameters(
     learning_rate = 2.5e-4,#10e-4,
     n_envs = 32,
     n_steps = 5,
-    ent_coef = 0.001
+    ent_coef = 0#0.001
 )
 
 algo = a2c.A2C(env, hyperparameters)
@@ -115,7 +115,7 @@ print(lengths)
 print(f"Episode Return: mean={jnp.mean(returns)} std={jnp.std(returns, ddof=1)}")
 print(f"Episode Length: mean={jnp.mean(lengths)} std={jnp.std(lengths, ddof=1)}")
 
-VISUALIZE_METHOD = "pygame"
+VISUALIZE_METHOD = "gif"
 rngs = nnx.Rngs(0, params=1, env=5, actions=3)
 
 if VISUALIZE_METHOD == 'gif':

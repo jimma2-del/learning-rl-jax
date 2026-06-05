@@ -20,8 +20,9 @@ from core.algos import a2c
 
 #jax.config.update("jax_log_compiles", True)
 
-ENV_NAME = "WalkerRun"
-N_ENVS = 2048#32
+ENV_NAME = "CartpoleBalance"#"WalkerRun"
+N_ENVS = 256#2048#32
+CAMERA = None #'side'
 
 rngs = nnx.Rngs(0, params=1, env=2, actions=3)
 
@@ -30,23 +31,23 @@ config.impl = 'jax' # 'warp' backend currently does not work
 
 mjx_env = registry.load(ENV_NAME, config)
 
-env = MuJoCoPlaygroundWrapper(mjx_env)
+env = MuJoCoPlaygroundWrapper(mjx_env, {'camera': CAMERA})
 
 ### TRAIN ###
 
-STEPS = 50_000_000 #1_000_000
-LOG_INTERVAL_STEPS = 10_000_000 #100_000
+STEPS = 1_000_000#50_000_000 #1_000_000
+LOG_INTERVAL_STEPS = 100_000#10_000_000 #100_000
 
 MAX_STEPS = 500
 
-EVAL_EPS = 2048 # 
-EVAL_N_ENVS = 2048
+EVAL_EPS = 256#2048 # 
+EVAL_N_ENVS = 256#2048
 
 hyperparameters = a2c.Hyperparameters(
     learning_rate = 2.5e-4,#schedules.linear_schedule(4e-4, 1e-4, STEPS),
     n_envs = N_ENVS,
     n_steps = 5,
-    ent_coef = 0.001#schedules.linear_schedule(0.0015, 0.0001, STEPS)
+    ent_coef = 0#0.001#schedules.linear_schedule(0.0015, 0.0001, STEPS)
 )
 
 algo = a2c.A2C(env, hyperparameters)
@@ -129,7 +130,7 @@ if VISUALIZE_METHOD == 'video':
         print(f"{'Truncated' if timesteps.truncated[-1] else 'Terminated'} at steps={steps}, return={eps_return}.")
 
         states = [ jax.tree.map(lambda x: x[i], timesteps.state.state) for i in range(steps + 1) ]
-        frames += mjx_env.render(states, camera='side')
+        frames += mjx_env.render(states, camera=CAMERA)
 
     mediapy.write_video(f"./examples/a2c/visualizations/a2c_{ENV_NAME}.mp4", frames, fps=FPS)
 

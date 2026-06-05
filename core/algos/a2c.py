@@ -38,6 +38,8 @@ class Hyperparameters:
         # if using both discrete and continuous actions, it may be helpful to reduce the weight
             # of the continuous (differential) entropy, since it tends to have a higher scale
             # than discrete (Shannon's) entropy
+
+    normalize_advantages: bool = False
     
 TEnvState = TypeVar("TEnvState")
 TEnvObs = TypeVar("TEnvObs")
@@ -69,11 +71,11 @@ class A2C(Generic[TEnvState, TEnvObs]):
         self.hyperparameters = hyperparameters
 
     def get_action(self, rngs: nnx.Rngs, policy: nnx.module, obs: TEnvObs, deterministic: bool = False,
-            ignore_continuous_bounds=False) -> TEnvAction:
+            squash_continuous=True) -> TEnvAction:
         action_distribution = optionally_pass(policy, rngs=rngs)(obs)
 
         return self.env.action_space.sample_distribution(rngs.actions(), action_distribution, 
-            ignore_continuous_bounds=ignore_continuous_bounds, log_stds=True, deterministic=deterministic)
+            squash_continuous=squash_continuous, log_stds=True, deterministic=deterministic)
 
     def create_default_networks(self, rngs: nnx.Rngs) -> tuple[nnx.Module, nnx.Module]:
         FEATURE_EXTRACTOR_OUTPUT_DIM = 256
@@ -165,7 +167,7 @@ class A2C(Generic[TEnvState, TEnvObs]):
             (unreset_obs, timesteps), env_states, final_infos = parallel_rollout(
                 rngs, SquashContinuousActionsToBoundsWrapper(self.env),
                 nnx.vmap(lambda obs, rngs: self.get_action(
-                    rngs, networks.policy, obs, ignore_continuous_bounds=True)),
+                    rngs, networks.policy, obs, squash_continuous=False)),
                 self.hyperparameters.n_steps, self.hyperparameters.n_envs,
                 env_states,
 
@@ -233,16 +235,30 @@ class A2C(Generic[TEnvState, TEnvObs]):
                     timesteps, const_values, next_values
                 )
 
+                if self.hyperparameters.normalize_advantages:
+                    advantages = (advantages - jnp.mean(advantages)) / (jnp.std(advantages, ddof=1) + 1e-8)
+
                 action_distribution = optionally_pass(networks.policy, rngs=rngs)(timesteps.obs)
 
-                log_probabilities = self.env.action_space.log_probability(
-                    timesteps.action, action_distribution, ignore_continuous_bounds=True, log_stds=True)
+                feature_log_probabilities = self.env.action_space.log_probabilities(
+                    timesteps.action, action_distribution, continuous_squashed=False, log_stds=True)
+
+                log_probabilities = jax.tree.reduce(
+                    lambda tot, cur: tot + cur, 
+                    jax.tree.map(
+                        lambda leaf, s_dt: jnp.sum(leaf, axis=tuple(range(-len(s_dt.shape), 0))),
+                        feature_log_probabilities, self.env.action_space.shapes_dtypes
+                    )
+                )
+
                 policy_loss = - jnp.mean(log_probabilities * advantages)
 
                 target_values = advantages + const_values
                 value_loss = jnp.mean(jnp.power(target_values - values, 2)) # MSE
 
-                feature_entropies = self.env.action_space.entropies(action_distribution, log_stds=True)
+                approx_entropies = jax.tree.map(lambda x: -x, feature_log_probabilities)
+                feature_entropies, mask = self.env.action_space.try_compute_entropies(
+                    action_distribution, approximate_entropies=approx_entropies, log_stds=True)
 
                 scaled_ents = jax.tree.map(
                     lambda leaf, s_dt: 
