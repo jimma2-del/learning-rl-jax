@@ -18,13 +18,13 @@ from core.envs.utils import rollout_episode, visualize_pygame, evaluate_episodes
 
 from core.algos import a2c
 
-#jax.config.update("jax_log_compiles", True)
+jax.config.update("jax_log_compiles", True)
 
-ENV_NAME = "CartpoleBalance"#"WalkerRun"
-N_ENVS = 256#2048#32
-CAMERA = None #'side'
+ENV_NAME = "WalkerWalk"
+N_ENVS = 2048#32
+CAMERA = 'side' # None
 
-rngs = nnx.Rngs(0, params=1, env=2, actions=3)
+rngs = nnx.Rngs(0, params=10, env=20, actions=30)
 
 config = registry.get_default_config(ENV_NAME)
 config.impl = 'jax' # 'warp' backend currently does not work
@@ -35,8 +35,8 @@ env = MuJoCoPlaygroundWrapper(mjx_env, {'camera': CAMERA})
 
 ### TRAIN ###
 
-STEPS = 1_000_000#50_000_000 #1_000_000
-LOG_INTERVAL_STEPS = 100_000#10_000_000 #100_000
+STEPS = 60_000_000 #1_000_000
+LOG_INTERVAL_STEPS = 6_000_000 #100_000
 
 MAX_STEPS = 500
 
@@ -47,7 +47,7 @@ hyperparameters = a2c.Hyperparameters(
     learning_rate = 2.5e-4,#schedules.linear_schedule(4e-4, 1e-4, STEPS),
     n_envs = N_ENVS,
     n_steps = 5,
-    ent_coef = 0#0.001#schedules.linear_schedule(0.0015, 0.0001, STEPS)
+    ent_coef = 0.01#schedules.linear_schedule(0.0015, 0.0001, STEPS)
 )
 
 algo = a2c.A2C(env, hyperparameters)

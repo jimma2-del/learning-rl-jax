@@ -18,7 +18,7 @@ from optax import schedules
 from core.algos import a2c
 
 NUM_EPISODES = 1
-ENV_NAME = "ant"
+ENV_NAME = "halfcheetah"
 STEPS_LIMIT = 1000
 
 rngs = nnx.Rngs(0, params=1, env=5, actions=3)
@@ -29,20 +29,20 @@ env = BraxWrapper(brax_env)
 
 ### TRAIN ###
 
-STEPS = 1_000_000
-LOG_INTERVAL_STEPS = 100_000
+STEPS = 60_000_000#1_000_000
+LOG_INTERVAL_STEPS = 10_000_000#100_000
 
 MAX_STEPS = 500
 
-EVAL_EPS = 256
-N_ENVS = 256
-EVAL_N_ENVS = 256
+EVAL_EPS = 2048#256
+N_ENVS = 2048#256
+EVAL_N_ENVS = 2048#256
 
 hyperparameters = a2c.Hyperparameters(
-    learning_rate = 2.5e-4,#schedules.linear_schedule(4e-4, 1e-4, STEPS),
+    learning_rate = 10e-4,#2.5e-4,#schedules.linear_schedule(4e-4, 1e-4, STEPS),
     n_envs = N_ENVS,
     n_steps = 5,
-    ent_coef = 0#0.001#schedules.linear_schedule(0.0015, 0.0001, STEPS)
+    ent_coef = 0.001#schedules.linear_schedule(0.0015, 0.0001, STEPS)
 )
 
 algo = a2c.A2C(env, hyperparameters)
@@ -107,7 +107,7 @@ if VISUALIZE_METHOD == 'html':
         states += [ jax.tree.map(lambda x: x[i], timesteps.state.pipeline_state) for i in range(steps + 1) ]
 
     html_content = html.render(brax_env.sys, states)
-    with open(f"./examples/a2c/visualizations/{ENV_NAME}_render.html", "w") as f:
+    with open(f"./examples/a2c/visualizations/a2c_{ENV_NAME}.html", "w") as f:
         f.write(html_content)
 
 elif VISUALIZE_METHOD == 'pygame':

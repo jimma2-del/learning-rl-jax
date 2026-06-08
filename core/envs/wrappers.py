@@ -259,6 +259,15 @@ class SquashContinuousActionsToBoundsWrapper(
         action = self.env.action_space.squash_continuous_to_bounds(action)
         return super().step(key, state, action)
 
+    @property
+    def action_space(self) -> Space[TEnvAction]:
+        return Space(
+            low = jax.tree.map(lambda leaf: leaf if jnp.issubdtype(leaf, jnp.integer) else jnp.full_like(leaf, -jnp.inf), 
+                super().action_space.low),
+            high = jax.tree.map(lambda leaf: leaf if jnp.issubdtype(leaf, jnp.integer) else jnp.full_like(leaf, jnp.inf),
+                super().action_space.high)
+        )
+
 @chex.dataclass
 class EpisodeStepCountState(Generic[TEnvState]):
     state: TEnvState

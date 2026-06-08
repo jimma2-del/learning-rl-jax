@@ -13,7 +13,7 @@ from core.envs.wrappers import JitWrapper, EpisodeStepCountWrapper
 import mediapy
 
 NUM_EPISODES = 1
-ENV_NAME = "WalkerWalk"
+ENV_NAME = "CheetahRun"
 STEPS_LIMIT = 1000
 
 rngs = nnx.Rngs(0, params=1, env=5, actions=3)

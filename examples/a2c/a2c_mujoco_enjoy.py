@@ -22,7 +22,7 @@ from core.algos import a2c
 
 rngs = nnx.Rngs(0, params=1, env=2, actions=3)
 
-ENV_NAME = "CartpoleBalance"#"WalkerRun"
+ENV_NAME = "CheetahRun"
 N_ENVS = 256
 EVAL_EPS = 256
 MAX_STEPS = 500
@@ -56,7 +56,7 @@ import mediapy
 rngs = nnx.Rngs(0, params=1, env=5, actions=3)
 
 def policy(obs, rngs):
-    #print(policy_state(obs, rngs=rngs))
+    print(policy_state(obs, rngs=rngs))
     return algo.get_action(rngs, policy_state, obs, deterministic=True)
 
 returns, lengths = nnx.jit(evaluate_episodes, static_argnums=(1, 2, 3, 4, 5))(
@@ -66,7 +66,7 @@ print(lengths)
 print(f"Episode Return: mean={jnp.mean(returns)} std={jnp.std(returns, ddof=1)}")
 print(f"Episode Length: mean={jnp.mean(lengths)} std={jnp.std(lengths, ddof=1)}")
 
-VISUALIZE_METHOD = "video"
+VISUALIZE_METHOD = "pygame"
 NUM_EPISODES = 1
 rngs = nnx.Rngs(0, params=1, env=5, actions=3)
 
