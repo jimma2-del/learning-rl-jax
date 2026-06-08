@@ -23,7 +23,11 @@ class Wrapper(
     Generic[TEnvState, TEnvObs, TEnvAction, TRenderFrame],
     Environment[TEnvState, TEnvObs, TEnvAction, TRenderFrame]
 ):
-    """Abstract base class for wrappers, which modify environment attributes in some way."""
+    """Abstract base class for wrappers, which modify environment attributes in some way.
+    
+    Wrappers should generally be written to support batched environments,
+        though users may forego this in their custom wrappers.
+    """
 
     def __init__(self, env: Environment[TEnvState, TEnvObs, TEnvAction, TRenderFrame]):
         self.env = env
@@ -136,11 +140,27 @@ class VmapWrapper(
     """Vmaps the `reset`, `step`, and `get_obs` methods.
     Does not alter `observation_space` or `action_space` as the batch size is unknown.
     Does not alter the `render` method as it may not be jittable.
+
     Supports both single and batched PRNG keys."""
 
-    def reset(self, key: chex.PRNGKey, num: int | None = None) -> tuple[TEnvState, dict[Any, Any]]:
+    def __init__(self, 
+        env: Environment[TEnvState, TEnvObs, TEnvAction, TRenderFrame],
+        n_envs: int | None = None
+    ):
+        """
+        `n_envs`: Number of parallel environments.
+            Only used for handling `env.reset()` calls with an unbatched PRNG key; 
+            it is impossible to determine the intended batch size in this case.
+        """
+        super().__init__(env)
+        self.n_envs = n_envs
+
+    def reset(self, key: chex.PRNGKey) -> tuple[TEnvState, dict[Any, Any]]:
         """If a single key is given, returns a batch of size `num`."""
-        if jnp.isscalar(key): key = jax.random.split(key, num)
+        if jnp.isscalar(key):
+            assert self.n_reset_envs is not None, \
+                "`n_envs` must be specified to use `env.reset()` with an unbatched PRNG key."
+            key = jax.random.split(key, self.n_envs)
         return jax.vmap(super().reset)(key)
 
     def step(self, key: chex.PRNGKey, state: TEnvState, action: TEnvAction) \
@@ -162,8 +182,8 @@ class AutoResetWrapper(
     Places the original, unresetted state into `info[UNRESET_STATE_INFO_KEY]` (useful eg. for truncation)
         This will be the same as the returned new_state if not terminated and not truncated.
 
-    In very rare cases where resetting the environment is extremely expensive, for vectorization, 
-        try `VmapConditionallyResetWrapper(env)` instead of `VmapWrapper(AutoResetWrapper((env))`.
+    In rare cases where resetting the environment is extremely expensive, for vectorization, 
+        try `VmapConditionallyResetWrapper(env)` instead of `AutoResetWrapper(VmapWrapper(env))`.
     """
 
     UNRESET_STATE_INFO_KEY = UNRESET_STATE_INFO_KEY
@@ -180,56 +200,107 @@ class AutoResetWrapper(
         next_state, reward, terminated, truncated, info = super().step(step_key, state, action)
         info[self.UNRESET_STATE_INFO_KEY] = next_state
 
-        # reset env if terminated/truncated, don't otherwise
-        new_state = jax.lax.cond(jnp.logical_or(terminated, truncated), 
-            lambda: super(AutoResetWrapper, self).reset(reset_key)[0], lambda: next_state)
+        done = jnp.logical_or(terminated, truncated)
+
+        new_state = jax.lax.cond(done.any(), # cond to avoid computing resets when no envs done
+            lambda: jax.tree.map(lambda reset, next: jnp.where(done, reset, next), 
+                self.env.reset(reset_key)[0], next_state), 
+            lambda: next_state
+        )
 
         return new_state, reward, terminated, truncated, info
 
-class VmapConditionallyResetWrapper(
+def find_vmap_n_envs(env):
+    while isinstance(env, Wrapper):
+        if not isinstance(env, VmapWrapper):
+            env = env.env
+            continue
+
+        return env.n_envs
+
+    return -1
+
+class PrecomputedResetsPoolWrapper(
     Generic[TEnvState, TEnvObs, TEnvAction, TRenderFrame],
     Wrapper[TEnvState, TEnvObs, TEnvAction, TRenderFrame]
+):
+    """Returns a random choice from a pool of precomputed reset states and infos when calling `env.reset()`,
+        rather than computing new reset states on the fly.
+    Useful if computing environment resets is expensive, especially when using with `AutoResetWrapper()`.
+    """
+
+    def __init__(self, env: Environment[TEnvState, TEnvObs, TEnvAction, TRenderFrame], 
+        resets_pool_state_infos: tuple[TEnvState, dict[Any, Any]] | None = None, 
+        n_envs: int | None = None
+    ):
+        """
+        `n_envs`: Number of parallel environments, if the environment is batched (eg. wrapped with `VmapWrapper()`).
+            Only used for handling `env.reset()` calls with an unbatched PRNG key; 
+                it is impossible to determine the intended batch size in this case.
+            Leave as `None` if the environment is not batched.
+            Can be left as `None` if the environment is batched using `VmapWrapper()`;
+                the batch size will be found automatically.
+        """
+
+        super().__init__(env)
+
+        self.n_envs = n_envs
+        if n_envs is None: # look for a VmapWrapper
+            found_n_envs = find_vmap_n_envs(env)
+
+            assert found_n_envs is not None, \
+                "`n_envs` must be specified to use `PrecomputedResetsPoolWrapper()` with a batched environment."
+
+            self.n_envs = found_n_envs if found_n_envs != -1 else None
+            
+
+        self.resets_pool_state_infos = resets_pool_state_infos
+
+    def reset(self, key: chex.PRNGKey) -> tuple[TEnvState, dict[Any, Any]]:
+        if self.n_envs is None: batch_shape = ()
+        else: batch_shape = ( self.n_envs, )
+
+        reset_is = jax.random.randint(key, batch_shape, 0, get_tree_vmap_dim(self.resets_pool_state_infos))
+        return jax.tree.map(lambda x: x[reset_is], self.resets_pool_state_infos)
+        
+
+class VmapConditionallyResetWrapper(
+    Generic[TEnvState, TEnvObs, TEnvAction, TRenderFrame],
+    VmapWrapper[TEnvState, TEnvObs, TEnvAction, TRenderFrame]
 ):
     """Vmaps the `reset`, `step`, and `get_obs` methods, and automatically resets the environment if terminated or truncated.
 
     IMPORTANT: Only use this wrapper if resetting the environment is extremely expensive.
-        For most use cases, this will be MUCH SLOWER. Use `VmapWrapper(AutoResetWrapper(env))` instead.
+        For most use cases, this will be MUCH SLOWER. Use `AutoResetWrapper(VmapWrapper(env))` instead.
 
-    Equivalent to `VmapWrapper(AutoResetWrapper(env))`, but with a possibly faster implementation of the `step` method:
+    Equivalent to `AutoResetWrapper(VmapWrapper(env))`, but with a possibly faster implementation of the `step` method:
         - `jax.vmap` forces both branches of every `jax.lax.cond` inside to be run; 
             this forces `env.reset` to run every step, even if the env is not terminated or truncated.
         - This wrapper uses `jax.lax.map` instead, allowing conditional execution of `env.reset`
-
-    Does not alter `observation_space` or `action_space` as the batch size is unknown.
-    Does not alter the `render` method as it may not be jittable.
-    Supports both single and batched PRNG keys.
-
-    Places the original, unresetted state into `info[UNRESET_STATE_INFO_KEY]` (useful eg. for truncation)
-        This will be the same as the returned new_state if not terminated and not truncated.
     """
 
     UNRESET_STATE_INFO_KEY = UNRESET_STATE_INFO_KEY
 
+    def __init__(self, env: Environment[TEnvState, TEnvObs, TEnvAction, TRenderFrame], ):
+        super().__init__(env)
+
     def reset(self, key: chex.PRNGKey, num: int | None = None) -> tuple[TEnvState, dict[Any, Any]]:
-        """If a single key is given, returns a batch of size `num`."""
-        if jnp.isscalar(key): key = jax.random.split(key, num)
-        states, infos = jax.vmap(super().reset)(key)
+        states, infos = super().reset(key, num)
         infos[self.UNRESET_STATE_INFO_KEY] = states
         return states, infos
 
     def step(self, key: chex.PRNGKey, state: TEnvState, action: TEnvAction) \
             -> tuple[TEnvState, jax.Array, jax.Array, jax.Array, dict[Any, Any]]:
 
-        if jnp.isscalar(key): key = jax.random.split(key, get_tree_vmap_dim(state))
-        step_key, reset_key = jax.vmap(jax.random.split)(key).T
+        step_key, reset_key = jax.random.split(key)
 
-        next_state, reward, terminated, truncated, info = jax.vmap(super().step)(step_key, state, action)
+        next_state, reward, terminated, truncated, info = super().step(step_key, state, action)
         info[self.UNRESET_STATE_INFO_KEY] = next_state
 
         # reset env if terminated/truncated, don't otherwise; jax.lax.map instead of jax.vmap to allow for branching
+        if jnp.isscalar(reset_key): reset_key = jax.random.split(reset_key, get_tree_vmap_dim(state))
         new_state = jax.lax.map(self._conditionally_reset,
             (reset_key, next_state, jnp.logical_or(terminated, truncated)))
-        #new_state = jax.vmap(self._conditionally_reset)((reset_key, next_state, jnp.logical_or(terminated, truncated)))
 
         return new_state, reward, terminated, truncated, info
 
@@ -237,12 +308,8 @@ class VmapConditionallyResetWrapper(
         key, state, do_reset = x
 
         return jax.lax.cond(do_reset, 
-            lambda key: super(VmapConditionallyResetWrapper, self).reset(key)[0], lambda key: state,
+            lambda key: self.env.reset(key)[0], lambda key: state,
             key)
-
-    def get_obs(self, key: chex.PRNGKey, state: TEnvState) -> TEnvObs:
-        if jnp.isscalar(key): key = jax.random.split(key, get_tree_vmap_dim(state))
-        return jax.vmap(super().get_obs)(key, state)
 
 class SquashContinuousActionsToBoundsWrapper(
     Generic[TEnvState, TEnvObs, TEnvAction, TRenderFrame],
@@ -292,9 +359,10 @@ class EpisodeStepCountWrapper(
     def reset(self, key: chex.PRNGKey) -> tuple[EpisodeStepCountState[TEnvState], dict[Any, Any]]:
         state, info = super().reset(key)
 
-        info[self.STEP_COUNT_INFO_KEY] = jnp.array(0)
+        steps = jnp.zeros_like(key)
 
-        return EpisodeStepCountState(state=state, episode_steps=jnp.array(0)), info
+        info[self.STEP_COUNT_INFO_KEY] = steps
+        return EpisodeStepCountState(state=state, episode_steps=steps), info
 
     def step(self, key: chex.PRNGKey, state: EpisodeStepCountState[TEnvState], action: TEnvAction) \
             -> tuple[EpisodeStepCountState[TEnvState], jax.Array, jax.Array, jax.Array, dict[Any, Any]]:
@@ -315,8 +383,8 @@ class EpisodeStepCountWrapper(
         return EpisodeStepCountState(state=next_state, episode_steps=steps), reward, terminated, truncated, info
 
     def get_obs(self, key: chex.PRNGKey, state: EpisodeStepCountState[TEnvState]) -> TEnvObs:
-        return self.env.get_obs(key, state.state)
+        return super().get_obs(key, state.state)
 
     def render(self, state: EpisodeStepCountState[TEnvState], action: ArrayLike) -> TRenderFrame:
-        return self.env.render(state.state, action)
+        return super().render(state.state, action)
 
