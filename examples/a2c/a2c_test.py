@@ -14,7 +14,7 @@ from core.envs.gymnax import GymnaxWrapper
 
 from core.envs.flappy_bird import FlappyBirdEnv
 
-from core.envs.wrappers import ObsRangeNormalizeWrapper, EpisodeStepCountWrapper
+from core.envs.wrappers import ObsRangeNormalizeWrapper, EpisodeStepCountWrapper, VmapWrapper
 
 from core.envs.utils import rollout_episode, visualize_pygame, evaluate_episodes
 
@@ -26,7 +26,7 @@ rngs = nnx.Rngs(0, params=1, env=2, actions=3)
 
 ## Gymnax
 
-gymnax_env = Swimmer()
+gymnax_env = CartPole()
 gymnax_env_params = gymnax_env.default_params
 
 env = GymnaxWrapper(gymnax_env)
@@ -51,15 +51,15 @@ hyperparameters = a2c.Hyperparameters(
     ent_coef = 0#0.001
 )
 
-algo = a2c.A2C(env, hyperparameters)
+algo = a2c.A2C(VmapWrapper(env), hyperparameters)
 
 training_state = algo.init_training_state(rngs)
 
 @nnx.jit
 def evaluate(rngs, policy):
     return evaluate_episodes(
-        rngs, env, 
-        lambda obs, rngs: algo.get_action(rngs, policy, obs, deterministic=True), 
+        rngs, VmapWrapper(env), 
+        nnx.vmap(lambda obs, rngs: algo.get_action(rngs, policy, obs, deterministic=True)), 
         EVAL_EPS, hyperparameters.n_envs
     )
 
@@ -109,7 +109,7 @@ MAX_STEPS = 500
 
 EVAL_EPS = 256
 returns, lengths = nnx.jit(evaluate_episodes, static_argnums=(1, 2, 3, 4, 5))(
-    rngs, env, policy, EVAL_EPS, hyperparameters.n_envs)
+    rngs, VmapWrapper(env), nnx.vmap(policy), EVAL_EPS, hyperparameters.n_envs)
 print(returns)
 print(lengths)
 print(f"Episode Return: mean={jnp.mean(returns)} std={jnp.std(returns, ddof=1)}")

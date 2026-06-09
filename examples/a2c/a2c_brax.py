@@ -10,7 +10,7 @@ from brax.envs import create
 from core.envs.brax import BraxWrapper
 
 from core.envs.utils import rollout_episode, visualize_pygame, evaluate_episodes
-from core.envs.wrappers import JitWrapper
+from core.envs.wrappers import JitWrapper, VmapWrapper
 
 from brax.io import html
 
@@ -45,15 +45,15 @@ hyperparameters = a2c.Hyperparameters(
     ent_coef = 0.001#schedules.linear_schedule(0.0015, 0.0001, STEPS)
 )
 
-algo = a2c.A2C(env, hyperparameters)
+algo = a2c.A2C(VmapWrapper(env), hyperparameters)
 
 training_state = algo.init_training_state(rngs)
 
 @nnx.jit
 def evaluate(rngs, policy):
     return evaluate_episodes(
-        rngs, env, 
-        lambda obs, rngs: algo.get_action(rngs, policy, obs, deterministic=True), 
+        rngs, VmapWrapper(env), 
+        nnx.vmap(lambda obs, rngs: algo.get_action(rngs, policy, obs, deterministic=True)), 
         EVAL_EPS, EVAL_N_ENVS
     )
 

@@ -54,18 +54,21 @@ class Space(Generic[TSpaceElement]):
         )
 
         # assert low != +inf and high != -inf
-        assert jax.tree.all(jax.tree.map(lambda cur_low: jnp.all(jnp.logical_not(jnp.isposinf(cur_low))), self.low)), \
-            "`low` values cannot be positive infinity (`+jnp.inf`)."
-        assert jax.tree.all(jax.tree.map(lambda cur_high: jnp.all(jnp.logical_not(jnp.isneginf(cur_high))), self.high)), \
-            "`high` values cannot be negative infinity (`-jnp.inf`)."
+        if not isinstance(self.low, jax.core.Tracer):
+            assert jax.tree.all(jax.tree.map(lambda cur_low: jnp.all(jnp.logical_not(jnp.isposinf(cur_low))), self.low)), \
+                "`low` values cannot be positive infinity (`+jnp.inf`)."
+        if not isinstance(self.high, jax.core.Tracer):
+            assert jax.tree.all(jax.tree.map(lambda cur_high: jnp.all(jnp.logical_not(jnp.isneginf(cur_high))), self.high)), \
+                "`high` values cannot be negative infinity (`-jnp.inf`)."
 
         # assert low != high for continuous leafs
-        assert jax.tree.all(jax.tree.map(
-            lambda cur_low, cur_high: 
-                not (jnp.issubdtype(cur_low.dtype, jnp.floating) \
-                    and jnp.any(cur_low == cur_high)), 
-            self.low, self.high
-        )), "`low` cannot equal `high` for continuous leaves, since `high` bound is exclusive while `low` is inclusive."
+        if not isinstance(self.low, jax.core.Tracer) and not isinstance(self.high, jax.core.Tracer):
+            assert jax.tree.all(jax.tree.map(
+                lambda cur_low, cur_high: 
+                    not (jnp.issubdtype(cur_low.dtype, jnp.floating) \
+                        and jnp.any(cur_low == cur_high)), 
+                self.low, self.high
+            )), "`low` cannot equal `high` for continuous leaves, since `high` bound is exclusive while `low` is inclusive."
 
     def contains(self, x: TSpaceElement, batched: bool = False) -> bool:
         """Check if `x` is a valid member of this space. 

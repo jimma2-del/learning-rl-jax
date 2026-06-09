@@ -12,7 +12,7 @@ from optax import schedules
 from mujoco_playground import registry
 from core.envs.mujoco_playground import MuJoCoPlaygroundWrapper
 
-from core.envs.wrappers import ObsRangeNormalizeWrapper, EpisodeStepCountWrapper, JitWrapper
+from core.envs.wrappers import ObsRangeNormalizeWrapper, EpisodeStepCountWrapper, JitWrapper, VmapWrapper
 
 from core.envs.utils import rollout_episode, visualize_pygame, evaluate_episodes
 
@@ -20,7 +20,7 @@ from core.algos import a2c
 
 jax.config.update("jax_log_compiles", True)
 
-ENV_NAME = "WalkerWalk"
+ENV_NAME = "CheetahRun"
 N_ENVS = 2048#32
 CAMERA = 'side' # None
 
@@ -50,15 +50,15 @@ hyperparameters = a2c.Hyperparameters(
     ent_coef = 0.01#schedules.linear_schedule(0.0015, 0.0001, STEPS)
 )
 
-algo = a2c.A2C(env, hyperparameters)
+algo = a2c.A2C(VmapWrapper(env), hyperparameters)
 
 training_state = algo.init_training_state(rngs)
 
 @nnx.jit
 def evaluate(rngs, policy):
     return evaluate_episodes(
-        rngs, EpisodeStepCountWrapper(env, max_eps_len=MAX_STEPS), 
-        lambda obs, rngs: algo.get_action(rngs, policy, obs, deterministic=True), 
+        rngs, EpisodeStepCountWrapper(VmapWrapper(env), max_eps_len=MAX_STEPS), 
+        nnx.vmap(lambda obs, rngs: algo.get_action(rngs, policy, obs, deterministic=True)), 
         EVAL_EPS, EVAL_N_ENVS
     )
 
@@ -100,7 +100,7 @@ def policy(obs, rngs):
 
 EVAL_EPS = 256
 returns, lengths = nnx.jit(evaluate_episodes, static_argnums=(1, 2, 3, 4, 5))(
-    rngs, EpisodeStepCountWrapper(env, max_eps_len=MAX_STEPS), policy, EVAL_EPS, EVAL_N_ENVS)
+    rngs, EpisodeStepCountWrapper(VmapWrapper(env), max_eps_len=MAX_STEPS), nnx.vmap(policy), EVAL_EPS, EVAL_N_ENVS)
 print(returns)
 print(lengths)
 print(f"Episode Return: mean={jnp.mean(returns)} std={jnp.std(returns, ddof=1)}")

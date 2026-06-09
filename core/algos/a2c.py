@@ -17,7 +17,7 @@ from core.utils.func_utils import try_call, optionally_pass
 
 from core.envs.base import Environment
 from core.envs.wrappers import AutoResetWrapper, SquashContinuousActionsToBoundsWrapper
-from core.envs.utils import parallel_rollout, Timestep
+from core.envs.utils import rollout, Timestep
 
 from core.sample_networks import MLP, MLPFeatureExtractor, StochasticPolicy
 
@@ -66,6 +66,7 @@ class A2C(Generic[TEnvState, TEnvObs]):
         env: Environment[TEnvState, TEnvObs, TEnvAction],
         hyperparameters: Hyperparameters = Hyperparameters()
     ) -> None:
+        """IMPORTANT: `env` must already be batched; eg. wrap with `VmapWrapper` BEFORE passing in."""
         self.env = env
 
         self.hyperparameters = hyperparameters
@@ -123,8 +124,7 @@ class A2C(Generic[TEnvState, TEnvObs]):
         optimizer = nnx.Optimizer(networks, optax.inject_hyperparams(optax.adamw)(
             learning_rate=try_call(self.hyperparameters.learning_rate, 0)))
 
-        env_states, infos = jax.vmap(self.env.reset)(
-            jax.random.split(rngs.env(), self.hyperparameters.n_envs))
+        env_states, infos = self.env.reset(jax.random.split(rngs.env(), self.hyperparameters.n_envs))
 
         return TrainingState(
             steps = jnp.array(0, dtype=jnp.int32),
@@ -161,10 +161,7 @@ class A2C(Generic[TEnvState, TEnvObs]):
             
             ## sample transitions from environment ##
 
-            vmapped_get_obs = lambda rngs, obs: jax.vmap(self.env.get_obs)(
-                jax.random.split(rngs.env(), self.hyperparameters.n_envs), obs)
-
-            (unreset_obs, timesteps), env_states, final_infos = parallel_rollout(
+            (unreset_obs, timesteps), env_states, final_infos = rollout(
                 rngs, SquashContinuousActionsToBoundsWrapper(self.env),
                 nnx.vmap(lambda obs, rngs: self.get_action(
                     rngs, networks.policy, obs, squash_continuous=False)),
@@ -172,7 +169,10 @@ class A2C(Generic[TEnvState, TEnvObs]):
                 env_states,
 
                 take_func = lambda timesteps, rngs: (
-                    vmapped_get_obs(rngs, timesteps.info[AutoResetWrapper.UNRESET_STATE_INFO_KEY]), 
+                    self.env.get_obs(
+                        jax.random.split(rngs.env(), self.hyperparameters.n_envs),
+                        timesteps.info[AutoResetWrapper.UNRESET_STATE_INFO_KEY]
+                    ), 
                     timesteps.replace(state=None, info=None) # remove unnecessary fields to save memory
                 )
             )
@@ -207,7 +207,7 @@ class A2C(Generic[TEnvState, TEnvObs]):
                 else:
                     next_values = const_values[1:]
 
-                final_obs = jax.vmap(self.env.get_obs)(
+                final_obs = self.env.get_obs(
                     jax.random.split(rngs.env(), self.hyperparameters.n_envs),
                     final_infos[AutoResetWrapper.UNRESET_STATE_INFO_KEY]
                 )

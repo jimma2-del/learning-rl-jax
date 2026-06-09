@@ -12,7 +12,7 @@ from optax import schedules
 from mujoco_playground import registry
 from core.envs.mujoco_playground import MuJoCoPlaygroundWrapper
 
-from core.envs.wrappers import ObsRangeNormalizeWrapper, EpisodeStepCountWrapper, JitWrapper
+from core.envs.wrappers import ObsRangeNormalizeWrapper, EpisodeStepCountWrapper, JitWrapper, VmapWrapper
 
 from core.envs.utils import rollout_episode, visualize_pygame, evaluate_episodes
 
@@ -36,7 +36,7 @@ mjx_env = registry.load(ENV_NAME, config)
 
 env = MuJoCoPlaygroundWrapper(mjx_env, { 'camera': CAMERA })
 
-algo = a2c.A2C(env)
+algo = a2c.A2C(VmapWrapper(env))
 
 import orbax.checkpoint as ocp
 
@@ -60,7 +60,7 @@ def policy(obs, rngs):
     return algo.get_action(rngs, policy_state, obs, deterministic=True)
 
 returns, lengths = nnx.jit(evaluate_episodes, static_argnums=(1, 2, 3, 4, 5))(
-    rngs, EpisodeStepCountWrapper(env, max_eps_len=MAX_STEPS), policy, EVAL_EPS, N_ENVS)
+    rngs, EpisodeStepCountWrapper(VmapWrapper(env), max_eps_len=MAX_STEPS), nnx.vmap(policy), EVAL_EPS, N_ENVS)
 print(returns)
 print(lengths)
 print(f"Episode Return: mean={jnp.mean(returns)} std={jnp.std(returns, ddof=1)}")

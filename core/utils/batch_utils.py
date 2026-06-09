@@ -1,3 +1,5 @@
+from typing import Callable
+
 import jax
 import jax.numpy as jnp
 
@@ -85,3 +87,19 @@ def get_tree_vmap_dim(tree):
         # NOT TRUE for mjx warp backend
 
     return dim
+
+def split_key_if_batched(key: chex.PRNGKey, batch_num: int | None = None):
+    """Splits key into an array of length `batch_num`.
+    If `batch_num` is None, does nothing, returning `key` unaltered."""
+    return key if batch_num is None else jax.random.split(key, batch_num)
+
+def dummy_vmap(f: Callable) -> Callable:
+    """Mimics the behavior of `jax.vmap`, but does not actually apply vmap transformation; instead, 
+        for inputs, simply takes the first element in the batch axis,
+        and for outputs, adds a dummy batch axis of length 1."""
+
+    def dummy_vmapped(*args, **kwargs):
+        unbatched_args, unbatched_kwargs = jax.tree.map(lambda x: x[0], (args, kwargs))
+        return jax.tree.map(lambda x: x[None, ...], f(*unbatched_args, **unbatched_kwargs))
+
+    return dummy_vmapped

@@ -13,7 +13,7 @@ from core.envs.gymnax import GymnaxWrapper
 
 from core.envs.flappy_bird import FlappyBirdEnv, State as FlappyBirdState
 
-from core.envs.wrappers import ObsRangeNormalizeWrapper, EpisodeStepCountWrapper
+from core.envs.wrappers import ObsRangeNormalizeWrapper, EpisodeStepCountWrapper, VmapWrapper
 
 from core.envs.utils import rollout_episode, visualize_pygame, evaluate_episodes
 
@@ -33,7 +33,7 @@ env = FlappyBirdEnv(DT)
 
 #env = ObsRangeNormalizeWrapper(env)
 
-algo = dqn.DQN(env)
+algo = dqn.DQN(VmapWrapper(env))
 
 import orbax.checkpoint as ocp
 
@@ -65,7 +65,7 @@ MAX_STEPS = 500
 
 EVAL_EPS = 256
 returns, lengths = nnx.jit(evaluate_episodes, static_argnums=(1, 2, 3, 4, 5))(
-    rngs, env, policy, EVAL_EPS, N_ENVS)
+    rngs, VmapWrapper(env), nnx.vmap(policy), EVAL_EPS, n_envs=N_ENVS)
 print(returns)
 print(lengths)
 print(f"Episode Return: mean={jnp.mean(returns)} std={jnp.std(returns, ddof=1)}")

@@ -14,7 +14,7 @@ from core.envs.gymnax import GymnaxWrapper
 
 from core.envs.flappy_bird import FlappyBirdEnv, State as FlappyBirdState
 
-from core.envs.wrappers import ObsRangeNormalizeWrapper, EpisodeStepCountWrapper
+from core.envs.wrappers import ObsRangeNormalizeWrapper, EpisodeStepCountWrapper, VmapWrapper
 
 from core.envs.utils import rollout_episode, visualize_pygame, evaluate_episodes
 
@@ -52,15 +52,15 @@ hyperparameters = dqn.Hyperparameters(
     replay_buffer_size = 100_000
 )
 
-algo = dqn.DQN(env, hyperparameters)
+algo = dqn.DQN(VmapWrapper(env), hyperparameters)
 
 training_state = algo.init_training_state(rngs)
 
 @nnx.jit
 def evaluate(rngs, policy):
     return evaluate_episodes(
-        rngs, env, 
-        lambda obs, rngs: algo.get_action(rngs, policy, obs), 
+        rngs, VmapWrapper(env), 
+        nnx.vmap(lambda obs, rngs: algo.get_action(rngs, policy, obs)), 
         EVAL_EPS, hyperparameters.n_envs
     )
 
@@ -110,7 +110,7 @@ MAX_STEPS = 500
 
 EVAL_EPS = 256
 returns, lengths = nnx.jit(evaluate_episodes, static_argnums=(1, 2, 3, 4, 5))(
-    rngs, env, policy, EVAL_EPS, hyperparameters.n_envs)
+    rngs, VmapWrapper(env), nnx.vmap(policy), EVAL_EPS, hyperparameters.n_envs)
 print(returns)
 print(lengths)
 print(f"Episode Return: mean={jnp.mean(returns)} std={jnp.std(returns, ddof=1)}")

@@ -9,7 +9,7 @@ from flax import nnx
 from gymnax.environments import Acrobot, CartPole
 from core.envs.gymnax import GymnaxWrapper, Space
 
-from core.envs.wrappers import Wrapper
+from core.envs.wrappers import Wrapper, VmapWrapper
 
 from core.envs.utils import evaluate_episodes
 
@@ -124,15 +124,15 @@ hyperparameters = linearly_interpolated_tabular_q.Hyperparameters(
     target_update_interval = 1024
 )
 
-algo = linearly_interpolated_tabular_q.LinearlyInterpolatedTabularQ(env, q_table, hyperparameters)
+algo = linearly_interpolated_tabular_q.LinearlyInterpolatedTabularQ(VmapWrapper(env), q_table, hyperparameters)
 
 training_state = algo.init_training_state(rngs)
 
 @nnx.jit
 def evaluate(rngs, policy):
     return evaluate_episodes(
-        rngs, env, 
-        lambda obs, rngs: algo.get_action(rngs, policy, obs), 
+        rngs, VmapWrapper(env), 
+        nnx.vmap(lambda obs, rngs: algo.get_action(rngs, policy, obs)), 
         EVAL_EPS, hyperparameters.n_envs
     )
 

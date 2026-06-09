@@ -11,6 +11,7 @@ from core.envs.gridworld import GridworldEnv, State
 
 from core.algos import tabular_q
 from core.envs.utils import evaluate_episodes
+from core.envs.wrappers import VmapWrapper
 
 rngs = nnx.Rngs(0, params=1, env=2, actions=3, transitions=4)
 
@@ -37,15 +38,15 @@ hyperparameters = tabular_q.Hyperparameters(
     target_update_interval = 100,
 )
 
-algo = tabular_q.TabularQ(env, hyperparameters=hyperparameters)
+algo = tabular_q.TabularQ(VmapWrapper(env), hyperparameters=hyperparameters)
 
 training_state = algo.init_training_state(rngs)
 
 @nnx.jit
 def evaluate(rngs, policy):
     return evaluate_episodes(
-        rngs, env, 
-        lambda obs, rngs: algo.get_action(rngs, policy, obs), 
+        rngs, VmapWrapper(env), 
+        nnx.vmap(lambda obs, rngs: algo.get_action(rngs, policy, obs)), 
         EVAL_EPS, hyperparameters.n_envs
     )
 

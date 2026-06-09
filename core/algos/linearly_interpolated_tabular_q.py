@@ -17,7 +17,7 @@ from core.utils.func_utils import try_call
 
 from core.envs.base import Environment
 from core.envs.wrappers import AutoResetWrapper
-from core.envs.utils import parallel_rollout
+from core.envs.utils import rollout
 from core.utils import ReplayBuffer, ReplayBufferState, LinearlyInterpolatedTable
 
 @dataclass(frozen=True)
@@ -71,6 +71,8 @@ class LinearlyInterpolatedTabularQ(Generic[TEnvState, TEnvObs]):
         q_table: LinearlyInterpolatedTable,
         hyperparameters: Hyperparameters = Hyperparameters()
     ) -> None:
+        """IMPORTANT: `env` must already be batched; eg. wrap with `VmapWrapper` BEFORE passing in."""
+
         assert (
             jnp.isscalar(env.action_space.low) 
             and jnp.issubdtype(env.action_space.shapes_dtypes.dtype, jnp.integer)
@@ -129,22 +131,26 @@ class LinearlyInterpolatedTabularQ(Generic[TEnvState, TEnvObs]):
         Returns: transitions, final environment states
         """
 
-        vmapped_get_obs = lambda rngs, obs: jax.vmap(self.env.get_obs)(
-            jax.random.split(rngs.env(), self.hyperparameters.n_envs), obs)
-
-        (unreset_obs, timesteps), env_states, final_infos = parallel_rollout(
+        (unreset_obs, timesteps), env_states, final_infos = rollout(
             rngs, self.env,
             nnx.vmap(lambda obs, rngs: self.get_action(rngs, policy, obs, epsilon)),
             iter, self.hyperparameters.n_envs,
             initial_env_states,
 
             take_func = lambda timesteps, rngs: (
-                vmapped_get_obs(rngs, timesteps.info[AutoResetWrapper.UNRESET_STATE_INFO_KEY]), 
-                timesteps.replace(state=None, info=None)
+                self.env.get_obs(
+                    jax.random.split(rngs.env(), self.hyperparameters.n_envs), 
+                    timesteps.info[AutoResetWrapper.UNRESET_STATE_INFO_KEY]
+                ), 
+                timesteps.replace(state=None, info=None) # remove unnecessary fields to save memory
             )
         )
 
-        final_obs = vmapped_get_obs(rngs, final_infos[AutoResetWrapper.UNRESET_STATE_INFO_KEY])
+        final_obs = self.env.get_obs(
+            jax.random.split(rngs.env(), self.hyperparameters.n_envs), 
+            final_infos[AutoResetWrapper.UNRESET_STATE_INFO_KEY]
+        )
+        
         next_obs = jax.tree.map(lambda middles, finals: 
                 jnp.concatenate((middles[1:], finals[None, ...]), axis=0),
             unreset_obs, final_obs)

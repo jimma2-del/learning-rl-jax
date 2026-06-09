@@ -13,7 +13,7 @@ from jumanji.environments.routing.snake import Snake, State
 from jumanji.environments.logic.game_2048 import Game2048, State, Observation
 from core.envs.jumanji import JumanjiWrapper
 
-from core.envs.wrappers import ObsRangeNormalizeWrapper, Wrapper
+from core.envs.wrappers import ObsRangeNormalizeWrapper, Wrapper, VmapWrapper
 from core.envs.utils import rollout_episode, evaluate_episodes
 from core.envs.base import Space
 
@@ -61,15 +61,15 @@ hyperparameters = dqn.Hyperparameters(
     replay_buffer_size = 100_000
 )
 
-algo = dqn.DQN(env, hyperparameters)
+algo = dqn.DQN(VmapWrapper(env), hyperparameters)
 
 training_state = algo.init_training_state(rngs)
 
 @nnx.jit
 def evaluate(rngs, policy):
     return evaluate_episodes(
-        rngs, env, 
-        lambda obs, rngs: algo.get_action(rngs, policy, obs), 
+        rngs, VmapWrapper(env), 
+        nnx.vmap(lambda obs, rngs: algo.get_action(rngs, policy, obs)),
         EVAL_EPS, hyperparameters.n_envs
     )
 
