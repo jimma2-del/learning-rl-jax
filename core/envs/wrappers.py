@@ -233,7 +233,8 @@ class PrecomputedResetsPoolWrapper(
     Useful if computing environment resets is expensive, especially when using with `AutoResetWrapper()`.
 
     NOTE: If vectorizing the environment, apply BEFORE this wrapper:
-        eg. do `PrecomputedResetsPoolWrapper(VmapWrapper(env))`; do NOT do `VmapWrapper(PrecomputedResetsPoolWrapper(env))`.
+        eg. do `PrecomputedResetsPoolWrapper(VmapWrapper(env))`; 
+            do NOT do `VmapWrapper(PrecomputedResetsPoolWrapper(env))`.
     """
 
     def __init__(self, env: Environment[TEnvState, TEnvObs, TEnvAction, TRenderFrame], 
@@ -244,7 +245,7 @@ class PrecomputedResetsPoolWrapper(
     def reset(self, key: chex.PRNGKey) -> tuple[TEnvState, dict[Any, Any]]:
         resets_pool_size = get_tree_vmap_dim(self.resets_pool_state_infos)
 
-        get_reset_is = lambda key: jax.random.randint(key, minval=0, maxval=resets_pool_size)
+        get_reset_is = lambda key: jax.random.randint(key, (), minval=0, maxval=resets_pool_size)
         if not jnp.isscalar(key): get_reset_is = jax.vmap(get_reset_is) # if env vmapped
 
         reset_is = get_reset_is(key)

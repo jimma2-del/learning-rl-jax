@@ -12,13 +12,14 @@ from optax import schedules
 from mujoco_playground import registry
 from core.envs.mujoco_playground import MuJoCoPlaygroundWrapper
 
-from core.envs.wrappers import ObsRangeNormalizeWrapper, EpisodeStepCountWrapper, JitWrapper, VmapWrapper
+from core.envs.wrappers import ObsRangeNormalizeWrapper, EpisodeStepCountWrapper, \
+    JitWrapper, VmapWrapper, PrecomputedResetsPoolWrapper
 
 from core.envs.utils import rollout_episode, visualize_pygame, evaluate_episodes
 
 from core.algos import a2c
 
-jax.config.update("jax_log_compiles", True)
+#jax.config.update("jax_log_compiles", True)
 
 ENV_NAME = "CheetahRun"
 N_ENVS = 2048#32
@@ -28,10 +29,15 @@ rngs = nnx.Rngs(0, params=10, env=20, actions=30)
 
 config = registry.get_default_config(ENV_NAME)
 config.impl = 'jax' # 'warp' backend currently does not work
+config.ctrl_dt = 0.05
 
 mjx_env = registry.load(ENV_NAME, config)
 
 env = MuJoCoPlaygroundWrapper(mjx_env, {'camera': CAMERA})
+
+RESETS_POOL_SIZE = 32768
+resets_pool_states_infos = jax.vmap(env.reset)(jax.random.split(rngs.env(), RESETS_POOL_SIZE))
+env = PrecomputedResetsPoolWrapper(env, resets_pool_states_infos)
 
 ### TRAIN ###
 
@@ -47,10 +53,10 @@ hyperparameters = a2c.Hyperparameters(
     learning_rate = 2.5e-4,#schedules.linear_schedule(4e-4, 1e-4, STEPS),
     n_envs = N_ENVS,
     n_steps = 5,
-    ent_coef = 0.01#schedules.linear_schedule(0.0015, 0.0001, STEPS)
+    ent_coef = 0.001#schedules.linear_schedule(0.0015, 0.0001, STEPS)
 )
 
-algo = a2c.A2C(VmapWrapper(env), hyperparameters)
+algo = a2c.A2C(EpisodeStepCountWrapper(VmapWrapper(env), max_eps_len=MAX_STEPS), hyperparameters)
 
 training_state = algo.init_training_state(rngs)
 

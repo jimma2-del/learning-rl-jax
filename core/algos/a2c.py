@@ -262,21 +262,33 @@ class A2C(Generic[TEnvState, TEnvObs]):
 
                 scaled_ents = jax.tree.map(
                     lambda leaf, s_dt: 
-                        (1 if jnp.issubdtype(s_dt.dtype, jnp.integer) else ent_weight_continuous) 
-                            * jnp.sum(leaf, axis=tuple(range(-len(s_dt.shape), 0))),
+                        (1 if jnp.issubdtype(s_dt.dtype, jnp.integer) else ent_weight_continuous) * leaf,
                     feature_entropies, self.env.action_space.shapes_dtypes
                 )
 
+                entropies = jax.tree.map(
+                    lambda leaf, s_dt: jnp.sum(leaf, axis=tuple(range(-len(s_dt.shape), 0))),
+                    feature_entropies, self.env.action_space.shapes_dtypes
+                )
                 entropies = jax.tree.reduce(lambda tot, cur: tot + cur, scaled_ents)
                 mean_entropy = jnp.mean(entropies)
 
-                # jax.debug.print("p={p} ent={ent} pl={pl} vl={vl}", 
-                #     p=jnp.mean(log_probabilities), ent=mean_entropy, pl=policy_loss, vl=value_loss)
+                ent_loss = jax.tree.map(
+                    lambda logp, ent, s_dt: ent if jnp.issubdtype(s_dt.dtype, jnp.integer) 
+                        else ((1 + jax.lax.stop_gradient(logp)) * ent),
+                    feature_log_probabilities, scaled_ents, self.env.action_space.shapes_dtypes
+                )
+                ent_loss = jax.tree.map(
+                    lambda leaf, s_dt: jnp.sum(leaf, axis=tuple(range(-len(s_dt.shape), 0))),
+                    ent_loss, self.env.action_space.shapes_dtypes
+                )
+                ent_loss = jax.tree.reduce(lambda tot, cur: tot + cur, ent_loss)
+                ent_loss = -jnp.mean(ent_loss)
 
-                comb_loss = policy_loss + vf_coef*value_loss - ent_coef*mean_entropy
+                comb_loss = policy_loss + vf_coef*value_loss + ent_coef*ent_loss
 
                 metrics = { 'loss': comb_loss, 'policy_loss': policy_loss, 'value_loss': value_loss, 
-                    'entropy': mean_entropy }
+                    'entropy': mean_entropy, 'entropy_loss': ent_loss }
 
                 return comb_loss, metrics
 
