@@ -21,7 +21,7 @@ from core.algos import a2c
 
 #jax.config.update("jax_log_compiles", True)
 
-ENV_NAME = "CheetahRun"
+ENV_NAME = "WalkerWalk"
 N_ENVS = 2048#32
 CAMERA = 'side' # None
 
@@ -30,6 +30,7 @@ rngs = nnx.Rngs(0, params=10, env=20, actions=30)
 config = registry.get_default_config(ENV_NAME)
 config.impl = 'jax' # 'warp' backend currently does not work
 config.ctrl_dt = 0.05
+config.sim_dt = 0.005
 
 mjx_env = registry.load(ENV_NAME, config)
 

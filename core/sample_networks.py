@@ -129,15 +129,15 @@ class StochasticPolicy(nnx.Module, Generic[TEnvAction]):
         self._leaves_descrip = []
 
         for cur_low, cur_high in zip(jax.tree.leaves(action_space.low), jax.tree.leaves(action_space.high)):
-            if jnp.issubdtype(cur_low.dtype, jnp.integer):
+            if np.issubdtype(cur_low.dtype, np.integer):
                 n_choices = cur_high - cur_low + 1
-                output_layer_dim = int(jnp.sum(n_choices))
+                output_layer_dim = int(np.sum(n_choices))
                 self.output_dim += output_layer_dim
 
                 self._leaves_descrip.append({ 
                     'discrete': True, 
                     'output_layer_dim': output_layer_dim,
-                    'shape': (*cur_low.shape, int(jnp.max(n_choices))),
+                    'shape': (*cur_low.shape, int(np.max(n_choices))),
                     'n_choices': n_choices.tolist() # convert to list to mark as static
                 })
             else:

@@ -10,6 +10,7 @@ import jax
 from jax.typing import ArrayLike
 
 import jax.numpy as jnp
+import numpy as np
 
 from .base import Environment, Space
 from core.utils.batch_utils import get_tree_vmap_dim, dummy_vmap
@@ -269,9 +270,9 @@ class SquashContinuousActionsToBoundsWrapper(
     @property
     def action_space(self) -> Space[TEnvAction]:
         return Space(
-            low = jax.tree.map(lambda leaf: leaf if jnp.issubdtype(leaf, jnp.integer) else jnp.full_like(leaf, -jnp.inf), 
+            low = jax.tree.map(lambda leaf: leaf if np.issubdtype(leaf, np.integer) else np.full_like(leaf, -np.inf), 
                 super().action_space.low),
-            high = jax.tree.map(lambda leaf: leaf if jnp.issubdtype(leaf, jnp.integer) else jnp.full_like(leaf, jnp.inf),
+            high = jax.tree.map(lambda leaf: leaf if np.issubdtype(leaf, np.integer) else np.full_like(leaf, np.inf),
                 super().action_space.high)
         )
 

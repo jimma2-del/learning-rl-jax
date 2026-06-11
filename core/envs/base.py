@@ -11,6 +11,8 @@ from jax.typing import ArrayLike
 
 import jax.numpy as jnp
 
+import numpy as np
+
 from core.utils.math import inv_softplus, normal_entropy
 from core.utils.batch_utils import get_tree_batch_dims
 
@@ -23,7 +25,7 @@ class Space(Generic[TSpaceElement]):
         rather than requiring custom Tuple/Dict spaces.
 
     Integer bounds denote discrete values, while float bounds denote continuous values.
-    Float bounds can be infinite to indicate an unbounded leaf.
+    Float bounds can be infinite (np.inf, -np.inf) to indicate an unbounded leaf.
 
     `low`: Lower bound, inclusive.
     `high`: Upper bound. Inclusive for integer type, exclusive for float type.
@@ -38,37 +40,37 @@ class Space(Generic[TSpaceElement]):
 
         self.treedef = jax.tree.structure(low)
 
+        # bounds should be static constants -> ensure they are numpy arrays, not jax
+        low, high = jax.tree.map(lambda x: np.asarray(x), (low, high))
+
         self.shapes_dtypes = jax.tree.map(lambda cur_low, cur_high: jax.ShapeDtypeStruct(
-            dtype = jnp.result_type(cur_low, cur_high),
-            shape = jnp.broadcast_shapes(cur_low.shape, cur_high.shape)
+            dtype = np.result_type(cur_low, cur_high),
+            shape = np.broadcast_shapes(cur_low.shape, cur_high.shape)
         ), low, high)
 
         self.low = jax.tree.map(
-            lambda leaf, shape_dtype: jnp.broadcast_to(leaf, shape_dtype.shape).astype(shape_dtype.dtype),
+            lambda leaf, shape_dtype: np.broadcast_to(leaf, shape_dtype.shape).astype(shape_dtype.dtype),
             low, self.shapes_dtypes
         )
 
         self.high = jax.tree.map(
-            lambda leaf, shape_dtype: jnp.broadcast_to(leaf, shape_dtype.shape).astype(shape_dtype.dtype),
+            lambda leaf, shape_dtype: np.broadcast_to(leaf, shape_dtype.shape).astype(shape_dtype.dtype),
             high, self.shapes_dtypes
         )
 
         # assert low != +inf and high != -inf
-        if not isinstance(self.low, jax.core.Tracer):
-            assert jax.tree.all(jax.tree.map(lambda cur_low: jnp.all(jnp.logical_not(jnp.isposinf(cur_low))), self.low)), \
-                "`low` values cannot be positive infinity (`+jnp.inf`)."
-        if not isinstance(self.high, jax.core.Tracer):
-            assert jax.tree.all(jax.tree.map(lambda cur_high: jnp.all(jnp.logical_not(jnp.isneginf(cur_high))), self.high)), \
-                "`high` values cannot be negative infinity (`-jnp.inf`)."
+        assert jax.tree.all(jax.tree.map(lambda cur_low: np.all(np.logical_not(np.isposinf(cur_low))), self.low)), \
+            "`low` values cannot be positive infinity (`+np.inf`)."
+        assert jax.tree.all(jax.tree.map(lambda cur_high: np.all(np.logical_not(np.isneginf(cur_high))), self.high)), \
+            "`high` values cannot be negative infinity (`-np.inf`)."
 
         # assert low != high for continuous leafs
-        if not isinstance(self.low, jax.core.Tracer) and not isinstance(self.high, jax.core.Tracer):
-            assert jax.tree.all(jax.tree.map(
-                lambda cur_low, cur_high: 
-                    not (jnp.issubdtype(cur_low.dtype, jnp.floating) \
-                        and jnp.any(cur_low == cur_high)), 
-                self.low, self.high
-            )), "`low` cannot equal `high` for continuous leaves, since `high` bound is exclusive while `low` is inclusive."
+        assert jax.tree.all(jax.tree.map(
+            lambda cur_low, cur_high: 
+                not (np.issubdtype(cur_low.dtype, np.floating) \
+                    and np.any(cur_low == cur_high)), 
+            self.low, self.high
+        )), "`low` cannot equal `high` for continuous leaves, since `high` bound is exclusive while `low` is inclusive."
 
     def contains(self, x: TSpaceElement, batched: bool = False) -> bool:
         """Check if `x` is a valid member of this space. 
@@ -82,7 +84,7 @@ class Space(Generic[TSpaceElement]):
 
             if not bool(jnp.all(x_leaf >= cur_low)): return False
 
-            if jnp.issubdtype(shape_dtype.dtype, jnp.integer):
+            if np.issubdtype(shape_dtype.dtype, np.integer):
                 if not jnp.issubdtype(x_leaf.dtype, jnp.integer): return False
                 if not bool(jnp.all(x_leaf <= cur_high)): return False
             else:
@@ -95,8 +97,8 @@ class Space(Generic[TSpaceElement]):
     def sample(self, key: chex.PRNGKey) -> TSpaceElement:
         """Samples a single element from the space, according to a uniform distribution.
         
-        Continuous (jnp.floating) items can be unbounded by setting 
-        `low` to `-jnp.inf` and/or `high` to `jnp.inf`.
+        Continuous (np.floating) items can be unbounded by setting 
+        `low` to `-np.inf` and/or `high` to `np.inf`.
             - If one bound is infinite, samples from a standard exponential distribution.
             - If both bounds are infinite, samples from standard normal distribution."""
 
@@ -105,20 +107,29 @@ class Space(Generic[TSpaceElement]):
 
         def sample_leaf(cur_low, cur_high, shape_dtype: jax.ShapeDtypeStruct, key: chex.PRNGKey):
 
-            if jnp.issubdtype(shape_dtype.dtype, jnp.integer):
+            if np.issubdtype(shape_dtype.dtype, np.integer):
                 return jax.random.randint(key, shape=shape_dtype.shape, dtype=shape_dtype.dtype,
                     minval=cur_low, maxval=cur_high + 1)
 
             else:
-                sample = jax.random.uniform(key, shape=shape_dtype.shape, dtype=shape_dtype.dtype,
-                    minval=cur_low, maxval=cur_high)
+                sample = jnp.empty(shape_dtype.shape, dtype=shape_dtype.dtype)
 
-                exp = jax.random.exponential(key, shape=shape_dtype.shape)
-                sample = jnp.where(jnp.isinf(cur_low), cur_high - exp, sample)
-                sample = jnp.where(jnp.isinf(cur_high), cur_low + exp, sample)
+                if np.logical_not(np.logical_or(np.isinf(cur_low), np.isinf(cur_high))).any():
+                    sample = jax.random.uniform(key, shape=shape_dtype.shape, dtype=shape_dtype.dtype,
+                        minval=cur_low, maxval=cur_high)
 
-                sample = jnp.where(jnp.logical_and(jnp.isinf(cur_low), jnp.isinf(cur_high)), 
-                    jax.random.normal(key, shape=shape_dtype.shape), sample)
+                if np.logical_xor(np.isinf(cur_low), np.isinf(cur_high)).any():
+                    exp = jax.random.exponential(key, shape=shape_dtype.shape)
+
+                    if np.isinf(cur_low).any():
+                        sample = jnp.where(np.isinf(cur_low), cur_high - exp, sample)
+
+                    if np.isinf(cur_high).any():
+                        sample = jnp.where(np.isinf(cur_high), cur_low + exp, sample)
+
+                both_unbounded = np.logical_and(np.isinf(cur_low), np.isinf(cur_high))
+                if both_unbounded.any():
+                    sample = jnp.where(both_unbounded, jax.random.normal(key, shape=shape_dtype.shape), sample)
 
                 return sample
 
@@ -129,22 +140,31 @@ class Space(Generic[TSpaceElement]):
         Ignores discrete values."""
 
         def map_func(leaf, cur_low, cur_high, shape_dtype: jax.ShapeDtypeStruct):
-            if jnp.issubdtype(shape_dtype.dtype, jnp.integer): return leaf
+            if np.issubdtype(shape_dtype.dtype, np.integer): return leaf
 
             # NOTE: extra sanitization due to issue with jnp.where and NaNs for gradients
                 # must ensure no NaNs ever get created in either branch; replace infs with dummy values
 
-            safe_cur_low = jnp.where(jnp.isinf(cur_low), -0.5, cur_low)
-            safe_cur_high = jnp.where(jnp.isinf(cur_high), 0.5, cur_high)
-            squashed = (safe_cur_low+safe_cur_high)/2 + jnp.tanh(leaf)*(safe_cur_high - safe_cur_low)/2
-                # handle both NOT unbounded -> tanh
+            squashed = jnp.empty(shape_dtype.shape, dtype=shape_dtype.dtype)
 
-            softplused = jax.nn.softplus(leaf) # only one side unbounded
-            squashed = jnp.where(jnp.isinf(cur_low), cur_high - softplused, squashed)
-            squashed = jnp.where(jnp.isinf(cur_high), cur_low + softplused, squashed)
+            if np.logical_not(np.logical_or(np.isinf(cur_low), np.isinf(cur_high))).any():
+                safe_cur_low = np.where(np.isinf(cur_low), -0.5, cur_low)
+                safe_cur_high = np.where(np.isinf(cur_high), 0.5, cur_high)
+                squashed = (safe_cur_low+safe_cur_high)/2 + jnp.tanh(leaf)*(safe_cur_high - safe_cur_low)/2
+                    # handle both NOT unbounded -> tanh
 
-            squashed = jnp.where(jnp.logical_and(jnp.isinf(cur_low), jnp.isinf(cur_high)),
-                leaf, squashed) # handle both unbounded -> no-op, return original
+            if np.logical_xor(np.isinf(cur_low), np.isinf(cur_high)).any():
+                softplused = jax.nn.softplus(leaf) # only one side unbounded
+
+                if np.isinf(cur_low).any():
+                    squashed = jnp.where(np.isinf(cur_low), cur_high - softplused, squashed)
+
+                if np.isinf(cur_high).any():
+                    squashed = jnp.where(np.isinf(cur_high), cur_low + softplused, squashed)
+
+            both_unbounded = np.logical_and(np.isinf(cur_low), np.isinf(cur_high))
+            if both_unbounded.any(): # handle both unbounded -> no-op, return original
+                squashed = jnp.where(both_unbounded, leaf, squashed)
 
             return squashed
 
@@ -154,29 +174,35 @@ class Space(Generic[TSpaceElement]):
         """Undos the `space.squash_continuous_to_bounds(x)` method."""
         
         def map_func(leaf, cur_low, cur_high, shape_dtype: jax.ShapeDtypeStruct):
-            if jnp.issubdtype(shape_dtype.dtype, jnp.integer): return leaf
+            if np.issubdtype(shape_dtype.dtype, np.integer): return leaf
 
             # NOTE: extra sanitization due to issue with jnp.where and NaNs for gradients
                 # must ensure no NaNs ever get created in either branch; replace infs with dummy values
-    
+
+            unsquashed = jnp.empty(shape_dtype.shape, dtype=shape_dtype.dtype)
+
             # both NOT unbounded -> tanh
-            safe_cur_low = jnp.where(jnp.isinf(cur_low), -0.5, cur_low)
-            safe_cur_high = jnp.where(jnp.isinf(cur_high), 0.5, cur_high)
-            mid = (safe_cur_low+safe_cur_high)/2
-            unsquashed = jnp.arctanh(jnp.clip(
-                (leaf - jnp.where(jnp.isinf(mid), 0, mid)) / (safe_cur_high-safe_cur_low) * 2,
-                min=-1, max=1
-            ))
+            if np.logical_not(np.logical_or(np.isinf(cur_low), np.isinf(cur_high))).any():
+                safe_cur_low = np.where(np.isinf(cur_low), -0.5, cur_low)
+                safe_cur_high = np.where(np.isinf(cur_high), 0.5, cur_high)
+                mid = (safe_cur_low+safe_cur_high)/2
+                unsquashed = jnp.arctanh(jnp.clip(
+                    (leaf - np.where(np.isinf(mid), 0, mid)) / (safe_cur_high-safe_cur_low) * 2,
+                    min=-1, max=1
+                ))
 
             # only one side unbounded -> softplus
-            unsquashed = jnp.where(jnp.isinf(cur_low), 
-                inv_softplus(jnp.maximum(0, cur_high - leaf)), unsquashed)
-            unsquashed = jnp.where(jnp.isinf(cur_high), 
-                inv_softplus(jnp.maximum(0, leaf - cur_low)), unsquashed)
+            if np.isinf(cur_low).any():
+                unsquashed = jnp.where(np.isinf(cur_low), 
+                    inv_softplus(jnp.maximum(0, cur_high - leaf)), unsquashed)
+            if np.isinf(cur_high).any():        
+                unsquashed = jnp.where(np.isinf(cur_high), 
+                    inv_softplus(jnp.maximum(0, leaf - cur_low)), unsquashed)
 
             # both unbounded -> no-op, return original
-            unsquashed = jnp.where(jnp.logical_and(jnp.isinf(cur_low), jnp.isinf(cur_high)),
-                leaf, unsquashed)
+            both_unbounded = np.logical_and(np.isinf(cur_low), np.isinf(cur_high))
+            if both_unbounded.any():
+                unsquashed = jnp.where(both_unbounded, leaf, unsquashed)
 
             return unsquashed
 
@@ -215,7 +241,7 @@ class Space(Generic[TSpaceElement]):
         keys_tree = jax.tree.unflatten(self.treedef, keys)
 
         def sample_leaf(cur_dist, cur_low, shape_dtype: jax.ShapeDtypeStruct, key: chex.PRNGKey):
-            if jnp.issubdtype(shape_dtype.dtype, jnp.integer):
+            if np.issubdtype(shape_dtype.dtype, np.integer):
                 if deterministic: indices = jnp.argmax(cur_dist, axis=-1)
                 else: indices = jax.random.categorical(key, cur_dist, axis=-1)
 
@@ -249,7 +275,7 @@ class Space(Generic[TSpaceElement]):
         def leaf_log_probabilities(unsquashed_leaf, cur_dist, 
                 cur_low, cur_high, shape_dtype: jax.ShapeDtypeStruct) -> TSpaceElement:
 
-            if jnp.issubdtype(shape_dtype.dtype, jnp.integer):
+            if np.issubdtype(shape_dtype.dtype, np.integer):
                 all_log_probs = jax.nn.log_softmax(cur_dist, axis=-1)
                 dist_is = unsquashed_leaf - cur_low # unsquashed and squashed are the same
                 return jnp.take_along_axis(all_log_probs, dist_is[..., None], axis=-1).squeeze(axis=-1)
@@ -262,13 +288,18 @@ class Space(Generic[TSpaceElement]):
                     # must ensure no NaNs ever get created in either branch; replace infs with dummy values
 
                 ## adjust for squashing transformation for bounded features using jacobian
-                adjust = -jnp.log(1 - jnp.square(jnp.tanh(unsquashed_leaf)) + 1e-6) # neither side unbounded -> tanh
+                adjust = jnp.empty(shape_dtype.shape, dtype=shape_dtype.dtype)
 
-                adjust = jnp.where(jnp.logical_or(jnp.isinf(cur_low), jnp.isinf(cur_high)), 
-                    jnp.logaddexp(0, -unsquashed_leaf), adjust) # handle one side unbounded -> softplus
-                    
-                adjust = jnp.where(jnp.logical_and(jnp.isinf(cur_low), jnp.isinf(cur_high)), 
-                    0, adjust) # handle both unbounded -> no transformation
+                if np.logical_not(np.logical_or(np.isinf(cur_low), np.isinf(cur_high))).any():
+                    adjust = -jnp.log(1 - jnp.square(jnp.tanh(unsquashed_leaf)) + 1e-6) # neither side unbounded -> tanh
+                
+                one_unbounded = np.logical_xor(np.isinf(cur_low), np.isinf(cur_high)) 
+                if one_unbounded.any(): # handle one side unbounded -> softplus
+                    adjust = jnp.where(one_unbounded, jnp.logaddexp(0, -unsquashed_leaf), adjust) 
+                
+                both_unbounded = np.logical_and(np.isinf(cur_low), np.isinf(cur_high))
+                if both_unbounded.any(): # handle both unbounded -> no transformation
+                    adjust = jnp.where(both_unbounded, 0, adjust)
 
                 return norm_prob + adjust
 
@@ -313,14 +344,17 @@ class Space(Generic[TSpaceElement]):
         """
 
         def leaf_entropies(cur_dist, approx_ent, cur_low, cur_high, shape_dtype: jax.ShapeDtypeStruct):
-            if jnp.issubdtype(shape_dtype.dtype, jnp.integer):
+            if np.issubdtype(shape_dtype.dtype, np.integer):
                 log_probs = jax.nn.log_softmax(cur_dist, axis=-1)
                 log_probs = jnp.where(jnp.isneginf(log_probs), 0, log_probs) # handle 0 probability
                 return - jnp.exp(log_probs) * log_probs
             else: 
-                std = jnp.exp(cur_dist[..., 1]) if log_stds else cur_dist[..., 1]
-                return jnp.where(jnp.logical_and(jnp.isinf(cur_low), jnp.isinf(cur_high)), 
-                    normal_entropy(std), approx_ent)
+                both_unbounded = np.logical_and(np.isinf(cur_low), np.isinf(cur_high))
+                if both_unbounded.any():
+                    std = jnp.exp(cur_dist[..., 1]) if log_stds else cur_dist[..., 1]
+                    return jnp.where(both_unbounded, normal_entropy(std), approx_ent)
+
+                return approx_ent
 
         if approximate_entropies is None:
             approximate_entropies = jax.tree.map(lambda sd: jnp.zeros(sd.shape), self.shapes_dtypes)
@@ -329,8 +363,8 @@ class Space(Generic[TSpaceElement]):
 
         mask = jax.tree.map(
             lambda cur_low, cur_high, sdt: 
-                jnp.full(sdt.shape, True) if jnp.issubdtype(sdt.dtype, jnp.integer)
-                    else jnp.logical_and(jnp.isinf(cur_low), jnp.isinf(cur_high)),
+                np.full(sdt.shape, True) if np.issubdtype(sdt.dtype, np.integer)
+                    else np.logical_and(np.isinf(cur_low), np.isinf(cur_high)),
             self.low, self.high, self.shapes_dtypes
         )
 
