@@ -240,55 +240,29 @@ class A2C(Generic[TEnvState, TEnvObs]):
 
                 action_distribution = optionally_pass(networks.policy, rngs=rngs)(timesteps.obs)
 
-                feature_log_probabilities = self.env.action_space.log_probabilities(
+                log_probabilities = self.env.action_space.log_probability(
                     timesteps.action, action_distribution, continuous_squashed=False, log_stds=True)
-
-                log_probabilities = jax.tree.reduce(
-                    lambda tot, cur: tot + cur, 
-                    jax.tree.map(
-                        lambda leaf, s_dt: jnp.sum(leaf, axis=tuple(range(-len(s_dt.shape), 0))),
-                        feature_log_probabilities, self.env.action_space.shapes_dtypes
-                    )
-                )
-
                 policy_loss = - jnp.mean(log_probabilities * advantages)
 
                 target_values = advantages + const_values
                 value_loss = jnp.mean(jnp.power(target_values - values, 2)) # MSE
 
-                approx_entropies = jax.tree.map(lambda x: -x, feature_log_probabilities)
-                feature_entropies, mask = self.env.action_space.try_compute_entropies(
-                    action_distribution, approximate_entropies=approx_entropies, log_stds=True)
-
-                scaled_ents = jax.tree.map(
+                feature_ents = self.env.action_space.entropies(action_distribution, 
+                    log_stds=True, monte_carlo_n_samples=1, monte_carlo_key=rngs.actions())
+                scaled_feature_ents = jax.tree.map( # reduce continuous entropy weighting
                     lambda leaf, s_dt: 
                         (1 if jnp.issubdtype(s_dt.dtype, jnp.integer) else ent_weight_continuous) * leaf,
-                    feature_entropies, self.env.action_space.shapes_dtypes
+                    feature_ents, self.env.action_space.shapes_dtypes
                 )
+                comb_ents = jax.tree.reduce(lambda tot, cur: tot + cur, # sum entropies
+                    jax.tree.map(lambda leaf, s_dt: jnp.sum(leaf, axis=tuple(range(-len(s_dt.shape), 0))),
+                        scaled_feature_ents, self.env.action_space.shapes_dtypes))
+                mean_entropy = jnp.mean(comb_ents)
 
-                entropies = jax.tree.map(
-                    lambda leaf, s_dt: jnp.sum(leaf, axis=tuple(range(-len(s_dt.shape), 0))),
-                    feature_entropies, self.env.action_space.shapes_dtypes
-                )
-                entropies = jax.tree.reduce(lambda tot, cur: tot + cur, scaled_ents)
-                mean_entropy = jnp.mean(entropies)
-
-                ent_loss = jax.tree.map(
-                    lambda logp, ent, s_dt: ent if jnp.issubdtype(s_dt.dtype, jnp.integer) 
-                        else ((1 + jax.lax.stop_gradient(logp)) * ent),
-                    feature_log_probabilities, scaled_ents, self.env.action_space.shapes_dtypes
-                )
-                ent_loss = jax.tree.map(
-                    lambda leaf, s_dt: jnp.sum(leaf, axis=tuple(range(-len(s_dt.shape), 0))),
-                    ent_loss, self.env.action_space.shapes_dtypes
-                )
-                ent_loss = jax.tree.reduce(lambda tot, cur: tot + cur, ent_loss)
-                ent_loss = -jnp.mean(ent_loss)
-
-                comb_loss = policy_loss + vf_coef*value_loss + ent_coef*ent_loss
+                comb_loss = policy_loss + vf_coef*value_loss - ent_coef*mean_entropy
 
                 metrics = { 'loss': comb_loss, 'policy_loss': policy_loss, 'value_loss': value_loss, 
-                    'entropy': mean_entropy, 'entropy_loss': ent_loss }
+                    'entropy': mean_entropy}
 
                 return comb_loss, metrics
 

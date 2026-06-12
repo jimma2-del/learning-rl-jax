@@ -21,7 +21,7 @@ from core.algos import a2c
 
 #jax.config.update("jax_log_compiles", True)
 
-ENV_NAME = "WalkerWalk"
+ENV_NAME = "WalkerRun"
 N_ENVS = 2048#32
 CAMERA = 'side' # None
 
@@ -42,10 +42,10 @@ env = PrecomputedResetsPoolWrapper(env, resets_pool_states_infos)
 
 ### TRAIN ###
 
-STEPS = 60_000_000 #1_000_000
-LOG_INTERVAL_STEPS = 6_000_000 #100_000
+STEPS = 100_000_000 #1_000_000
+LOG_INTERVAL_STEPS = 10_000_000 #100_000
 
-MAX_STEPS = 500
+MAX_STEPS = 100#500
 
 EVAL_EPS = 256#2048 # 
 EVAL_N_ENVS = 256#2048

@@ -23,7 +23,7 @@ from core.algos import a2c
 
 rngs = nnx.Rngs(0, params=1, env=2, actions=3)
 
-ENV_NAME = "CheetahRun"
+ENV_NAME = "WalkerRun"
 N_ENVS = 256
 EVAL_EPS = 256
 MAX_STEPS = 500
@@ -65,12 +65,12 @@ def policy(obs, rngs):
     print(policy_state(obs, rngs=rngs))
     return algo.get_action(rngs, policy_state, obs, deterministic=True)
 
-returns, lengths = nnx.jit(evaluate_episodes, static_argnums=(1, 2, 3, 4, 5))(
-    rngs, EpisodeStepCountWrapper(VmapWrapper(env), max_eps_len=MAX_STEPS), nnx.vmap(policy), EVAL_EPS, N_ENVS)
-print(returns)
-print(lengths)
-print(f"Episode Return: mean={jnp.mean(returns)} std={jnp.std(returns, ddof=1)}")
-print(f"Episode Length: mean={jnp.mean(lengths)} std={jnp.std(lengths, ddof=1)}")
+# returns, lengths = nnx.jit(evaluate_episodes, static_argnums=(1, 2, 3, 4, 5))(
+#     rngs, EpisodeStepCountWrapper(VmapWrapper(env), max_eps_len=MAX_STEPS), nnx.vmap(policy), EVAL_EPS, N_ENVS)
+# print(returns)
+# print(lengths)
+# print(f"Episode Return: mean={jnp.mean(returns)} std={jnp.std(returns, ddof=1)}")
+# print(f"Episode Length: mean={jnp.mean(lengths)} std={jnp.std(lengths, ddof=1)}")
 
 VISUALIZE_METHOD = "video"
 NUM_EPISODES = 1

@@ -278,7 +278,8 @@ class Space(Generic[TSpaceElement]):
             if np.issubdtype(shape_dtype.dtype, np.integer):
                 all_log_probs = jax.nn.log_softmax(cur_dist, axis=-1)
                 dist_is = unsquashed_leaf - cur_low # unsquashed and squashed are the same
-                return jnp.take_along_axis(all_log_probs, dist_is[..., None], axis=-1).squeeze(axis=-1)
+                all_log_probs, dist_is = jnp.broadcast_arrays(all_log_probs, dist_is[..., None])
+                return jnp.take_along_axis(all_log_probs, dist_is[..., (0, )], axis=-1).squeeze(axis=-1)
 
             else: 
                 std = jnp.exp(cur_dist[..., 1]) if log_stds else cur_dist[..., 1]
@@ -291,7 +292,8 @@ class Space(Generic[TSpaceElement]):
                 adjust = jnp.empty(shape_dtype.shape, dtype=shape_dtype.dtype)
 
                 if np.logical_not(np.logical_or(np.isinf(cur_low), np.isinf(cur_high))).any():
-                    adjust = -jnp.log(1 - jnp.square(jnp.tanh(unsquashed_leaf)) + 1e-6) # neither side unbounded -> tanh
+                    adjust = -2 * (jnp.log(2) + unsquashed_leaf - jax.nn.softplus(2*unsquashed_leaf))
+                        # neither side unbounded -> tanh; numerically stable form of -log(1 - tanh^2(x))
                 
                 one_unbounded = np.logical_xor(np.isinf(cur_low), np.isinf(cur_high)) 
                 if one_unbounded.any(): # handle one side unbounded -> softplus
@@ -328,22 +330,19 @@ class Space(Generic[TSpaceElement]):
 
         return jax.tree.reduce(lambda tot, cur: tot + cur, log_probabilities)
 
-    def try_compute_entropies(self, distribution: TSpaceElement, 
-            approximate_entropies: TSpaceElement | None = None, log_stds=False) -> tuple[TSpaceElement, TSpaceElement]:
-        """Computes the individual entropy of each feature of `distribution`,
-        if an analytical solution is available: discrete and unbounded continuous features.
+    def entropies(self, distribution: TSpaceElement, log_stds=False,
+            monte_carlo_n_samples: int | None = None, monte_carlo_key: chex.PRNGKey | None = None) -> TSpaceElement:
+        """Computes the individual entropy of each feature of `distribution`.
+            See `space.sample_distribution` for details on the structure of `distribution`.
 
-        Returns 0 if an analytical solution is not available: bounded (one or both sides) continuous features.
-        Returns a mask containing True if an analytical solution available, otherwise false.
+        For bounded (one or both sides) continuous features, there is no analytical expression for entropy.
+            This function will compute a monte-carlo estimate in these cases, using `monte_carlo_n_samples` samples. 
+            The parameters `monte_carlo_n_samples` and `monte_carlo_key` must be provided if there are any such features.
 
-        See `space.sample_distribution` for details on the structure of `distribution`.
-
-        `approximate_entropies`: If given, returns the specified approximated entropy instead of 0 
-            if no analytical solution available.
         `log_stds`: If True, treats stds as log stds: uses exp(feature[1]) as the standard deviation.
         """
 
-        def leaf_entropies(cur_dist, approx_ent, cur_low, cur_high, shape_dtype: jax.ShapeDtypeStruct):
+        def leaf_entropies(monte_carlo_est, cur_dist, cur_low, cur_high, shape_dtype: jax.ShapeDtypeStruct):
             if np.issubdtype(shape_dtype.dtype, np.integer):
                 log_probs = jax.nn.log_softmax(cur_dist, axis=-1)
                 log_probs = jnp.where(jnp.isneginf(log_probs), 0, log_probs) # handle 0 probability
@@ -352,23 +351,29 @@ class Space(Generic[TSpaceElement]):
                 both_unbounded = np.logical_and(np.isinf(cur_low), np.isinf(cur_high))
                 if both_unbounded.any():
                     std = jnp.exp(cur_dist[..., 1]) if log_stds else cur_dist[..., 1]
-                    return jnp.where(both_unbounded, normal_entropy(std), approx_ent)
+                    return jnp.where(both_unbounded, normal_entropy(std), monte_carlo_est)
 
-                return approx_ent
+                assert monte_carlo_n_samples is not None, \
+                    "`monte_carlo_n_samples` must be provided as there are bounded continuous features."
+                return monte_carlo_est
 
-        if approximate_entropies is None:
-            approximate_entropies = jax.tree.map(lambda sd: jnp.zeros(sd.shape), self.shapes_dtypes)
+        if monte_carlo_n_samples is None:
+            monte_carlo_ests = jax.tree.map(lambda sd: jnp.empty(sd.shape), self.shapes_dtypes)
+        else:
+            assert monte_carlo_key is not None, \
+                "`monte_carlo_key` must be provided for monte carlo estimation."
 
-        ents = jax.tree.map(leaf_entropies, distribution, approximate_entropies, self.low, self.high, self.shapes_dtypes)
+            # NOTE: unnecessary sample and log_p computations will be optimized out by the compiler
+            samples = jax.vmap(lambda key: self.sample_distribution(key, 
+                distribution, squash_continuous=False, log_stds=log_stds)
+            )(jax.random.split(monte_carlo_key, monte_carlo_n_samples))
 
-        mask = jax.tree.map(
-            lambda cur_low, cur_high, sdt: 
-                np.full(sdt.shape, True) if np.issubdtype(sdt.dtype, np.integer)
-                    else np.logical_and(np.isinf(cur_low), np.isinf(cur_high)),
-            self.low, self.high, self.shapes_dtypes
-        )
+            log_ps = self.log_probabilities(samples, distribution, 
+                continuous_squashed=False, log_stds=True)
 
-        return ents, mask
+            monte_carlo_ests = jax.tree.map(lambda log_p: jnp.mean(-log_p, axis=0), log_ps)
+
+        return jax.tree.map(leaf_entropies, monte_carlo_ests, distribution, self.low, self.high, self.shapes_dtypes)
 
 TEnvState = TypeVar("TEnvState")
 TEnvObs = TypeVar("TEnvObs")
