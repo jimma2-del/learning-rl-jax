@@ -139,13 +139,9 @@ class A2C(Generic[TEnvState, TEnvObs]):
             optimizer = optimizer,
         )
     
-    @functools.partial(nnx.jit, static_argnames=('self', 'epoch_steps'))
-    def train_epoch(self, 
-        rngs: nnx.Rngs,
-        training_state: TrainingState[TEnvState, TEnvObs],
-        epoch_steps: int,
-    ) -> tuple[TrainingState[TEnvState, TEnvObs], dict[Any, Any]]:
-        """Train for one 'epoch' -- one fully JIT compiled segment."""
+    def train(self, rngs: nnx.Rngs, training_state: TrainingState[TEnvState, TEnvObs], steps: int) \
+            -> tuple[TrainingState[TEnvState, TEnvObs], dict[Any, Any]]:
+        """Train from the given `training_state`, returning an updated `training_state` and metrics."""
 
         total_steps_per_iter = self.hyperparameters.n_envs * self.hyperparameters.n_steps
 
@@ -277,7 +273,7 @@ class A2C(Generic[TEnvState, TEnvObs]):
                 optimizer=optimizer,
             ), jax.tree.map(lambda x: jnp.mean(x), metrics)
 
-        iterations = math.ceil(epoch_steps / total_steps_per_iter)
+        iterations = math.ceil(steps / total_steps_per_iter)
         training_state, metrics = nnx.scan(train_iteration)(training_state, rngs.fork(split=iterations))
 
         return training_state, jax.tree.map(lambda x: jnp.mean(x), metrics)

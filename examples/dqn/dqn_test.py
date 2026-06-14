@@ -55,6 +55,7 @@ hyperparameters = dqn.Hyperparameters(
 algo = dqn.DQN(VmapWrapper(env), hyperparameters)
 
 training_state = algo.init_training_state(rngs)
+train = nnx.jit(algo.train, static_argnames=('steps',))
 
 @nnx.jit
 def evaluate(rngs, policy):
@@ -67,7 +68,7 @@ def evaluate(rngs, policy):
 while training_state.steps < STEPS:
     start_time = time.perf_counter()
 
-    training_state, metrics = algo.train_epoch(rngs, training_state, LOG_INTERVAL_STEPS)
+    training_state, metrics = train(rngs, training_state, LOG_INTERVAL_STEPS)
 
     elasped_time = time.perf_counter() - start_time
     sps = LOG_INTERVAL_STEPS / elasped_time

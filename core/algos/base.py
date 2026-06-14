@@ -55,7 +55,7 @@ class Algo(Generic[TTrainingState, TPolicy, TEnvState, TEnvObs, TEnvAction]):
         __init__(env, *nonstandard params (eg. hyperparameters))
         get_action(rngs, policy, obs, deterministic flag?, optional params) -> TEnvAction
         init_training_state(rngs, optional params (eg. network, replay buffer state, prefill steps)) -> TTrainingState
-        train_epoch(rngs, training_state, epoch_steps) -> TTrainingState, metrics (probably dict? dataclass overkill?)
+        train(rngs, training_state, steps) -> TTrainingState, metrics dict
 
         create_default_policy(rngs)? can be used as dummy for loading
 
