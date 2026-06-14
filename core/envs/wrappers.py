@@ -90,44 +90,171 @@ class ObsRangeNormalizeWrapper(
     Generic[TEnvState, TEnvObs, TEnvAction, TRenderFrame],
     Wrapper[TEnvState, TEnvObs, TEnvAction, TRenderFrame]
 ):
-    """Normalizes observations to [-1, 1) using the range (low, high) of the observation space.
-    Ignores unbounded (infinite low/high) leaves, keeping the values unaltered.
+    """Translates and scales observation features to normalize.
+
+    Features which had both sides bounded are normalized to the range
+        [-1, 1] if (previously) discrete and [-1, 1) if continuous.
+    Features which had one side bounded are normalized to the range [0, inf).
+
+    Ignores features with both sides unbounded (-inf, inf), keeping the values unaltered.
+        NOTE: Keep in mind when using this wrapper that unbounded observation features
+        are very common; this wrapper may not be suitable for many environments.
+
+    NOTE: May convert discrete (np.integer) data types to continuous (np.floating).
     """
 
     def __init__(self, 
         env: Environment[TEnvState, TEnvObs, TEnvAction, TRenderFrame],
         normalize_obs_space: Space[TEnvObs] | None = None
     ):
+        """`normalize_obs_space`: If provided, normalizes based on bounds in this instead of `env.observation_space`."""
+
         super().__init__(env)
 
         self.normalize_obs_space: Space[TEnvObs] = normalize_obs_space \
             if normalize_obs_space is not None else super().observation_space
 
         chex.assert_trees_all_equal_structs(env.observation_space.low, self.normalize_obs_space.low,
-            "`ranges` treedef does not match with `env.observation space`.")
+            "`normalize_obs_space` treedef does not match with `env.observation_space`.")
 
-        self.obs_ranges = jax.tree.map(lambda high, low: high - low, 
-            self.normalize_obs_space.high, self.normalize_obs_space.low)
-        self.obs_centers = jax.tree.map(lambda high, low: (high+low) / 2, 
-            self.normalize_obs_space.high, self.normalize_obs_space.low)
+        def handle_leaf(cur_low, cur_high):
+            # handle both NOT unbounded
+            translate = - (cur_low + cur_high) / 2
+            scale = 1 / ((cur_high + cur_low) / 2)
 
-    def get_obs(self, key: chex.PRNGKey, state: TEnvState) -> jax.Array:
-        obs = super().get_obs(key, state)
+            # only one side unbounded
+            translate = jnp.where(np.isinf(cur_low), -cur_high, translate)
+            scale = jnp.where(np.isinf(cur_low), -1, scale)
+            
+            translate = jnp.where(np.isinf(cur_high), -cur_low, translate)
 
-        normalized = jax.tree.map(lambda obs, center, range: (obs-center) / range * 2, 
-            obs, self.obs_centers, self.obs_ranges)
+            # handle both unbounded -> no-op, return original
+            both_unbounded = np.logical_and(np.isinf(cur_low), np.isinf(cur_high))
+            translate = jnp.where(both_unbounded, np.zeros_like(cur_low), translate)
+            scale = jnp.where(both_unbounded, np.ones_like(cur_low), scale)
 
-        return jax.tree.map(lambda normed, orig: jnp.where(jnp.isfinite(normed), normed, orig),
-            normalized, obs)
+            return translate, scale
+
+        self.translate, self.scale = jax.tree.map(handle_leaf, 
+            self.normalize_obs_space.low, self.normalize_obs_space.high)
+
+    def get_obs(self, key: chex.PRNGKey, state: TEnvState) -> TEnvObs:
+        return jax.tree.map(lambda obs, translate, scale: (obs + translate) * scale, 
+            super().get_obs(key, state), self.translate, self.scale)
 
     @property
     def observation_space(self) -> Space[TEnvObs]:
-        return Space(
-            low = jax.tree.map(lambda leaf, range: jnp.where(jnp.isfinite(range), -jnp.ones_like(leaf), leaf),
-                self.normalize_obs_space.low, self.obs_ranges),
-            high = jax.tree.map(lambda leaf, range: jnp.where(jnp.isfinite(range), jnp.ones_like(leaf), leaf),
-                self.normalize_obs_space.high, self.obs_ranges)
-        )
+        def handle_leaf(cur_low, cur_high):
+            # handle both NOT unbounded
+            low = -np.ones_like(cur_low)
+            high = np.ones_like(cur_high)
+
+            # only one side unbounded
+            either_unbounded = np.logical_or(np.isinf(cur_low), np.isinf(cur_high))
+            low = jnp.where(either_unbounded, np.zeros_like(cur_low), low)
+            high = jnp.where(either_unbounded, np.full_like(cur_high, np.inf), high)
+
+            # handle both unbounded 
+            both_unbounded = np.logical_and(np.isinf(cur_low), np.isinf(cur_high))
+            low = jnp.where(both_unbounded, np.full_like(cur_high, -np.inf), low)
+            high = jnp.where(both_unbounded, np.full_like(cur_high, np.inf), high)
+
+            return low, high
+
+        low, high = jax.tree.map(handle_leaf, 
+            self.normalize_obs_space.low, self.normalize_obs_space.high)
+
+        return Space(low=low, high=high)
+
+class ActionsRangeNormalizeWrapper(
+    Generic[TEnvState, TEnvObs, TEnvAction, TRenderFrame],
+    Wrapper[TEnvState, TEnvObs, TEnvAction, TRenderFrame]
+):
+    """Translates and scales action features to normalize.
+
+    Translates discrete (integer) features to make low=0.
+
+    For continuous (floating) features:
+        Features which had both sides bounded are normalized to the range [-1, 1).
+        Features which had one side bounded are normalized to the range [0, inf).
+
+        Ignores features with both sides unbounded (-inf, inf), keeping the values unaltered.
+    """
+
+    def __init__(self, 
+        env: Environment[TEnvState, TEnvObs, TEnvAction, TRenderFrame],
+        normalize_actions_space: Space[TEnvObs] | None = None
+    ):
+        """`normalize_actions_space`: If provided, normalizes based on bounds in this instead of `env.action_space`."""
+        super().__init__(env)
+
+        self.normalize_actions_space: Space[TEnvObs] = normalize_actions_space \
+            if normalize_actions_space is not None else super().action_space
+
+        chex.assert_trees_all_equal_structs(env.action_space.low, self.normalize_actions_space.low,
+            "`normalize_actions_space` treedef does not match with `env.action_space`.")
+
+        def handle_leaf(cur_low, cur_high, shape_dtype):
+
+            if np.issubdtype(shape_dtype.dtype, np.integer):
+                return cur_low, np.ones(shape_dtype.shape)
+
+            else: # continuous
+                # handle both NOT unbounded
+                translate = (cur_low + cur_high) / 2
+                scale = ((cur_high + cur_low) / 2)
+
+                # only one side unbounded
+                translate = jnp.where(np.isinf(cur_low), cur_high, translate)
+                scale = jnp.where(np.isinf(cur_low), -1, scale)
+                
+                translate = jnp.where(np.isinf(cur_high), cur_low, translate)
+
+                # handle both unbounded -> no-op, return original
+                both_unbounded = np.logical_and(np.isinf(cur_low), np.isinf(cur_high))
+                translate = jnp.where(both_unbounded, np.zeros_like(cur_low), translate)
+                scale = jnp.where(both_unbounded, np.ones_like(cur_low), scale)
+
+                return translate, scale
+
+        self.translate, self.scale = jax.tree.map(handle_leaf, 
+            self.normalize_actions_space.low, self.normalize_actions_space.high, self.normalize_actions_space.shapes_dtypes)
+
+    def step(self, key: chex.PRNGKey, state: TEnvState, action: TEnvAction) \
+            -> tuple[TEnvState, jax.Array, jax.Array, jax.Array, dict[Any, Any]]:
+
+        action = jax.tree.map(lambda obs, translate, scale: obs*scale + translate, 
+            action, self.translate, self.scale)
+        
+        return super().step(key, state, action)
+
+    @property
+    def action_space(self) -> Space[TEnvObs]:
+        def handle_leaf(cur_low, cur_high, shape_dtype):
+            if np.issubdtype(shape_dtype.dtype, np.integer):
+                return np.zeros(shape_dtype.shape), cur_high - cur_low + 1
+
+            else: # continuous
+                # handle both NOT unbounded
+                low = -np.ones_like(cur_low)
+                high = np.ones_like(cur_high)
+
+                # only one side unbounded
+                either_unbounded = np.logical_or(np.isinf(cur_low), np.isinf(cur_high))
+                low = jnp.where(either_unbounded, np.zeros_like(cur_low), low)
+                high = jnp.where(either_unbounded, np.full_like(cur_high, np.inf), high)
+
+                # handle both unbounded 
+                both_unbounded = np.logical_and(np.isinf(cur_low), np.isinf(cur_high))
+                low = jnp.where(both_unbounded, np.full_like(cur_high, -np.inf), low)
+                high = jnp.where(both_unbounded, np.full_like(cur_high, np.inf), high)
+
+                return low, high
+
+        low, high = jax.tree.map(handle_leaf, 
+            self.normalize_actions_space.low, self.normalize_actions_space.high, self.normalize_actions_space.shapes_dtypes)
+
+        return Space(low=low, high=high)
 
 class JitWrapper(
     Generic[TEnvState, TEnvObs, TEnvAction, TRenderFrame],
@@ -262,18 +389,74 @@ class SquashContinuousActionsToBoundsWrapper(
     See `Space.squash_continuous_to_bounds(x)`.
     """
 
+    def __init__(self, 
+        env: Environment[TEnvState, TEnvObs, TEnvAction, TRenderFrame],
+        normalize_actions_space: Space[TEnvObs] | None = None
+    ):
+        """`normalize_actions_space`: If provided, normalizes based on bounds in this instead of `env.action_space`."""
+        super().__init__(env)
+
+        self.normalize_actions_space: Space[TEnvObs] = normalize_actions_space \
+            if normalize_actions_space is not None else super().action_space
+
+        chex.assert_trees_all_equal_structs(env.action_space.low, self.normalize_actions_space.low,
+            "`normalize_actions_space` treedef does not match with `env.action_space`.")
+
     def step(self, key: chex.PRNGKey, state: TEnvState, action: TEnvAction) \
             -> tuple[TEnvState, jax.Array, jax.Array, jax.Array, dict[Any, Any]]:
-        action = self.env.action_space.squash_continuous_to_bounds(action)
+        action = self.normalize_actions_space.squash_continuous_to_bounds(action)
         return super().step(key, state, action)
 
     @property
     def action_space(self) -> Space[TEnvAction]:
         return Space(
             low = jax.tree.map(lambda leaf: leaf if np.issubdtype(leaf, np.integer) else np.full_like(leaf, -np.inf), 
-                super().action_space.low),
+                self.normalize_actions_space.low),
             high = jax.tree.map(lambda leaf: leaf if np.issubdtype(leaf, np.integer) else np.full_like(leaf, np.inf),
-                super().action_space.high)
+                self.normalize_actions_space.high)
+        )
+
+class ClipActionsToBoundsWrapper(
+    Generic[TEnvState, TEnvObs, TEnvAction, TRenderFrame],
+    Wrapper[TEnvState, TEnvObs, TEnvAction, TRenderFrame]
+):
+    """Clips values in actions to the bounds defined by the action space.
+        Values above or below bounds will be set to the bounds.
+
+    The new action space will have (-inf, inf) bounds for all continuous values.
+        Discrete bounds will be left unchanged because there is no way to mark unbounded discrete bounds,
+        but any integer will be a valid input.
+
+    NOTE: Spaces are typically not inclusive of `high` for continuous (floating) features. However,
+        This wrapper will clip values above `high` to exactly `high`.
+    """
+
+    def __init__(self, 
+        env: Environment[TEnvState, TEnvObs, TEnvAction, TRenderFrame],
+        normalize_actions_space: Space[TEnvObs] | None = None
+    ):
+        """`normalize_actions_space`: If provided, normalizes based on bounds in this instead of `env.action_space`."""
+        super().__init__(env)
+
+        self.normalize_actions_space: Space[TEnvObs] = normalize_actions_space \
+            if normalize_actions_space is not None else super().action_space
+
+        chex.assert_trees_all_equal_structs(env.action_space.low, self.normalize_actions_space.low,
+            "`normalize_actions_space` treedef does not match with `env.action_space`.")
+
+    def step(self, key: chex.PRNGKey, state: TEnvState, action: TEnvAction) \
+            -> tuple[TEnvState, jax.Array, jax.Array, jax.Array, dict[Any, Any]]:
+        action = jax.tree.map(lambda x, low, high: jnp.clip(x, low, high), 
+            action, self.normalize_actions_space.low, self.normalize_actions_space.high)
+        return super().step(key, state, action)
+
+    @property
+    def action_space(self) -> Space[TEnvAction]:
+        return Space(
+            low = jax.tree.map(lambda leaf: leaf if np.issubdtype(leaf, np.integer) else np.full_like(leaf, -np.inf), 
+                self.normalize_actions_space.low),
+            high = jax.tree.map(lambda leaf: leaf if np.issubdtype(leaf, np.integer) else np.full_like(leaf, np.inf),
+                self.normalize_actions_space.high)
         )
 
 @chex.dataclass
