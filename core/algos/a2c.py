@@ -40,6 +40,10 @@ class Hyperparameters:
             # than discrete (Shannon's) entropy
 
     normalize_advantages: bool = False
+
+    bootstrap_truncated: bool = False # If False, truncation is treated the same as termination.
+        # If True, the critic is run an extra time for every environment sample
+        # to compute next values; this is slightly slower.
     
 TEnvState = TypeVar("TEnvState")
 TEnvObs = TypeVar("TEnvObs")
@@ -135,19 +139,13 @@ class A2C(Generic[TEnvState, TEnvObs]):
             optimizer = optimizer,
         )
     
-    @functools.partial(nnx.jit, static_argnames=('self', 'epoch_steps', 'bootstrap_truncated'))
+    @functools.partial(nnx.jit, static_argnames=('self', 'epoch_steps'))
     def train_epoch(self, 
         rngs: nnx.Rngs,
         training_state: TrainingState[TEnvState, TEnvObs],
         epoch_steps: int,
-        bootstrap_truncated: bool = False
     ) -> tuple[TrainingState[TEnvState, TEnvObs], dict[Any, Any]]:
-        """Train for one 'epoch' -- one fully JIT compiled segment.
-        
-        `bootstrap_truncated`: If False, truncation is treated the same as termination.
-            If True, the critic is run an extra time for every environment sample
-                to compute next values; this is slightly slower.
-        """
+        """Train for one 'epoch' -- one fully JIT compiled segment."""
 
         total_steps_per_iter = self.hyperparameters.n_envs * self.hyperparameters.n_steps
 
@@ -179,7 +177,7 @@ class A2C(Generic[TEnvState, TEnvObs]):
 
             steps += total_steps_per_iter
 
-            if not bootstrap_truncated: # treat truncation as termination 
+            if not self.hyperparameters.bootstrap_truncated: # treat truncation as termination 
                 timesteps.terminated = jnp.logical_or(timesteps.truncated, timesteps.terminated)
 
             timesteps.truncated = timesteps.truncated.at[-1].set(True)
@@ -201,7 +199,7 @@ class A2C(Generic[TEnvState, TEnvObs]):
                 values = optionally_pass(networks.critic, rngs=rngs)(timesteps.obs).squeeze(axis=-1)
                 const_values = jax.lax.stop_gradient(values)
 
-                if bootstrap_truncated:
+                if self.hyperparameters.bootstrap_truncated:
                     next_values = optionally_pass(networks.critic, rngs=rngs)(
                         jax.tree.map(lambda x: x[1:], unreset_obs)).squeeze(axis=-1)
                 else:
