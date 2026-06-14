@@ -99,6 +99,7 @@ class ObsRangeNormalizeWrapper(
     Ignores features with both sides unbounded (-inf, inf), keeping the values unaltered.
         NOTE: Keep in mind when using this wrapper that unbounded observation features
         are very common; this wrapper may not be suitable for many environments.
+        Try `ObsRunningStatsNormalizeWrapper(env)` instead.
 
     NOTE: May convert discrete (np.integer) data types to continuous (np.floating).
     """
@@ -469,7 +470,11 @@ class EpisodeStepCountWrapper(
     Wrapper[EpisodeStepCountState[TEnvState], TEnvObs, TEnvAction, TRenderFrame]
 ):
     """Stores the step count of the current episode in `info[STEP_COUNT_INFO_KEY]`,
-    and optionally truncates episodes upon reaching a maximum length."""
+        and optionally truncates episodes upon reaching a maximum length.
+    
+    Wraps the environment state in a `EpisodeStepCountState` dataclass, which has an extra
+        `episode_steps` field to track steps. Use `state.state` to get the original state.
+    """
 
     STEP_COUNT_INFO_KEY = 'episode_steps'
 
