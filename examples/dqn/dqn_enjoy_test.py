@@ -56,7 +56,7 @@ from gymnax.visualize.vis_gym import render_acrobot
 
 rngs = nnx.Rngs(0, params=1, env=5, actions=3, transitions=4)
 
-def policy(obs, rngs):
+def actor(obs, rngs):
     return algo.get_action(rngs, q_net, obs)
 
 N_ENVS = 32
@@ -65,7 +65,7 @@ MAX_STEPS = 500
 
 EVAL_EPS = 256
 returns, lengths = nnx.jit(evaluate_episodes, static_argnums=(1, 2, 3, 4, 5))(
-    rngs, VmapWrapper(env), nnx.vmap(policy), EVAL_EPS, n_envs=N_ENVS)
+    rngs, VmapWrapper(env), nnx.vmap(actor), EVAL_EPS, n_envs=N_ENVS)
 print(returns)
 print(lengths)
 print(f"Episode Return: mean={jnp.mean(returns)} std={jnp.std(returns, ddof=1)}")
@@ -81,7 +81,7 @@ if VISUALIZE_METHOD == 'gif':
     comb_cum_rewards = jnp.array((0,))
 
     for _ in range(NUM_EPISODES):
-        timesteps, state, info = rollout_episode(rngs, EpisodeStepCountWrapper(env, MAX_STEPS), policy)
+        timesteps, state, info = rollout_episode(rngs, EpisodeStepCountWrapper(env, MAX_STEPS), actor)
         cum_rewards = jnp.cumsum(timesteps.reward)
         steps = len(timesteps.reward)
 
@@ -99,7 +99,7 @@ elif VISUALIZE_METHOD == 'pygame':
     # FPS = 10
 
     # visualize_pygame(
-    #     rngs, env, policy, 
+    #     rngs, env, actor, 
     #     fps=FPS, 
     #     render_func=lambda state, action: render_acrobot(None, gymnax_env_params, state),
     #     episode_steps_limit=MAX_STEPS,
@@ -110,7 +110,7 @@ elif VISUALIZE_METHOD == 'pygame':
     FPS = round(1/DT)
 
     visualize_pygame(
-        rngs, env, policy, 
+        rngs, env, actor, 
         fps=FPS, 
         verbose=False
     )

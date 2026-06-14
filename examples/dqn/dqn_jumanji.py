@@ -104,13 +104,13 @@ ANIMATE_LIMIT = 300
 rngs = nnx.Rngs(0, params=1, env=2, actions=3, transitions=4)
 
 #@nnx.jit
-def policy(obs, rngs):
+def actor(obs, rngs):
     return algo.get_action(rngs, q_net, obs)
 
 comb_states = []
 
 for _ in range(NUM_EPISODES):
-    timesteps, state, info = rollout_episode(rngs, env, policy)
+    timesteps, state, info = rollout_episode(rngs, env, actor)
     eps_return = sum(timesteps.reward)
     steps = len(timesteps.reward)
 

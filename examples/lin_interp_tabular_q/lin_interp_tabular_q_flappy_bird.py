@@ -109,14 +109,14 @@ from core.envs.utils import visualize_pygame
 
 rngs = nnx.Rngs(0, params=1, env=5, actions=3, transitions=4)
 
-def policy(obs, rngs):
+def actor(obs, rngs):
     #print(jax.vmap(algo.q_table.get, in_axes=[0, None])(training_state.policy, obs))
     return algo.get_action(rngs, training_state.policy, obs)
 
 FPS = round(1/DT)
 
 visualize_pygame(
-    rngs, env, policy, 
+    rngs, env, actor, 
     fps=FPS, 
     verbose=False
 )

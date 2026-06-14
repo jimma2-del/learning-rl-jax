@@ -61,12 +61,12 @@ import mediapy
 
 rngs = nnx.Rngs(0, params=1, env=5, actions=3)
 
-def policy(obs, rngs):
+def actor(obs, rngs):
     print(policy_state(obs, rngs=rngs))
     return algo.get_action(rngs, policy_state, obs, deterministic=True)
 
 # returns, lengths = nnx.jit(evaluate_episodes, static_argnums=(1, 2, 3, 4, 5))(
-#     rngs, EpisodeStepCountWrapper(VmapWrapper(env), max_eps_len=MAX_STEPS), nnx.vmap(policy), EVAL_EPS, N_ENVS)
+#     rngs, EpisodeStepCountWrapper(VmapWrapper(env), max_eps_len=MAX_STEPS), nnx.vmap(actor), EVAL_EPS, N_ENVS)
 # print(returns)
 # print(lengths)
 # print(f"Episode Return: mean={jnp.mean(returns)} std={jnp.std(returns, ddof=1)}")
@@ -83,7 +83,7 @@ if VISUALIZE_METHOD == 'video':
 
     for _ in range(NUM_EPISODES):
         timesteps, state, info = rollout_episode(rngs, 
-            JitWrapper(EpisodeStepCountWrapper(env, MAX_STEPS)), policy,
+            JitWrapper(EpisodeStepCountWrapper(env, MAX_STEPS)), actor,
 
             # remove unnecessary warp `_impl` property, which takes up a lot of memory
             take_func = lambda ts: ts.replace(state=ts.state.replace(
@@ -102,7 +102,7 @@ if VISUALIZE_METHOD == 'video':
 
 elif VISUALIZE_METHOD == 'pygame':
     visualize_pygame(
-        rngs, JitWrapper(env), policy, 
+        rngs, JitWrapper(env), actor, 
         fps=FPS, 
         verbose=False
     )

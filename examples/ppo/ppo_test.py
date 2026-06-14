@@ -18,7 +18,7 @@ from core.envs.wrappers import ObsRangeNormalizeWrapper, EpisodeStepCountWrapper
 
 from core.envs.utils import rollout_episode, visualize_pygame, evaluate_episodes
 
-from core.algos import a2c
+from core.algos import ppo
 
 #jax.config.update("jax_log_compiles", True)
 
@@ -44,14 +44,14 @@ STEPS = 1_000_000
 LOG_INTERVAL_STEPS = 100_000
 EVAL_EPS = 32
 
-hyperparameters = a2c.Hyperparameters(
+hyperparameters = ppo.Hyperparameters(
     learning_rate = 2.5e-4,#10e-4,
     n_envs = 32,
     rollout_length = 5,
     ent_coef = 0#0.001
 )
 
-algo = a2c.A2C(VmapWrapper(env), hyperparameters)
+algo = ppo.PPO(VmapWrapper(env), hyperparameters)
 
 training_state = algo.init_training_state(rngs)
 train = nnx.jit(algo.train, static_argnames=('steps',))
@@ -135,7 +135,7 @@ if VISUALIZE_METHOD == 'gif':
         comb_cum_rewards = jnp.concatenate((comb_cum_rewards, jnp.array((0,)), cum_rewards), axis=0)
 
     vis = Visualizer(gymnax_env, gymnax_env_params, comb_states, comb_cum_rewards)
-    vis.animate("./examples/a2c/visualizations/a2c_test_anim.gif")
+    vis.animate("./examples/ppo/visualizations/ppo_test_anim.gif")
     #vis.animate(save_fname=None, view=True)
 
 elif VISUALIZE_METHOD == 'pygame':

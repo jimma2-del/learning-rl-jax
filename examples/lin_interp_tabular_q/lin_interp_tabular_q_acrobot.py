@@ -167,7 +167,7 @@ from core.envs.utils import rollout_episode, visualize_pygame
 
 rngs = nnx.Rngs(0, params=1, env=5, actions=3, transitions=4)
 
-def policy(obs, rngs):
+def actor(obs, rngs):
     return algo.get_greedy_action(rngs, training_state.policy, obs)
 
 VISUALIZE_METHOD = "gif"
@@ -179,7 +179,7 @@ if VISUALIZE_METHOD == 'gif':
     comb_cum_rewards = jnp.array((0,))
 
     for _ in range(NUM_EPISODES):
-        timesteps, state, info = rollout_episode(rngs, env, policy)
+        timesteps, state, info = rollout_episode(rngs, env, actor)
         cum_rewards = jnp.cumsum(timesteps.reward)
         steps = len(timesteps.reward)
 
@@ -197,7 +197,7 @@ elif VISUALIZE_METHOD == 'pygame':
     FPS = 10
 
     visualize_pygame(
-        rngs, env, policy, 
+        rngs, env, actor, 
         fps=FPS, 
         render_func=lambda state, action: render_acrobot(None, gymnax_env_params, state),
         verbose=False

@@ -12,7 +12,7 @@ import functools
 from flax import nnx
 import optax
 
-from core.algos.base import Scheduleable, CriticNetwork
+from core.algos.base import Scheduleable
 from core.utils.func_utils import try_call, optionally_pass
 
 from core.envs.base import Environment
@@ -60,10 +60,10 @@ class TrainingState(Generic[TEnvState, TEnvObs]):
     env_states: TEnvState
     replay_buffer_state: ReplayBufferState[Transition[TEnvObs]]
 
-    policy: CriticNetwork[TEnvObs]
+    policy: nnx.Module
         # perhaps named confusingly; policy q-network, used for getting actions, though not directly an actor
         # named like this so api matches with other algos
-    target: CriticNetwork[TEnvObs]
+    target: nnx.Module
     optimizer: nnx.Optimizer
 
 class DQN(Generic[TEnvState, TEnvObs]):
@@ -172,7 +172,7 @@ class DQN(Generic[TEnvState, TEnvObs]):
 
     def init_training_state(self,
         rngs: nnx.Rngs,
-        policy: CriticNetwork[TEnvObs] | None = None,
+        policy: nnx.Module | None = None,
         replay_buffer_state: ReplayBufferState[Transition[TEnvObs]] | None = None,
         prefill_steps: int = 10_000
     ) -> TrainingState[TEnvState, TEnvObs]:
@@ -258,7 +258,7 @@ class DQN(Generic[TEnvState, TEnvObs]):
                 target_qs = sampled_transitions.reward \
                     + try_call(self.hyperparameters.discount_rate, steps)*max_next_qs
 
-                def loss_func(policy: CriticNetwork[TEnvObs], rngs: nnx.Rngs):
+                def loss_func(policy: nnx.Module, rngs: nnx.Rngs):
                     pred_qs_all_actions = optionally_pass(policy, rngs=rngs)(sampled_transitions.obs)
                         # q-net returns a q-value for every action
                     pred_qs = pred_qs_all_actions[jnp.arange(self.hyperparameters.batch_size), sampled_transitions.action]

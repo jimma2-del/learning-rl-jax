@@ -21,13 +21,13 @@ jumanji_env = Snake()
 env = JumanjiWrapper(jumanji_env)
 
 #@nnx.jit
-def policy(obs, rngs):
+def actor(obs, rngs):
     return env.action_space.sample(rngs.actions())
 
 comb_states = []
 
 for _ in range(NUM_EPISODES):
-    timesteps, state, info = rollout_episode(rngs, EpisodeStepCountWrapper(env, STEPS_LIMIT), policy)
+    timesteps, state, info = rollout_episode(rngs, EpisodeStepCountWrapper(env, STEPS_LIMIT), actor)
     eps_return = sum(timesteps.reward)
     steps = len(timesteps.reward)
 

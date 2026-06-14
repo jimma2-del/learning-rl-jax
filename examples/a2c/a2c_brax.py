@@ -41,7 +41,7 @@ EVAL_N_ENVS = 2048#256
 hyperparameters = a2c.Hyperparameters(
     learning_rate = 10e-4,#2.5e-4,#schedules.linear_schedule(4e-4, 1e-4, STEPS),
     n_envs = N_ENVS,
-    n_steps = 5,
+    rollout_length = 5,
     ent_coef = 0.001#schedules.linear_schedule(0.0015, 0.0001, STEPS)
 )
 
@@ -89,7 +89,7 @@ while training_state.steps < STEPS:
 rngs = nnx.Rngs(0, params=1, env=5, actions=3)
 
 #@nnx.jit
-def policy(obs, rngs):
+def actor(obs, rngs):
     return env.action_space.sample(rngs.actions())
     
 VISUALIZE_METHOD = "html"
@@ -98,7 +98,7 @@ if VISUALIZE_METHOD == 'html':
     states = []
 
     for _ in range(NUM_EPISODES):
-        timesteps, state, info = rollout_episode(rngs, JitWrapper(env), policy)
+        timesteps, state, info = rollout_episode(rngs, JitWrapper(env), actor)
 
         eps_return = sum(timesteps.reward)
         steps = len(timesteps.reward)
@@ -113,7 +113,7 @@ if VISUALIZE_METHOD == 'html':
 
 elif VISUALIZE_METHOD == 'pygame':
     visualize_pygame(
-        rngs, JitWrapper(env), policy, 
+        rngs, JitWrapper(env), actor, 
         fps=1.0 / brax_env.dt, 
         verbose=False
     )

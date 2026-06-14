@@ -23,7 +23,7 @@ brax_env = create(ENV_NAME, auto_reset=False, batch_size=None, episode_length=ST
 env = BraxWrapper(brax_env)
 
 #@nnx.jit
-def policy(obs, rngs):
+def actor(obs, rngs):
     return env.action_space.sample(rngs.actions())
 
 VISUALIZE_METHOD = "pygame"
@@ -32,7 +32,7 @@ if VISUALIZE_METHOD == 'html':
     states = []
 
     for _ in range(NUM_EPISODES):
-        timesteps, state, info = rollout_episode(rngs, JitWrapper(env), policy)
+        timesteps, state, info = rollout_episode(rngs, JitWrapper(env), actor)
 
         eps_return = sum(timesteps.reward)
         steps = len(timesteps.reward)
@@ -47,7 +47,7 @@ if VISUALIZE_METHOD == 'html':
 
 elif VISUALIZE_METHOD == 'pygame':
     visualize_pygame(
-        rngs, JitWrapper(env), policy, 
+        rngs, JitWrapper(env), actor, 
         fps=1.0 / brax_env.dt, 
         verbose=False
     )

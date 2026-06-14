@@ -33,7 +33,7 @@ mjx_env = registry.load(ENV_NAME, config)
 env = MuJoCoPlaygroundWrapper(mjx_env)
 
 #@nnx.jit
-def policy(obs, rngs):
+def actor(obs, rngs):
     return env.action_space.sample(rngs.actions())
 
 VISUALIZE_METHOD = "video"
@@ -45,7 +45,7 @@ if VISUALIZE_METHOD == 'video':
 
     for _ in range(NUM_EPISODES):
         timesteps, state, info = rollout_episode(rngs, 
-            JitWrapper(EpisodeStepCountWrapper(env, STEPS_LIMIT)), policy,
+            JitWrapper(EpisodeStepCountWrapper(env, STEPS_LIMIT)), actor,
 
             # remove unnecessary warp `_impl` property, which takes up a lot of memory
             take_func = lambda ts: ts.replace(state=ts.state.replace(
@@ -64,7 +64,7 @@ if VISUALIZE_METHOD == 'video':
 
 elif VISUALIZE_METHOD == 'pygame':
     visualize_pygame(
-        rngs, JitWrapper(env), policy, 
+        rngs, JitWrapper(env), actor, 
         fps=FPS, 
         verbose=False
     )

@@ -27,9 +27,15 @@ class Hyperparameters:
 
     discount_rate: Scheduleable[float] = 0.99
     learning_rate: Scheduleable[float] = 2.5e-4
-    
-    rollout_length: int = 5 # steps per env per update (batch size is rollout_length * n_envs)
+
     gae_lambda: Scheduleable[float] = 0.95
+
+    rollout_length: int = 32 # steps per env per update (batch size is rollout_length * n_envs)
+    n_minibatches: int = 32 # number of minibatches to split each batch into
+        # minibatch size is rollout_length * n_envs / n_minibatches
+    n_epochs: int = 8 # number of full run throughs of the entire batch
+
+    clip_epsilon: Scheduleable[float] = 0.25
 
     vf_coef: Scheduleable[float] = 0.5 # value function coefficient for the loss calculation
     ent_coef: Scheduleable[float] = 0.001 # conservative default; 0.01 to 0.001 (possibly schedule)
@@ -39,7 +45,7 @@ class Hyperparameters:
             # of the continuous (differential) entropy, since it tends to have a higher scale
             # than discrete (Shannon's) entropy
 
-    normalize_advantages: bool = False
+    normalize_advantages: bool = True
 
     bootstrap_truncated: bool = False # If False, truncation is treated the same as termination.
         # If True, the critic is run an extra time for every environment sample
@@ -63,8 +69,8 @@ class TrainingState(Generic[TEnvState, TEnvObs]):
     networks: Networks[TEnvObs, TEnvAction]
     optimizer: nnx.Optimizer
 
-class A2C(Generic[TEnvState, TEnvObs]):
-    """Implementation of A2C."""
+class PPO(Generic[TEnvState, TEnvObs]):
+    """Implementation of PPO."""
 
     def __init__(self, 
         env: Environment[TEnvState, TEnvObs, TEnvAction],

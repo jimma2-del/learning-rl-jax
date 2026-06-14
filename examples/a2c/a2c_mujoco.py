@@ -53,7 +53,7 @@ EVAL_N_ENVS = 256#2048
 hyperparameters = a2c.Hyperparameters(
     learning_rate = 2.5e-4,#schedules.linear_schedule(4e-4, 1e-4, STEPS),
     n_envs = N_ENVS,
-    n_steps = 5,
+    rollout_length = 5,
     ent_coef = 0.001#schedules.linear_schedule(0.0015, 0.0001, STEPS)
 )
 
@@ -102,13 +102,13 @@ import mediapy
 
 rngs = nnx.Rngs(0, params=1, env=5, actions=3)
 
-def policy(obs, rngs):
+def actor(obs, rngs):
     #print(training_state.policy(obs, rngs=rngs))
     return algo.get_action(rngs, training_state.policy, obs, deterministic=True)
 
 EVAL_EPS = 256
 returns, lengths = nnx.jit(evaluate_episodes, static_argnums=(1, 2, 3, 4, 5))(
-    rngs, EpisodeStepCountWrapper(VmapWrapper(env), max_eps_len=MAX_STEPS), nnx.vmap(policy), EVAL_EPS, EVAL_N_ENVS)
+    rngs, EpisodeStepCountWrapper(VmapWrapper(env), max_eps_len=MAX_STEPS), nnx.vmap(actor), EVAL_EPS, EVAL_N_ENVS)
 print(returns)
 print(lengths)
 print(f"Episode Return: mean={jnp.mean(returns)} std={jnp.std(returns, ddof=1)}")
@@ -125,7 +125,7 @@ if VISUALIZE_METHOD == 'video':
 
     for _ in range(NUM_EPISODES):
         timesteps, state, info = rollout_episode(rngs, 
-            JitWrapper(EpisodeStepCountWrapper(env, MAX_STEPS)), policy,
+            JitWrapper(EpisodeStepCountWrapper(env, MAX_STEPS)), actor,
 
             # remove unnecessary warp `_impl` property, which takes up a lot of memory
             take_func = lambda ts: ts.replace(state=ts.state.replace(
@@ -144,7 +144,7 @@ if VISUALIZE_METHOD == 'video':
 
 elif VISUALIZE_METHOD == 'pygame':
     visualize_pygame(
-        rngs, JitWrapper(env), policy, 
+        rngs, JitWrapper(env), actor, 
         fps=FPS, 
         verbose=False
     )

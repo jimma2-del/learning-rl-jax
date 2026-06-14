@@ -23,26 +23,20 @@ TEnvObs = TypeVar("TEnvObs")
 TEnvAction = TypeVar("TEnvAction")
 TRenderFrame = TypeVar("TRenderFrame", default=None)
 
-class PolicyWithRngs(Generic[TEnvObs, TEnvAction], Protocol):
+class ActorWithRngs(Generic[TEnvObs, TEnvAction], Protocol):
     def __call__(self, obs: TEnvObs, rngs: nnx.Rngs) -> TEnvAction: ...
-class PolicyWithoutRngs(Generic[TEnvObs, TEnvAction], Protocol):
+class ActorWithoutRngs(Generic[TEnvObs, TEnvAction], Protocol):
     def __call__(self, obs: TEnvObs) -> TEnvAction: ...
-Policy: TypeAlias = PolicyWithoutRngs[TEnvObs, TEnvAction] | PolicyWithRngs[TEnvObs, TEnvAction]
-
-class CriticWithRngs(Generic[TEnvObs], Protocol):
-    def __call__(self, obs: TEnvObs, rngs: nnx.Rngs) -> ArrayLike: ...
-class CriticWithoutRngs(Generic[TEnvObs], Protocol):
-    def __call__(self, obs: TEnvObs) -> ArrayLike: ...
-Critic: TypeAlias = CriticWithoutRngs[TEnvObs] | CriticWithRngs[TEnvObs]
+Actor: TypeAlias = ActorWithoutRngs[TEnvObs, TEnvAction] | ActorWithRngs[TEnvObs, TEnvAction]
 
 def evaluate_episodes(rngs: nnx.Rngs, 
     env: Environment[TEnvState, TEnvObs, TEnvAction, TRenderFrame], 
-    policy: Policy[TEnvObs, TEnvAction], 
+    actor: Actor[TEnvObs, TEnvAction], 
     episodes: int, 
     n_envs: int | None = None,
     eps_steps_limit: int = None
 ) -> tuple[jax.Array, jax.Array]:
-    """Runs the policy in `n_envs` environments in parallel until completing `episodes` episodes, 
+    """Runs the actor in `n_envs` environments in parallel until completing `episodes` episodes, 
     returning an array of trajectory returns and and an array of trajectory lengths.
 
     Do NOT wrap the environment with `AutoResetWrapper` before passing in.
@@ -50,7 +44,7 @@ def evaluate_episodes(rngs: nnx.Rngs,
     It is recommended to pass a batched environment (eg. wrapped with `VmapWrapper` for increased speed.
         Must specify `n_envs` (number of parallel environments) if passed environment is batched.
         If `n_envs` is specified, the environment must be batched BEFORE passing in.
-        `policy` should also accept a batched input of `rngs` and `obs`. 
+        `actor` should also accept a batched input of `rngs` and `obs`. 
             Apply `nnx.vmap` before passing in if not already batched.
 
     Runs at LEAST `episodes` episodes. If `episodes` is not a multiple of `n_envs`, will run the next multiple.
@@ -70,7 +64,7 @@ def evaluate_episodes(rngs: nnx.Rngs,
 
         # step env
         obs = env.get_obs(jax.random.split(rngs.env(), n_envs), env_state)
-        action = optionally_pass(policy, rngs=rngs.fork(split=n_envs))(obs)
+        action = optionally_pass(actor, rngs=rngs.fork(split=n_envs))(obs)
         env_state, reward, terminated, truncated, info = env.step(
             jax.random.split(rngs.env(), n_envs), env_state, action)
 
@@ -133,7 +127,7 @@ TakeFunc: TypeAlias = TakeFuncWithoutRngs[TEnvState, TEnvObs, TEnvAction, TTakeO
 
 def rollout_episode(rngs: nnx.Rngs, 
     env: Environment[TEnvState, TEnvObs, TEnvAction, TRenderFrame], 
-    policy: Policy[TEnvObs, TEnvAction],
+    actor: Actor[TEnvObs, TEnvAction],
     chunk_size: int = 100,
     take_func: TakeFunc[TEnvState, TEnvObs, TEnvAction, TTakeObj] | None = None
 ) -> tuple[TTakeObj, TEnvState, dict[Any, Any]]:
@@ -157,7 +151,7 @@ def rollout_episode(rngs: nnx.Rngs,
         state, info = carry
 
         obs = env.get_obs(rngs.env(), state)
-        action = optionally_pass(policy, rngs=rngs)(obs)
+        action = optionally_pass(actor, rngs=rngs)(obs)
 
         next_state, reward, terminated, truncated, next_info = env.step(rngs.env(), state, action)
 
@@ -192,7 +186,7 @@ def rollout_episode(rngs: nnx.Rngs,
 
 def rollout(rngs: nnx.Rngs,
     env: Environment[TEnvState, TEnvObs, TEnvAction, TRenderFrame],
-    policy: Policy[TEnvObs, TEnvAction],
+    actor: Actor[TEnvObs, TEnvAction],
     iters: int,
     n_envs: int | None = 32,
     initial_env_state: TEnvState | None = None,
@@ -207,7 +201,7 @@ def rollout(rngs: nnx.Rngs,
 
     If using a batched environment, wrap with `VmapWrapper` BEFORE passing in. Additionally:
         `n_envs` MUST be specified. `n_envs=None` indicates no batching.
-        `policy` should also accept a batched input of `rngs` and `obs`. 
+        `actor` should also accept a batched input of `rngs` and `obs`. 
             Apply `nnx.vmap` before passing in if not already batched.
 
     If `initial_env_state` is given but `initial_env_info` is not given,
@@ -231,7 +225,7 @@ def rollout(rngs: nnx.Rngs,
         unbatched_env = True
 
         env = DummyVmapWrapper(env)
-        policy = dummy_vmap(policy)
+        actor = dummy_vmap(actor)
         n_envs = 1
 
         if initial_env_info is not None:
@@ -250,7 +244,7 @@ def rollout(rngs: nnx.Rngs,
         states, infos = carry
 
         obs = env.get_obs(jax.random.split(rngs.env(), n_envs), states)
-        actions = optionally_pass(policy, rngs=rngs.fork(split=n_envs))(obs)
+        actions = optionally_pass(actor, rngs=rngs.fork(split=n_envs))(obs)
 
         new_states, rewards, terminateds, truncateds, new_infos = env.step(jax.random.split(rngs.env(), n_envs), states, actions)
 
@@ -270,7 +264,7 @@ def rollout(rngs: nnx.Rngs,
 
 def visualize_pygame(rngs: nnx.Rngs, 
     env: Environment[TEnvState, TEnvObs, TEnvAction, TRenderFrame], 
-    policy: Policy[TEnvObs, TEnvAction],
+    actor: Actor[TEnvObs, TEnvAction],
     window_size: tuple[int, int] | None = None, 
     fps: int = 10,
     render_func: Callable[[TEnvState, TEnvAction], ArrayLike] | None = None,
@@ -279,7 +273,7 @@ def visualize_pygame(rngs: nnx.Rngs,
 ) -> tuple[Timestep, bool]:
     """Visualizes episodes, rendering in pygame, until closed.
     `render_func` should output an array of pixels (y, x, r, g, b). Defaults to `env.render` if not given.
-    Does not JIT wrap the environment or policy. Try JIT wrapping before passing in if slow,
+    Does not JIT wrap the environment or actor. Try JIT wrapping before passing in if slow,
         though this may incur penalties due to the slow transfer of data between devices.
     """
     import pygame
@@ -322,7 +316,7 @@ def visualize_pygame(rngs: nnx.Rngs,
         
         else:
             obs = env.get_obs(rngs.env(), state)
-            action = optionally_pass(policy, rngs=rngs)(obs)
+            action = optionally_pass(actor, rngs=rngs)(obs)
 
             state, reward, terminated, truncated, info = env.step(rngs.env(), state, action)
 
