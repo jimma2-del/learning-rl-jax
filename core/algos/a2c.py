@@ -53,6 +53,7 @@ class Networks(Generic[TEnvObs, TEnvAction], nnx.Module):
     def __init__(self, policy: nnx.Module, critic: nnx.Module) -> None:
         self.policy = policy
         self.critic = critic
+            # NOTE: critic returns an array with 1 element instead of a scalar
 
 @dataclass(frozen=True)
 class TrainingState(Generic[TEnvState, TEnvObs]):
@@ -157,8 +158,9 @@ class A2C(Generic[TEnvState, TEnvObs]):
 
             (unreset_obs, timesteps), env_states, final_infos = rollout(
                 rngs, SquashContinuousActionsToBoundsWrapper(self.env),
-                nnx.vmap(lambda obs, rngs: self.get_action(
-                    rngs, networks.policy, obs, squash_continuous=False)),
+                nnx.split_rngs(splits=self.hyperparameters.n_envs)(
+                    nnx.vmap(lambda obs, rngs: self.get_action(
+                        rngs, networks.policy, obs, squash_continuous=False))),
                 self.hyperparameters.rollout_length, self.hyperparameters.n_envs,
                 env_states,
 
@@ -229,6 +231,9 @@ class A2C(Generic[TEnvState, TEnvObs]):
                     timesteps, const_values, next_values
                 )
 
+                target_values = advantages + const_values
+                value_loss = jnp.mean(jnp.power(target_values - values, 2)) # MSE
+
                 if self.hyperparameters.normalize_advantages:
                     advantages = (advantages - jnp.mean(advantages)) / (jnp.std(advantages, ddof=1) + 1e-8)
 
@@ -237,9 +242,6 @@ class A2C(Generic[TEnvState, TEnvObs]):
                 log_probabilities = self.env.action_space.log_probability(
                     timesteps.action, action_distribution, continuous_squashed=False, log_stds=True)
                 policy_loss = - jnp.mean(log_probabilities * advantages)
-
-                target_values = advantages + const_values
-                value_loss = jnp.mean(jnp.power(target_values - values, 2)) # MSE
 
                 feature_ents = self.env.action_space.entropies(action_distribution, 
                     log_stds=True, monte_carlo_n_samples=1, monte_carlo_key=rngs.actions())

@@ -159,7 +159,8 @@ class TabularQ(Generic[TEnvState, TEnvObs]):
 
         (unreset_obs, timesteps), env_states, final_infos = rollout(
             rngs, self.env,
-            nnx.vmap(lambda obs, rngs: self.get_action(rngs, policy, obs, epsilon)),
+            nnx.split_rngs(splits=self.hyperparameters.n_envs)(
+                nnx.vmap(lambda obs, rngs: self.get_action(rngs, policy, obs, epsilon))),
             iter, self.hyperparameters.n_envs,
             initial_env_states,
 

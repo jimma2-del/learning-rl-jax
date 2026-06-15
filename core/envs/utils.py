@@ -111,6 +111,7 @@ class Timestep(Generic[TEnvState, TEnvObs, TEnvAction]):
     state: TEnvState
     obs: TEnvObs
     action: TEnvAction
+    action_info: dict[Any, Any]
     reward: ArrayLike
     info: dict[Any, Any]
     terminated: bool
@@ -129,10 +130,14 @@ def rollout_episode(rngs: nnx.Rngs,
     env: Environment[TEnvState, TEnvObs, TEnvAction, TRenderFrame], 
     actor: Actor[TEnvObs, TEnvAction],
     chunk_size: int = 100,
-    take_func: TakeFunc[TEnvState, TEnvObs, TEnvAction, TTakeObj] | None = None
+    take_func: TakeFunc[TEnvState, TEnvObs, TEnvAction, TTakeObj] | None = None,
+    actor_returns_info: bool = False
 ) -> tuple[TTakeObj, TEnvState, dict[Any, Any]]:
     """Rollout one episode. Intended for visualization, rather than training. Do NOT JIT.
     Performs rollout in chunks of `chunk_size` steps for speed, combining chunks at the end.
+
+    `actor_returns_info`: If True, `actor` should return a tuple `(action, info)`, 
+        where `info` is a dictionary of arbitrary values which will be saved to `timestep.action_info`.
 
     `take_func`: Optional function to specify which values to take from Timestep
         A full `Timestep` object is returned by default.
@@ -153,10 +158,14 @@ def rollout_episode(rngs: nnx.Rngs,
         obs = env.get_obs(rngs.env(), state)
         action = optionally_pass(actor, rngs=rngs)(obs)
 
+        action_info = {}
+        if actor_returns_info:
+            action, action_info = action
+
         next_state, reward, terminated, truncated, next_info = env.step(rngs.env(), state, action)
 
         timestep = Timestep(state=state, obs=obs, action=action, reward=reward, info=info,
-            terminated=terminated, truncated=truncated)
+            terminated=terminated, truncated=truncated, action_info=action_info)
 
         return (next_state, next_info), (optionally_pass(take_func, rngs=rngs)(timestep), terminated, truncated)
 
@@ -191,7 +200,8 @@ def rollout(rngs: nnx.Rngs,
     n_envs: int | None = 32,
     initial_env_state: TEnvState | None = None,
     initial_env_info: dict[Any, Any] | None = None,
-    take_func: TakeFunc[TEnvState, TEnvObs, TEnvAction, TTakeObj] | None = None
+    take_func: TakeFunc[TEnvState, TEnvObs, TEnvAction, TTakeObj] | None = None,
+    actor_returns_info: bool = False
 ) -> tuple[TTakeObj, TEnvState, dict[Any, Any]]:
     """Runs the environment for `iters` steps, returning collected timesteps or user-defined take objs.
 
@@ -201,8 +211,8 @@ def rollout(rngs: nnx.Rngs,
 
     If using a batched environment, wrap with `VmapWrapper` BEFORE passing in. Additionally:
         `n_envs` MUST be specified. `n_envs=None` indicates no batching.
-        `actor` should also accept a batched input of `rngs` and `obs`. 
-            Apply `nnx.vmap` before passing in if not already batched.
+        `actor` should also accept a batched input of `obs`, but only a single `rngs`. 
+            Apply `nnx.split_rngs(splits=n_envs)(nnx.vmap(actor))` before passing in if not already batched.
 
     If `initial_env_state` is given but `initial_env_info` is not given,
         the first info will be a dummy value.
@@ -210,6 +220,9 @@ def rollout(rngs: nnx.Rngs,
     `take_func`: Optional function to specify which values to take from Timestep.
         A full `Timestep` object is returned by default.
         If the environment is batched, `take_func` should also handle batched timesteps.
+
+    `actor_returns_info`: If True, `actor` should return a tuple `(action, info)`, 
+        where `info` is a dictionary of arbitrary values which will be saved to `timestep.action_info`.
 
     Returns: timesteps, or user defined take objs for each timestep; final states; final infos.
         If the environment is batched, timesteps/take objs will have 
@@ -244,13 +257,17 @@ def rollout(rngs: nnx.Rngs,
         states, infos = carry
 
         obs = env.get_obs(jax.random.split(rngs.env(), n_envs), states)
-        actions = optionally_pass(actor, rngs=rngs.fork(split=n_envs))(obs)
+        actions = optionally_pass(actor, rngs=rngs)(obs)
+
+        action_infos = {}
+        if actor_returns_info:
+            actions, action_infos = actions
 
         new_states, rewards, terminateds, truncateds, new_infos = env.step(jax.random.split(rngs.env(), n_envs), states, actions)
 
         return (new_states, new_infos), optionally_pass(take_func, rngs=rngs)(Timestep(
             state=states, obs=obs, action=actions, reward=rewards, 
-            info=infos, terminated=terminateds, truncated=truncateds)
+            info=infos, terminated=terminateds, truncated=truncateds, action_info=action_infos)
         )
 
     (env_states, infos), take_values = nnx.scan(batched_env_step)(

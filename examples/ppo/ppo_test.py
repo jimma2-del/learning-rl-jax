@@ -26,7 +26,7 @@ rngs = nnx.Rngs(0, params=1, env=2, actions=3)
 
 ## Gymnax
 
-gymnax_env = CartPole()
+gymnax_env = MinBreakout()
 gymnax_env_params = gymnax_env.default_params
 
 env = GymnaxWrapper(gymnax_env)
@@ -46,9 +46,17 @@ EVAL_EPS = 32
 
 hyperparameters = ppo.Hyperparameters(
     learning_rate = 2.5e-4,#10e-4,
-    n_envs = 32,
-    rollout_length = 5,
-    ent_coef = 0#0.001
+    n_envs = 256,
+    gae_lambda = 0.95,
+
+    rollout_length = 32,
+    n_minibatches = 32, 
+    n_epochs = 8, 
+
+    clip_epsilon = 0.25,
+
+    vf_coef = 0.5, 
+    ent_coef = 0.001,
 )
 
 algo = ppo.PPO(VmapWrapper(env), hyperparameters)

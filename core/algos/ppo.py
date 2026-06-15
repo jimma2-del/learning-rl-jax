@@ -32,7 +32,7 @@ class Hyperparameters:
 
     rollout_length: int = 32 # steps per env per update (batch size is rollout_length * n_envs)
     n_minibatches: int = 32 # number of minibatches to split each batch into
-        # minibatch size is rollout_length * n_envs / n_minibatches
+        # minibatch size is rollout_length * n_envs / n_minibatches; must divide evenly
     n_epochs: int = 8 # number of full run throughs of the entire batch
 
     clip_epsilon: Scheduleable[float] = 0.25
@@ -59,6 +59,7 @@ class Networks(Generic[TEnvObs, TEnvAction], nnx.Module):
     def __init__(self, policy: nnx.Module, critic: nnx.Module) -> None:
         self.policy = policy
         self.critic = critic
+            # NOTE: critic returns an array with 1 element instead of a scalar in current setup
 
 @dataclass(frozen=True)
 class TrainingState(Generic[TEnvState, TEnvObs]):
@@ -80,6 +81,8 @@ class PPO(Generic[TEnvState, TEnvObs]):
         self.env = env
 
         self.hyperparameters = hyperparameters
+        assert hyperparameters.rollout_length*hyperparameters.n_envs % hyperparameters.n_minibatches == 0, \
+            "Total rollout samples (`rollout_length * n_envs`) must be divisible by `n_minibatches`."
 
     def get_action(self, rngs: nnx.Rngs, policy: nnx.module, obs: TEnvObs, deterministic: bool = False,
             squash_continuous=True) -> TEnvAction:
@@ -116,7 +119,7 @@ class PPO(Generic[TEnvState, TEnvObs]):
     def init_training_state(self,
         rngs: nnx.Rngs,
         policy: nnx.Module | None = None,
-        critic: nnx.Module | None = None,
+        critic: nnx.Module | None = None, 
     ) -> TrainingState[TEnvState, TEnvObs]:
 
         # create default networks if none given
@@ -160,11 +163,20 @@ class PPO(Generic[TEnvState, TEnvObs]):
             optimizer = training_state.optimizer
             
             ## sample transitions from environment ##
+            def actor(obs: TEnvObs, rngs: nnx.Rngs) -> tuple[TEnvAction, dict[Any, Any]]:
+                action_dist = optionally_pass(networks.policy, rngs=rngs)(obs)
+                value = optionally_pass(networks.critic, rngs=rngs)(obs).squeeze(axis=-1)
+
+                action = self.env.action_space.sample_distribution(rngs.actions(), action_dist, 
+                    squash_continuous=False, log_stds=True)
+                
+                log_p = self.env.action_space.log_probability(action, action_dist, 
+                    continuous_squashed=False, log_stds=True)
+
+                return action, { 'value': value, 'log_p': log_p }
 
             (unreset_obs, timesteps), env_states, final_infos = rollout(
-                rngs, SquashContinuousActionsToBoundsWrapper(self.env),
-                nnx.vmap(lambda obs, rngs: self.get_action(
-                    rngs, networks.policy, obs, squash_continuous=False)),
+                rngs, SquashContinuousActionsToBoundsWrapper(self.env), actor,
                 self.hyperparameters.rollout_length, self.hyperparameters.n_envs,
                 env_states,
 
@@ -174,7 +186,8 @@ class PPO(Generic[TEnvState, TEnvObs]):
                         timesteps.info[AutoResetWrapper.UNRESET_STATE_INFO_KEY]
                     ), 
                     timesteps.replace(state=None, info=None) # remove unnecessary fields to save memory
-                )
+                ),
+                actor_returns_info=True
             )
 
             steps += total_steps_per_iter
@@ -193,82 +206,108 @@ class PPO(Generic[TEnvState, TEnvObs]):
             discount = try_call(self.hyperparameters.discount_rate, steps)
             gae_lambda = try_call(self.hyperparameters.gae_lambda, steps)
 
+            clip_epsilon = try_call(self.hyperparameters.clip_epsilon, steps)
+
             vf_coef = try_call(self.hyperparameters.vf_coef, steps)
             ent_coef = try_call(self.hyperparameters.ent_coef, steps)
             ent_weight_continuous = try_call(self.hyperparameters.ent_weight_continuous, steps)
 
-            def loss_func(networks: Networks[TEnvObs, TEnvAction], rngs: nnx.Rngs):
-                values = optionally_pass(networks.critic, rngs=rngs)(timesteps.obs).squeeze(axis=-1)
-                const_values = jax.lax.stop_gradient(values)
+            # compute advantage estimates and target values
+            if self.hyperparameters.bootstrap_truncated:
+                next_values = optionally_pass(networks.critic, rngs=rngs)(
+                    jax.tree.map(lambda x: x[1:], unreset_obs)).squeeze(axis=-1)
+            else:
+                next_values = timesteps.action_info['value'][1:]
 
-                if self.hyperparameters.bootstrap_truncated:
-                    next_values = optionally_pass(networks.critic, rngs=rngs)(
-                        jax.tree.map(lambda x: x[1:], unreset_obs)).squeeze(axis=-1)
-                else:
-                    next_values = const_values[1:]
+            final_obs = self.env.get_obs(
+                jax.random.split(rngs.env(), self.hyperparameters.n_envs),
+                final_infos[AutoResetWrapper.UNRESET_STATE_INFO_KEY]
+            )
 
-                final_obs = self.env.get_obs(
-                    jax.random.split(rngs.env(), self.hyperparameters.n_envs),
-                    final_infos[AutoResetWrapper.UNRESET_STATE_INFO_KEY]
-                )
+            final_values = optionally_pass(networks.critic, rngs=rngs)(final_obs).squeeze(axis=-1)
+            next_values = jnp.append(next_values, final_values[None, ...], axis=0)
 
-                final_values = optionally_pass(networks.critic, rngs=rngs)(final_obs).squeeze(axis=-1)
-                next_values = jnp.append(next_values, final_values[None, ...], axis=0)
+            def gae_iter(next_gae: jax.Array, timestep: Timestep[TEnvState, TEnvObs, TEnvAction],
+                value: jax.Array, next_value: jax.Array):
 
-                next_values = jax.lax.stop_gradient(next_values)
+                not_terminated = jnp.logical_not(timestep.terminated)
+                not_truncated = jnp.logical_not(timestep.truncated)
 
-                def gae_iter(next_gae: jax.Array, timestep: Timestep[TEnvState, TEnvObs, TEnvAction],
-                    value: jax.Array, next_value: jax.Array):
+                next_gae = next_gae * not_terminated * not_truncated
+                td_err = -value + timestep.reward + discount*next_value*not_terminated
 
-                    not_terminated = jnp.logical_not(timestep.terminated)
-                    not_truncated = jnp.logical_not(timestep.truncated)
+                gae = td_err + discount*gae_lambda*next_gae
 
-                    next_gae = next_gae * not_terminated * not_truncated
-                    td_err = -value + timestep.reward + discount*next_value*not_terminated
+                return gae, gae
 
-                    gae = td_err + discount*gae_lambda*next_gae
+            _, advantages = nnx.scan(gae_iter, in_axes=(nnx.Carry, 0, 0, 0), reverse=True)(
+                jnp.zeros(self.hyperparameters.n_envs),
+                timesteps, timesteps.action_info['value'], next_values
+            )
 
-                    return gae, gae
+            target_values = advantages + timesteps.action_info['value']
 
-                _, advantages = nnx.scan(gae_iter, in_axes=(nnx.Carry, 0, 0, 0), reverse=True)(
-                    jnp.zeros(self.hyperparameters.n_envs),
-                    timesteps, const_values, next_values
-                )
+            train_samples = (timesteps.obs, timesteps.action, timesteps.action_info['log_p'], advantages, target_values)
+            train_samples = jax.tree.map(lambda x: jnp.reshape(x, (-1, *x.shape[2:])), train_samples)
 
-                if self.hyperparameters.normalize_advantages:
-                    advantages = (advantages - jnp.mean(advantages)) / (jnp.std(advantages, ddof=1) + 1e-8)
+            # do epochs to update the networks
+            def train_epoch(carry, rngs):
+                shuffled_is = jax.random.permutation(rngs.learn(), jnp.arange(len(train_samples[0])))
+                minibatches = jax.tree.map(lambda x: 
+                    jnp.reshape(x[shuffled_is], (self.hyperparameters.n_minibatches, -1, *x.shape[1:])), train_samples)
 
-                action_distribution = optionally_pass(networks.policy, rngs=rngs)(timesteps.obs)
+                def train_minibatch(carry, rngs, minibatch):
+                    networks, optimizer = carry
+                    obs, action, old_log_p, adv, target_values = minibatch
 
-                log_probabilities = self.env.action_space.log_probability(
-                    timesteps.action, action_distribution, continuous_squashed=False, log_stds=True)
-                policy_loss = - jnp.mean(log_probabilities * advantages)
+                    def loss_func(networks: Networks[TEnvObs, TEnvAction], rngs: nnx.Rngs):
+                        normed_adv = adv
+                        if self.hyperparameters.normalize_advantages:
+                            normed_adv = (adv - jnp.mean(adv)) / (jnp.std(adv, ddof=1) + 1e-8)
 
-                target_values = advantages + const_values
-                value_loss = jnp.mean(jnp.power(target_values - values, 2)) # MSE
+                        action_distribution = optionally_pass(networks.policy, rngs=rngs)(obs)
+                        log_probabilities = self.env.action_space.log_probability(
+                            action, action_distribution, continuous_squashed=False, log_stds=True)
 
-                feature_ents = self.env.action_space.entropies(action_distribution, 
-                    log_stds=True, monte_carlo_n_samples=1, monte_carlo_key=rngs.actions())
-                scaled_feature_ents = jax.tree.map( # reduce continuous entropy weighting
-                    lambda leaf, s_dt: 
-                        (1 if jnp.issubdtype(s_dt.dtype, jnp.integer) else ent_weight_continuous) * leaf,
-                    feature_ents, self.env.action_space.shapes_dtypes
-                )
-                comb_ents = jax.tree.reduce(lambda tot, cur: tot + cur, # sum entropies
-                    jax.tree.map(lambda leaf, s_dt: jnp.sum(leaf, axis=tuple(range(-len(s_dt.shape), 0))),
-                        scaled_feature_ents, self.env.action_space.shapes_dtypes))
-                mean_entropy = jnp.mean(comb_ents)
+                        ratio = jnp.exp(log_probabilities - old_log_p)
+                        clipped_ratio = jnp.clip(ratio, 1 - clip_epsilon, 1 + clip_epsilon)
+                        policy_loss = - jnp.mean(jnp.minimum(ratio * normed_adv, clipped_ratio * normed_adv))
 
-                comb_loss = policy_loss + vf_coef*value_loss - ent_coef*mean_entropy
+                        pred_values = optionally_pass(networks.critic, rngs=rngs)(obs).squeeze(axis=-1)
+                        value_loss = jnp.mean(jnp.power(target_values - pred_values, 2)) # MSE
 
-                metrics = { 'loss': comb_loss, 'policy_loss': policy_loss, 'value_loss': value_loss, 
-                    'entropy': mean_entropy}
+                        feature_ents = self.env.action_space.entropies(action_distribution, 
+                            log_stds=True, monte_carlo_n_samples=1, monte_carlo_key=rngs.actions())
+                        scaled_feature_ents = jax.tree.map( # reduce continuous entropy weighting
+                            lambda leaf, s_dt: 
+                                (1 if jnp.issubdtype(s_dt.dtype, jnp.integer) else ent_weight_continuous) * leaf,
+                            feature_ents, self.env.action_space.shapes_dtypes
+                        )
+                        comb_ents = jax.tree.reduce(lambda tot, cur: tot + cur, # sum entropies
+                            jax.tree.map(lambda leaf, s_dt: jnp.sum(leaf, axis=tuple(range(-len(s_dt.shape), 0))),
+                                scaled_feature_ents, self.env.action_space.shapes_dtypes))
+                        mean_entropy = jnp.mean(comb_ents)
 
-                return comb_loss, metrics
+                        comb_loss = policy_loss + vf_coef*value_loss - ent_coef*mean_entropy
 
-            loss_grad_func = nnx.value_and_grad(loss_func, has_aux=True)
-            (comb_loss, metrics), grads = loss_grad_func(networks, rngs)
-            optimizer.update(grads) 
+                        metrics = { 'loss': comb_loss, 'policy_loss': policy_loss, 'value_loss': value_loss, 
+                            'entropy': mean_entropy}
+
+                        return comb_loss, metrics
+
+                    loss_grad_func = nnx.value_and_grad(loss_func, has_aux=True)
+                    (comb_loss, metrics), grads = loss_grad_func(networks, rngs)
+                    optimizer.update(grads)
+
+                    return (networks, optimizer), metrics
+
+                carry, metrics = nnx.scan(train_minibatch, in_axes=(nnx.Carry, 0, 0))(carry, 
+                    rngs.fork(split=self.hyperparameters.n_minibatches), minibatches)
+
+                return carry, metrics
+
+            (networks, optimizer), metrics = nnx.scan(train_epoch)((networks, optimizer), 
+                rngs.fork(split=self.hyperparameters.n_epochs))
 
             return TrainingState(
                 steps=steps,
