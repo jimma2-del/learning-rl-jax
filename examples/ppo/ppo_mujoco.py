@@ -66,7 +66,10 @@ hyperparameters = ppo.Hyperparameters(
     vf_coef = 0.5, 
     ent_coef = 0.01,
 
-    normalize_advantages = True
+    normalize_advantages = True,
+
+    recompute_advantages = True,
+    target_kl = 0.02
 )
 
 algo = ppo.PPO(EpisodeStepCountWrapper(VmapWrapper(env), max_eps_len=MAX_STEPS), hyperparameters)

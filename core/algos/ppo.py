@@ -212,52 +212,68 @@ class PPO(Generic[TEnvState, TEnvObs]):
             discount = try_call(self.hyperparameters.discount_rate, steps)
             gae_lambda = try_call(self.hyperparameters.gae_lambda, steps)
 
-            clip_epsilon = try_call(self.hyperparameters.clip_epsilon, steps)
-
             vf_coef = try_call(self.hyperparameters.vf_coef, steps)
             ent_coef = try_call(self.hyperparameters.ent_coef, steps)
             ent_weight_continuous = try_call(self.hyperparameters.ent_weight_continuous, steps)
 
-            # compute advantage estimates and target values
-            if self.hyperparameters.bootstrap_truncated:
-                next_values = optionally_pass(networks.critic, rngs=rngs)(
-                    jax.tree.map(lambda x: x[1:], unreset_obs)).squeeze(axis=-1)
-            else:
-                next_values = timesteps.action_info['value'][1:]
+            clip_epsilon = try_call(self.hyperparameters.clip_epsilon, steps)
+            target_kl = try_call(self.hyperparameters.target_kl, steps)
 
-            final_obs = self.env.get_obs(
-                jax.random.split(rngs.env(), self.hyperparameters.n_envs),
-                final_infos[AutoResetWrapper.UNRESET_STATE_INFO_KEY]
-            )
+            def train_epoch(carry):
+                _, rngs, epoch_i, networks, optimizer, adv, target_vals, aggr_metrics = carry
 
-            final_values = optionally_pass(networks.critic, rngs=rngs)(final_obs).squeeze(axis=-1)
-            next_values = jnp.append(next_values, final_values[None, ...], axis=0)
+                def compute_gae(rngs, critic):
+                    values = timesteps.action_info['value']
 
-            def gae_iter(next_gae: jax.Array, timestep: Timestep[TEnvState, TEnvObs, TEnvAction],
-                value: jax.Array, next_value: jax.Array):
+                    if self.hyperparameters.recompute_advantages:
+                        values = nnx.cond(epoch_i != 0, 
+                            lambda critic: optionally_pass(critic, rngs=rngs)(timesteps.obs).squeeze(axis=-1), 
+                            lambda _: values,
+                            critic)
 
-                not_terminated = jnp.logical_not(timestep.terminated)
-                not_truncated = jnp.logical_not(timestep.truncated)
+                    if self.hyperparameters.bootstrap_truncated:
+                        next_values = optionally_pass(critic, rngs=rngs)(
+                            jax.tree.map(lambda x: x[1:], unreset_obs)).squeeze(axis=-1)
+                    else:
+                        next_values = values[1:]
 
-                next_gae = next_gae * not_terminated * not_truncated
-                td_err = -value + timestep.reward + discount*next_value*not_terminated
+                    final_obs = self.env.get_obs(
+                        jax.random.split(rngs.env(), self.hyperparameters.n_envs),
+                        final_infos[AutoResetWrapper.UNRESET_STATE_INFO_KEY]
+                    )
 
-                gae = td_err + discount*gae_lambda*next_gae
+                    final_values = optionally_pass(critic, rngs=rngs)(final_obs).squeeze(axis=-1)
+                    next_values = jnp.append(next_values, final_values[None, ...], axis=0)
 
-                return gae, gae
+                    def gae_iter(next_gae: jax.Array, timestep: Timestep[TEnvState, TEnvObs, TEnvAction],
+                        value: jax.Array, next_value: jax.Array):
 
-            _, advantages = nnx.scan(gae_iter, in_axes=(nnx.Carry, 0, 0, 0), reverse=True)(
-                jnp.zeros(self.hyperparameters.n_envs),
-                timesteps, timesteps.action_info['value'], next_values
-            )
+                        not_terminated = jnp.logical_not(timestep.terminated)
+                        not_truncated = jnp.logical_not(timestep.truncated)
 
-            target_values = advantages + timesteps.action_info['value']
+                        next_gae = next_gae * not_terminated * not_truncated
+                        td_err = -value + timestep.reward + discount*next_value*not_terminated
 
-            train_samples = (timesteps.obs, timesteps.action, timesteps.action_info['log_p'], advantages, target_values)
-            train_samples = jax.tree.map(lambda x: jnp.reshape(x, (-1, *x.shape[2:])), train_samples)
+                        gae = td_err + discount*gae_lambda*next_gae
 
-            # do epochs to update the networks
-            def train_epoch(carry, rngs):
+                        return gae, gae
+
+                    _, advantages = nnx.scan(gae_iter, in_axes=(nnx.Carry, 0, 0, 0), reverse=True)(
+                        jnp.zeros(self.hyperparameters.n_envs),
+                        timesteps, values, next_values
+                    )
+
+                    target_values = advantages + timesteps.action_info['value']
+
+                    return advantages, target_values
+
+                adv, target_vals = nnx.cond(jnp.logical_or(epoch_i == 0, self.hyperparameters.recompute_advantages),
+                    compute_gae, lambda rngs, critic: (adv, target_vals), 
+                    rngs, networks.critic)
+
+                train_samples = (timesteps.obs, timesteps.action, timesteps.action_info['log_p'], adv, target_vals)
+                train_samples = jax.tree.map(lambda x: jnp.reshape(x, (-1, *x.shape[2:])), train_samples)
+
                 shuffled_is = jax.random.permutation(rngs.learn(), len(train_samples[0]))
                 minibatches = jax.tree.map(lambda x: 
                     jnp.reshape(x[shuffled_is], (self.hyperparameters.n_minibatches, -1, *x.shape[1:])), train_samples)
@@ -319,13 +335,40 @@ class PPO(Generic[TEnvState, TEnvObs]):
 
                     return (networks, optimizer), metrics
 
-                carry, metrics = nnx.scan(train_minibatch, in_axes=(nnx.Carry, 0, 0))(carry, 
-                    rngs.fork(split=self.hyperparameters.n_minibatches), minibatches)
+                carry, metrics = nnx.scan(train_minibatch, in_axes=(nnx.Carry, 0, 0))(
+                    (networks, optimizer), rngs.fork(split=self.hyperparameters.n_minibatches), minibatches)
 
-                return carry, metrics
+                metrics = jax.tree.map(lambda x: jnp.mean(x), metrics)
+                aggr_metrics = jax.tree.map(lambda aggr, cur: aggr.at[epoch_i].set(cur), aggr_metrics, metrics)
 
-            (networks, optimizer), metrics = nnx.scan(train_epoch)((networks, optimizer), 
-                rngs.fork(split=self.hyperparameters.n_epochs))
+                epoch_i = epoch_i + 1
+
+                not_done = epoch_i <= self.hyperparameters.n_epochs
+                if target_kl is not None:
+                    not_done = jnp.logical_and(not_done, metrics['approx_kl'] <= target_kl)
+
+                return not_done, rngs, epoch_i, networks, optimizer, adv, target_vals, aggr_metrics
+
+            metrics_keys = { 'loss', 'policy_loss', 'value_loss', 'entropy', 'approx_kl', 'clip_frac' }
+            metrics = { key: jnp.zeros(self.hyperparameters.n_epochs) for key in metrics_keys }
+
+            _, rngs, epoch_i, networks, optimizer, _, _, metrics = nnx.while_loop(
+                lambda carry: carry[0], # use first item in carry as the done flag
+                train_epoch,
+                (
+                    jnp.array(True), 
+                    rngs, 
+                    jnp.array(0), 
+                    networks, optimizer, 
+                    jnp.empty_like(timesteps.reward), jnp.empty_like(timesteps.reward), 
+                    metrics
+                ), 
+            )
+
+            metrics = jax.tree.map(lambda x: jnp.sum(x) / epoch_i, metrics)
+
+            if target_kl is not None: # if early stopping, track number of epochs done before stopping
+                metrics['n_epochs_done'] = epoch_i
 
             return TrainingState(
                 steps=steps,
@@ -334,7 +377,7 @@ class PPO(Generic[TEnvState, TEnvObs]):
                 policy=networks.policy,
                 networks=networks,
                 optimizer=optimizer,
-            ), jax.tree.map(lambda x: jnp.mean(x), metrics)
+            ), metrics
 
         iterations = math.ceil(steps / total_steps_per_iter)
         training_state, metrics = nnx.scan(train_iteration)(training_state, rngs.fork(split=iterations))

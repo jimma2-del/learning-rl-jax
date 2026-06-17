@@ -9,7 +9,7 @@ from jax.typing import ArrayLike
 from flax import nnx
 from optax import schedules
 
-from gymnax.environments import Acrobot, CartPole, MinBreakout
+from gymnax.environments import Acrobot, CartPole, MinBreakout, MinAsterix
 from core.envs.gymnax import GymnaxWrapper
 
 from core.envs.flappy_bird import FlappyBirdEnv
@@ -50,15 +50,18 @@ hyperparameters = ppo.Hyperparameters(
     gae_lambda = 0.95,
 
     rollout_length = 32,
-    n_minibatches = 32, 
-    n_epochs = 8, 
+    n_minibatches = 8, 
+    n_epochs = 4, 
 
-    clip_epsilon = 0.25,
+    clip_epsilon = 0.2,
 
     vf_coef = 0.5, 
     ent_coef = 0.01,
 
-    normalize_advantages = False
+    normalize_advantages = True,
+
+    recompute_advantages = True,
+    target_kl = 0.02
 )
 
 algo = ppo.PPO(VmapWrapper(env), hyperparameters)
@@ -71,7 +74,7 @@ def evaluate(rngs, policy):
     return evaluate_episodes(
         rngs, VmapWrapper(env), 
         nnx.vmap(lambda obs, rngs: algo.get_action(rngs, policy, obs, deterministic=True)), 
-        EVAL_EPS, hyperparameters.n_envs
+        EVAL_EPS, 256
     )
 
 while training_state.steps < STEPS:
