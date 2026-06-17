@@ -369,7 +369,7 @@ class Space(Generic[TSpaceElement]):
             )(jax.random.split(monte_carlo_key, monte_carlo_n_samples))
 
             log_ps = self.log_probabilities(samples, distribution, 
-                continuous_squashed=False, log_stds=True)
+                continuous_squashed=False, log_stds=log_stds)
 
             monte_carlo_ests = jax.tree.map(lambda log_p: jnp.mean(-log_p, axis=0), log_ps)
 

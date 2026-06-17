@@ -9,7 +9,7 @@ from jax.typing import ArrayLike
 from flax import nnx
 from optax import schedules
 
-from gymnax.environments import Acrobot, CartPole, MinBreakout, Reacher, Swimmer
+from gymnax.environments import Acrobot, CartPole, MinBreakout
 from core.envs.gymnax import GymnaxWrapper
 
 from core.envs.flappy_bird import FlappyBirdEnv
@@ -22,7 +22,7 @@ from core.algos import ppo
 
 #jax.config.update("jax_log_compiles", True)
 
-rngs = nnx.Rngs(0, params=1, env=2, actions=3)
+rngs = nnx.Rngs(0, params=10, env=20, actions=30)
 
 ## Gymnax
 
@@ -56,7 +56,9 @@ hyperparameters = ppo.Hyperparameters(
     clip_epsilon = 0.25,
 
     vf_coef = 0.5, 
-    ent_coef = 0.001,
+    ent_coef = 0.01,
+
+    normalize_advantages = False
 )
 
 algo = ppo.PPO(VmapWrapper(env), hyperparameters)

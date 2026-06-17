@@ -31,9 +31,9 @@ class Hyperparameters:
     gae_lambda: Scheduleable[float] = 0.95
 
     rollout_length: int = 32 # steps per env per update (batch size is rollout_length * n_envs)
-    n_minibatches: int = 32 # number of minibatches to split each batch into
+    n_minibatches: int = 8 # number of minibatches to split each batch into
         # minibatch size is rollout_length * n_envs / n_minibatches; must divide evenly
-    n_epochs: int = 8 # number of full run throughs of the entire batch
+    n_epochs: int = 4 # number of full run throughs of the entire batch
 
     clip_epsilon: Scheduleable[float] = 0.25
 
@@ -47,9 +47,15 @@ class Hyperparameters:
 
     normalize_advantages: bool = True
 
-    bootstrap_truncated: bool = False # If False, truncation is treated the same as termination.
-        # If True, the critic is run an extra time for every environment sample
+    bootstrap_truncated: bool = False # if False, truncation is treated the same as termination.
+        # if True, the critic is run an extra time for every environment sample
         # to compute next values; this is slightly slower.
+
+    recompute_advantages: bool = False # if True, recomputes GAEs before every epoch.
+        # see https://arxiv.org/pdf/2006.05990 (Appendix B.1)
+
+    target_kl: Scheduleable[float] | None = None # if not None, stops further training epochs 
+        # if the average approx_kl of the previous epoch exceeds this threshold
     
 TEnvState = TypeVar("TEnvState")
 TEnvObs = TypeVar("TEnvObs")
@@ -252,7 +258,7 @@ class PPO(Generic[TEnvState, TEnvObs]):
 
             # do epochs to update the networks
             def train_epoch(carry, rngs):
-                shuffled_is = jax.random.permutation(rngs.learn(), jnp.arange(len(train_samples[0])))
+                shuffled_is = jax.random.permutation(rngs.learn(), len(train_samples[0]))
                 minibatches = jax.tree.map(lambda x: 
                     jnp.reshape(x[shuffled_is], (self.hyperparameters.n_minibatches, -1, *x.shape[1:])), train_samples)
 
@@ -260,22 +266,28 @@ class PPO(Generic[TEnvState, TEnvObs]):
                     networks, optimizer = carry
                     obs, action, old_log_p, adv, target_values = minibatch
 
-                    def loss_func(networks: Networks[TEnvObs, TEnvAction], rngs: nnx.Rngs):
-                        normed_adv = adv
-                        if self.hyperparameters.normalize_advantages:
-                            normed_adv = (adv - jnp.mean(adv)) / (jnp.std(adv, ddof=1) + 1e-8)
+                    normed_adv = adv
+                    if self.hyperparameters.normalize_advantages:
+                        normed_adv = (adv - jnp.mean(adv)) / (jnp.std(adv) + 1e-8)
 
+                    def loss_func(networks: Networks[TEnvObs, TEnvAction], rngs: nnx.Rngs):
                         action_distribution = optionally_pass(networks.policy, rngs=rngs)(obs)
+
+                        # policy loss
                         log_probabilities = self.env.action_space.log_probability(
                             action, action_distribution, continuous_squashed=False, log_stds=True)
 
-                        ratio = jnp.exp(log_probabilities - old_log_p)
+                        log_ratio = log_probabilities - old_log_p
+                        ratio = jnp.exp(log_ratio)
                         clipped_ratio = jnp.clip(ratio, 1 - clip_epsilon, 1 + clip_epsilon)
+
                         policy_loss = - jnp.mean(jnp.minimum(ratio * normed_adv, clipped_ratio * normed_adv))
 
+                        # value loss
                         pred_values = optionally_pass(networks.critic, rngs=rngs)(obs).squeeze(axis=-1)
                         value_loss = jnp.mean(jnp.power(target_values - pred_values, 2)) # MSE
-
+                        
+                        # entropy loss
                         feature_ents = self.env.action_space.entropies(action_distribution, 
                             log_stds=True, monte_carlo_n_samples=1, monte_carlo_key=rngs.actions())
                         scaled_feature_ents = jax.tree.map( # reduce continuous entropy weighting
@@ -290,8 +302,14 @@ class PPO(Generic[TEnvState, TEnvObs]):
 
                         comb_loss = policy_loss + vf_coef*value_loss - ent_coef*mean_entropy
 
+                        # extra metrics
+                        approx_kl = jnp.mean(ratio - 1 - log_ratio) # http://joschu.net/blog/kl-approx.html
+                            # monte carlo estimate of kl divergence; only used for metrics
+                        clip_frac = jnp.mean(jnp.abs(ratio - 1) > clip_epsilon)
+                            # fraction of data where the clipped objective was used instead of the regular
+
                         metrics = { 'loss': comb_loss, 'policy_loss': policy_loss, 'value_loss': value_loss, 
-                            'entropy': mean_entropy}
+                            'entropy': mean_entropy, 'approx_kl': approx_kl, 'clip_frac': clip_frac }
 
                         return comb_loss, metrics
 

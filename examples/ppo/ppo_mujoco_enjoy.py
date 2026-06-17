@@ -17,13 +17,13 @@ from core.envs.wrappers import ObsRangeNormalizeWrapper, EpisodeStepCountWrapper
 
 from core.envs.utils import rollout_episode, visualize_pygame, evaluate_episodes
 
-from core.algos import a2c
+from core.algos import ppo
 
 #jax.config.update("jax_log_compiles", True)
 
-rngs = nnx.Rngs(0, params=1, env=2, actions=3)
+rngs = nnx.Rngs(0, params=10, env=20, actions=30)
 
-ENV_NAME = "CheetahRun"#"WalkerRun"
+ENV_NAME = "WalkerRun"
 N_ENVS = 256
 EVAL_EPS = 256
 MAX_STEPS = 500
@@ -42,11 +42,11 @@ RESETS_POOL_SIZE = 32768
 resets_pool_states_infos = jax.vmap(env.reset)(jax.random.split(rngs.env(), RESETS_POOL_SIZE))
 env = PrecomputedResetsPoolWrapper(env, resets_pool_states_infos)
 
-algo = a2c.A2C(VmapWrapper(env))
+algo = ppo.PPO(VmapWrapper(env))
 
 import orbax.checkpoint as ocp
 
-SAVE_PATH = path.abspath(f'examples/a2c/_tmp/{ENV_NAME}')
+SAVE_PATH = path.abspath(f'examples/ppo/_tmp/{ENV_NAME}')
 
 # test load
 abstract_model = nnx.eval_shape(lambda: algo.create_default_policy(rngs=nnx.Rngs(0)))
@@ -98,7 +98,7 @@ if VISUALIZE_METHOD == 'video':
         states = [ jax.tree.map(lambda x: x[i], timesteps.state.state) for i in range(steps + 1) ]
         frames += mjx_env.render(states, camera=CAMERA)
 
-    mediapy.write_video(f"./examples/a2c/visualizations/a2c_{ENV_NAME}.mp4", frames, fps=FPS)
+    mediapy.write_video(f"./examples/ppo/visualizations/ppo_{ENV_NAME}.mp4", frames, fps=FPS)
 
 elif VISUALIZE_METHOD == 'pygame':
     visualize_pygame(

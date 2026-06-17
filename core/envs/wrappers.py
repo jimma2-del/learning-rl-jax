@@ -454,10 +454,10 @@ class ClipActionsToBoundsWrapper(
     @property
     def action_space(self) -> Space[TEnvAction]:
         return Space(
-            low = jax.tree.map(lambda leaf: leaf if np.issubdtype(leaf, np.integer) else np.full_like(leaf, -np.inf), 
-                self.normalize_actions_space.low),
-            high = jax.tree.map(lambda leaf: leaf if np.issubdtype(leaf, np.integer) else np.full_like(leaf, np.inf),
-                self.normalize_actions_space.high)
+            low = jax.tree.map(lambda leaf: leaf if np.issubdtype(leaf.dtype, np.integer) 
+                else np.full_like(leaf, -np.inf), self.normalize_actions_space.low),
+            high = jax.tree.map(lambda leaf: leaf if np.issubdtype(leaf.dtype, np.integer) 
+                else np.full_like(leaf, np.inf), self.normalize_actions_space.high)
         )
 
 @chex.dataclass

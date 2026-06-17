@@ -13,16 +13,16 @@ from mujoco_playground import registry
 from core.envs.mujoco_playground import MuJoCoPlaygroundWrapper
 
 from core.envs.wrappers import ObsRangeNormalizeWrapper, EpisodeStepCountWrapper, \
-    JitWrapper, VmapWrapper, PrecomputedResetsPoolWrapper
+    JitWrapper, VmapWrapper, PrecomputedResetsPoolWrapper, ClipActionsToBoundsWrapper
 
 from core.envs.utils import rollout_episode, visualize_pygame, evaluate_episodes
 
-from core.algos import a2c
+from core.algos import ppo
 
 #jax.config.update("jax_log_compiles", True)
 
-ENV_NAME = "CheetahRun"#"WalkerRun"
-N_ENVS = 2048#32
+ENV_NAME = "WalkerRun"
+N_ENVS = 2048
 CAMERA = 'side' # None
 
 rngs = nnx.Rngs(0, params=100, env=200, actions=300)
@@ -40,24 +40,36 @@ RESETS_POOL_SIZE = 32768
 resets_pool_states_infos = jax.vmap(env.reset)(jax.random.split(rngs.env(), RESETS_POOL_SIZE))
 env = PrecomputedResetsPoolWrapper(env, resets_pool_states_infos)
 
+#env = ClipActionsToBoundsWrapper(env)
+
 ### TRAIN ###
 
-STEPS = 60_000_000#100_000_000 #1_000_000
-LOG_INTERVAL_STEPS = 6_000_000#10_000_000 #100_000
+STEPS = 100_000_000 #1_000_000
+LOG_INTERVAL_STEPS = 5_000_000 #100_000
 
-MAX_STEPS = 1000#500#100#500
+MAX_STEPS = 200
 
 EVAL_EPS = 256#2048 # 
 EVAL_N_ENVS = 256#2048
 
-hyperparameters = a2c.Hyperparameters(
-    learning_rate = 2.5e-4,#schedules.linear_schedule(4e-4, 1e-4, STEPS),
+hyperparameters = ppo.Hyperparameters(
+    learning_rate = 2.5e-4,
     n_envs = N_ENVS,
-    rollout_length = 5,
-    ent_coef = 0.01#0.001#schedules.linear_schedule(0.0015, 0.0001, STEPS)
+    gae_lambda = 0.95,
+
+    rollout_length = 32,
+    n_minibatches = 8,#32, 
+    n_epochs = 4,
+
+    clip_epsilon = 0.2,
+
+    vf_coef = 0.5, 
+    ent_coef = 0.01,
+
+    normalize_advantages = True
 )
 
-algo = a2c.A2C(EpisodeStepCountWrapper(VmapWrapper(env), max_eps_len=MAX_STEPS), hyperparameters)
+algo = ppo.PPO(EpisodeStepCountWrapper(VmapWrapper(env), max_eps_len=MAX_STEPS), hyperparameters)
 
 training_state = algo.init_training_state(rngs)
 train = nnx.jit(algo.train, static_argnames=('steps',))
@@ -78,7 +90,7 @@ while training_state.steps < STEPS:
     elasped_time = time.perf_counter() - start_time
     sps = LOG_INTERVAL_STEPS / elasped_time
     print(f"Completed steps={training_state.steps}; sps={sps:,.1f}")
-    print("Metrics: " + " ".join([ f"{key}={val}" for key, val in metrics.items() ]))
+    print("Metrics: " + " ".join([ f"{key}={val:.5g}" for key, val in metrics.items() ]))
 
     # eval
     returns, lengths = evaluate(rngs, training_state.policy)
@@ -91,7 +103,7 @@ while training_state.steps < STEPS:
 # test save
 import orbax.checkpoint as ocp
 
-SAVE_PATH = path.abspath(f'examples/a2c/_tmp/{ENV_NAME}')
+SAVE_PATH = path.abspath(f'examples/ppo/_tmp/{ENV_NAME}')
 
 _, state = nnx.split(training_state.policy)
 checkpointer_save = ocp.StandardCheckpointer()
@@ -140,7 +152,7 @@ if VISUALIZE_METHOD == 'video':
         states = [ jax.tree.map(lambda x: x[i], timesteps.state.state) for i in range(steps + 1) ]
         frames += mjx_env.render(states, camera=CAMERA)
 
-    mediapy.write_video(f"./examples/a2c/visualizations/a2c_{ENV_NAME}.mp4", frames, fps=FPS)
+    mediapy.write_video(f"./examples/ppo/visualizations/ppo_{ENV_NAME}.mp4", frames, fps=FPS)
 
 elif VISUALIZE_METHOD == 'pygame':
     visualize_pygame(

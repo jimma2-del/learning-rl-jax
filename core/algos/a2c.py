@@ -235,7 +235,7 @@ class A2C(Generic[TEnvState, TEnvObs]):
                 value_loss = jnp.mean(jnp.power(target_values - values, 2)) # MSE
 
                 if self.hyperparameters.normalize_advantages:
-                    advantages = (advantages - jnp.mean(advantages)) / (jnp.std(advantages, ddof=1) + 1e-8)
+                    advantages = (advantages - jnp.mean(advantages)) / (jnp.std(advantages) + 1e-8)
 
                 action_distribution = optionally_pass(networks.policy, rngs=rngs)(timesteps.obs)
 
