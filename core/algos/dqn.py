@@ -20,7 +20,7 @@ from core.envs.wrappers import AutoResetWrapper
 from core.envs.utils import rollout
 from core.utils import ReplayBuffer, ReplayBufferState
 
-from core.sample_networks import MLP, MLPFeatureExtractor
+from core.utils.networks import MLP, FlattenAndProject
 
 @dataclass(frozen=True)
 class Hyperparameters:
@@ -112,14 +112,22 @@ class DQN(Generic[TEnvState, TEnvObs]):
         return jnp.where(jax.random.uniform(rngs.actions()) < epsilon, 
             random_action, greedy_action)
 
-    def create_default_policy(self, rngs: nnx.Rngs) -> nnx.Module:
-        FEATURE_EXTRACTOR_OUTPUT_DIM = 256
+    def create_default_policy(self, rngs: nnx.Rngs, 
+        hidden_dim: int = 256, num_hidden_layers: int = 2, do_layer_norm: bool = True, activation_func=nnx.relu
+    ) -> nnx.Module:
+        assert num_hidden_layers >= 1, "`num_hidden_layers` must be at least 1."
+        layers = [ FlattenAndProject[TEnvObs](rngs, self.env.observation_space.shapes_dtypes, output_dim=hidden_dim) ]
 
-        return nnx.Sequential(
-            MLPFeatureExtractor[TEnvObs](rngs, self.env.observation_space.shapes_dtypes, 
-                output_dim=FEATURE_EXTRACTOR_OUTPUT_DIM),
-            MLP(rngs, input_dim=FEATURE_EXTRACTOR_OUTPUT_DIM, output_dim=self.num_actions)
-        )
+        if do_layer_norm: layers.append(nnx.LayerNorm(hidden_dim, rngs=rngs))
+        layers.append(activation_func)
+
+        layers.append(MLP(rngs, 
+            input_dim=hidden_dim, output_dim=self.num_actions,
+            hidden_dim=hidden_dim, num_hidden_layers=num_hidden_layers-1, 
+            do_layer_norm=do_layer_norm, activation_func=activation_func
+        ))
+
+        return nnx.Sequential(*layers)
 
     def rollout_transitions(self,
         rngs: nnx.Rngs, 

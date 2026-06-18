@@ -3,7 +3,6 @@ import math
 from jax.typing import ArrayLike
 from typing import Any, Generic, TypeVar
 
-from jax import flatten_util
 import jax
 import jax.numpy as jnp
 
@@ -55,74 +54,45 @@ class MLP(nnx.Module):
 
 TEnvObs = TypeVar("TEnvObs")
 
-class MLPFeatureExtractor(nnx.Module, Generic[TEnvObs]):
+class FlattenAndProject(nnx.Module, Generic[TEnvObs]):
+    """Flattens an input PyTree and projects it to the specified dimensions (using an `nnx.Linear` layer)."""
 
     def __init__(self, rngs: nnx.Rngs, 
-        obs_shapes_dtypes,
-
+        shapes_dtypes,
         output_dim: int = 256,
-        output_activation_func = None, # same as activation_func by default
-
-        hidden_dim: int = 256, 
-        num_hidden_layers: int = 1,
-        do_layer_norm: bool = True,
-        activation_func = nnx.relu,
     ) -> None:
-        """obs_shapes_dtypes: A PyTree of jax.ShapeDtypeStruct leaves, eg. from jax.eval_shape()."""
+        """
+        shapes_dtypes: A PyTree of jax.ShapeDtypeStruct leaves, eg. from jax.eval_shape(),
+            specifiying the structure of the inputs to flatten.
+        """
 
-        self.obs_shapes_dtypes = obs_shapes_dtypes
+        self.shapes_dtypes = shapes_dtypes
 
         self.flattened_len = jax.tree.reduce(
             lambda cum_len, shape_dtype: cum_len + (
                 1 if len(shape_dtype.shape) == 0 else math.prod(shape_dtype.shape)), 
-            obs_shapes_dtypes, 0
+            shapes_dtypes, 0
         )
-
         self.output_dim = output_dim
 
-        self.output_activation_func = output_activation_func \
-            if output_activation_func is not None else activation_func
-
-        self.do_layer_norm = do_layer_norm
-
-        self.mlp = MLP(rngs, self.flattened_len, output_dim,
-            hidden_dim, num_hidden_layers, do_layer_norm, activation_func)
-
-        if self.do_layer_norm:
-            self.output_norm = nnx.LayerNorm(output_dim, rngs=rngs)
+        self.linear = nnx.Linear(self.flattened_len, output_dim, rngs=rngs)
 
     def __call__(self, x: TEnvObs, rngs: nnx.Rngs) -> jax.Array:
-        x = flatten_batched_tree(self.obs_shapes_dtypes, x)
-
-        x = self.mlp(x, rngs=rngs)
-
-        if self.do_layer_norm:
-            x = self.output_norm(x)
-
-        return self.output_activation_func(x)
+        x = flatten_batched_tree(self.shapes_dtypes, x)
+        return self.linear(x)
 
 TEnvAction = TypeVar("TEnvAction")
 
-class StochasticPolicy(nnx.Module, Generic[TEnvAction]):
+class ActionDistributionHead(nnx.Module, Generic[TEnvAction]):
 
     def __init__(self, rngs: nnx.Rngs, 
         action_space: Space[TEnvAction],
-
         input_dim: int = 256,
-
         do_state_independent_stds = True,
-
-        hidden_dim: int = 256, 
-        num_hidden_layers: int = 1,
-        do_layer_norm: bool = True,
-        activation_func = nnx.tanh,
-            # tanh is better for policy networks? https://arxiv.org/abs/2006.05990
     ):
-        self.input_dim = input_dim
-
-        self.do_state_independent_stds = do_state_independent_stds
-
         self.treedef = action_space.treedef
+        self.input_dim = input_dim
+        self.do_state_independent_stds = do_state_independent_stds
 
         self.output_dim = 0
         self.num_continuous = 0
@@ -156,11 +126,10 @@ class StochasticPolicy(nnx.Module, Generic[TEnvAction]):
             self.state_independent_log_stds = nnx.Param(jnp.full(self.num_continuous, jnp.log(0.5)))
                 # stds should be initialized small, 0.5 is best; https://arxiv.org/abs/2006.05990
 
-        self.mlp = MLP(rngs, input_dim, self.output_dim,
-            hidden_dim, num_hidden_layers, do_layer_norm, activation_func)
+        self.linear = nnx.Linear(input_dim, self.output_dim, rngs=rngs)
 
-    def __call__(self, x: jax.Array, rngs: nnx.Rngs):
-        x = self.mlp(x, rngs=rngs)
+    def __call__(self, x: jax.Array):
+        x = self.linear(x)
 
         leaves = []
         i = 0

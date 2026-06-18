@@ -26,7 +26,7 @@ rngs = nnx.Rngs(0, params=10, env=20, actions=30)
 
 ## Gymnax
 
-gymnax_env = MinBreakout()
+gymnax_env = Acrobot()
 gymnax_env_params = gymnax_env.default_params
 
 env = GymnaxWrapper(gymnax_env)

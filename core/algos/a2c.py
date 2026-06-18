@@ -19,7 +19,7 @@ from core.envs.base import Environment
 from core.envs.wrappers import AutoResetWrapper, SquashContinuousActionsToBoundsWrapper
 from core.envs.utils import rollout, Timestep
 
-from core.sample_networks import MLP, MLPFeatureExtractor, StochasticPolicy
+from core.utils.networks import MLP, FlattenAndProject, ActionDistributionHead
 
 @dataclass(frozen=True)
 class Hyperparameters:
@@ -83,45 +83,56 @@ class A2C(Generic[TEnvState, TEnvObs]):
         return self.env.action_space.sample_distribution(rngs.actions(), action_distribution, 
             squash_continuous=squash_continuous, log_stds=True, deterministic=deterministic)
 
-    def create_default_networks(self, rngs: nnx.Rngs) -> tuple[nnx.Module, nnx.Module]:
-        FEATURE_EXTRACTOR_OUTPUT_DIM = 256
+    def create_default_critic(self, rngs: nnx.Rngs,
+        hidden_dim: int = 256, num_hidden_layers: int = 2, do_layer_norm: bool = True, activation_func=nnx.relu
+    ) -> nnx.Module:
+        assert num_hidden_layers >= 1, "`num_hidden_layers` must be at least 1."
+        layers = [ FlattenAndProject[TEnvObs](rngs, self.env.observation_space.shapes_dtypes, output_dim=hidden_dim) ]
 
-        feature_extractor = MLPFeatureExtractor[TEnvObs](rngs, 
-            self.env.observation_space.shapes_dtypes, output_dim=FEATURE_EXTRACTOR_OUTPUT_DIM)
+        if do_layer_norm: layers.append(nnx.LayerNorm(hidden_dim, rngs=rngs))
+        layers.append(activation_func)
 
-        actor = nnx.Sequential(feature_extractor,
-            StochasticPolicy(rngs, self.env.action_space, input_dim=FEATURE_EXTRACTOR_OUTPUT_DIM))
+        layers.append(MLP(rngs, 
+            input_dim=hidden_dim, output_dim=1,
+            hidden_dim=hidden_dim, num_hidden_layers=num_hidden_layers-1, 
+            do_layer_norm=do_layer_norm, activation_func=activation_func
+        ))
 
-        feature_extractor = MLPFeatureExtractor[TEnvObs](rngs, 
-            self.env.observation_space.shapes_dtypes, output_dim=FEATURE_EXTRACTOR_OUTPUT_DIM)
+        layers.append(lambda x: jnp.squeeze(x, axis=-1))
 
-        critic = nnx.Sequential(feature_extractor,
-            MLP(rngs, input_dim=FEATURE_EXTRACTOR_OUTPUT_DIM, output_dim=1))
+        return nnx.Sequential(*layers)
 
-        return actor, critic
+    def create_default_policy(self, rngs: nnx.Rngs,
+        hidden_dim: int = 256, num_hidden_layers: int = 2, do_layer_norm: bool = True, activation_func=nnx.tanh
+            # tanh is better for policy networks (https://arxiv.org/abs/2006.05990)
+    ) -> nnx.Module:
+        assert num_hidden_layers >= 1, "`num_hidden_layers` must be at least 1."
+        layers = [ FlattenAndProject[TEnvObs](rngs, self.env.observation_space.shapes_dtypes, output_dim=hidden_dim) ]
 
-    def create_default_policy(self, rngs: nnx.Rngs) -> nnx.Module:
-        actor, _ = self.create_default_networks(rngs)
-        return actor
+        if do_layer_norm: layers.append(nnx.LayerNorm(hidden_dim, rngs=rngs))
+        layers.append(activation_func)
 
-    def create_default_critic(self, rngs: nnx.Rngs) -> nnx.Module:
-        _, critic = self.create_default_networks(rngs)
-        return critic
+        if num_hidden_layers > 1:
+            layers.append(MLP(rngs, 
+                input_dim=hidden_dim, output_dim=hidden_dim,
+                hidden_dim=hidden_dim, num_hidden_layers=num_hidden_layers-2, 
+                do_layer_norm=do_layer_norm, activation_func=activation_func
+            ))
+
+            if do_layer_norm: layers.append(nnx.LayerNorm(hidden_dim, rngs=rngs))
+            layers.append(activation_func)
+
+        layers.append(ActionDistributionHead[TEnvAction](rngs, self.env.action_space, input_dim=hidden_dim))
+
+        return nnx.Sequential(*layers)
 
     def init_training_state(self,
         rngs: nnx.Rngs,
         policy: nnx.Module | None = None,
         critic: nnx.Module | None = None,
     ) -> TrainingState[TEnvState, TEnvObs]:
-
-        # create default networks if none given
-        if policy is None and critic is None:
-            policy, critic = self.create_default_networks(rngs)
-        else:
-            if policy is None:
-                policy = self.create_default_policy(rngs)
-            if critic is None:
-                critic = self.create_default_critic(rngs)
+        if policy is None: policy = self.create_default_policy(rngs)
+        if critic is None: critic = self.create_default_critic(rngs)
 
         networks = Networks(policy, critic)
 
@@ -194,12 +205,12 @@ class A2C(Generic[TEnvState, TEnvObs]):
             ent_weight_continuous = try_call(self.hyperparameters.ent_weight_continuous, steps)
 
             def loss_func(networks: Networks[TEnvObs, TEnvAction], rngs: nnx.Rngs):
-                values = optionally_pass(networks.critic, rngs=rngs)(timesteps.obs).squeeze(axis=-1)
+                values = optionally_pass(networks.critic, rngs=rngs)(timesteps.obs)
                 const_values = jax.lax.stop_gradient(values)
 
                 if self.hyperparameters.bootstrap_truncated:
                     next_values = optionally_pass(networks.critic, rngs=rngs)(
-                        jax.tree.map(lambda x: x[1:], unreset_obs)).squeeze(axis=-1)
+                        jax.tree.map(lambda x: x[1:], unreset_obs))
                 else:
                     next_values = const_values[1:]
 
@@ -208,7 +219,7 @@ class A2C(Generic[TEnvState, TEnvObs]):
                     final_infos[AutoResetWrapper.UNRESET_STATE_INFO_KEY]
                 )
 
-                final_values = optionally_pass(networks.critic, rngs=rngs)(final_obs).squeeze(axis=-1)
+                final_values = optionally_pass(networks.critic, rngs=rngs)(final_obs)
                 next_values = jnp.append(next_values, final_values[None, ...], axis=0)
 
                 next_values = jax.lax.stop_gradient(next_values)
