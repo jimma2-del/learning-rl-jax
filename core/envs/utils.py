@@ -44,8 +44,8 @@ def evaluate_episodes(rngs: nnx.Rngs,
     It is recommended to pass a batched environment (eg. wrapped with `VmapWrapper` for increased speed.
         Must specify `n_envs` (number of parallel environments) if passed environment is batched.
         If `n_envs` is specified, the environment must be batched BEFORE passing in.
-        `actor` should also accept a batched input of `rngs` and `obs`. 
-            Apply `nnx.vmap` before passing in if not already batched.
+        `actor` should also accept a batched input of `obs`, but only a single `rngs`. 
+            Apply `nnx.split_rngs(splits=n_envs)(nnx.vmap(actor))` before passing in if not already batched.
 
     Runs at LEAST `episodes` episodes. If `episodes` is not a multiple of `n_envs`, will run the next multiple.
     """
@@ -64,7 +64,7 @@ def evaluate_episodes(rngs: nnx.Rngs,
 
         # step env
         obs = env.get_obs(jax.random.split(rngs.env(), n_envs), env_state)
-        action = optionally_pass(actor, rngs=rngs.fork(split=n_envs))(obs)
+        action = optionally_pass(actor, rngs=rngs)(obs)
         env_state, reward, terminated, truncated, info = env.step(
             jax.random.split(rngs.env(), n_envs), env_state, action)
 

@@ -53,7 +53,6 @@ class Networks(Generic[TEnvObs, TEnvAction], nnx.Module):
     def __init__(self, policy: nnx.Module, critic: nnx.Module) -> None:
         self.policy = policy
         self.critic = critic
-            # NOTE: critic returns an array with 1 element instead of a scalar
 
 @dataclass(frozen=True)
 class TrainingState(Generic[TEnvState, TEnvObs]):

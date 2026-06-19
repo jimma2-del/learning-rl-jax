@@ -44,10 +44,9 @@ training_state = algo.init_training_state(rngs)
 train = nnx.jit(algo.train, static_argnames=('steps',))
 
 @nnx.jit
-def evaluate(rngs, policy):
+def evaluate(rngs, actor):
     return evaluate_episodes(
-        rngs, VmapWrapper(env), 
-        nnx.vmap(lambda obs, rngs: algo.get_action(rngs, policy, obs)), 
+        rngs, VmapWrapper(env), actor, 
         EVAL_EPS, hyperparameters.n_envs
     )
 
@@ -62,12 +61,12 @@ while training_state.steps < STEPS:
     print("Metrics: " + " ".join([ f"{key}={val}" for key, val in metrics.items() ]))
 
     # eval
-    returns, lengths = evaluate(rngs, training_state.policy)
+    returns, lengths = evaluate(rngs, training_state.actor)
 
     print(f"Episode Return: mean={jnp.mean(returns)} std={jnp.std(returns, ddof=1)}")
     print(f"Episode Length: mean={jnp.mean(lengths)} std={jnp.std(lengths, ddof=1)}")
 
     print()
 
-print(training_state.policy)
-print(env.visualize_q_table(jnp.moveaxis(training_state.policy, 0, 2)))
+print(training_state.policy_q_func.q_table_values.values)
+print(env.visualize_q_table(jnp.moveaxis(training_state.policy_q_func.q_table_values.values, 0, 2)))
