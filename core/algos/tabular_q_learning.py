@@ -1,38 +1,40 @@
+from typing import TypeVar, Generic, Any, Sequence
+
 import math
 
 import numpy as np
 
-from flax import nnx
-
 import jax.numpy as jnp
 import jax
 from jax import flatten_util
-
 from jax.typing import ArrayLike
+
 from chex import dataclass
 import chex
-from typing import TypeVar, Generic, Any, Sequence
 
-import functools
+from flax import nnx
 
-from core.algos.base import Scheduleable, GreedyQActor
-
+from core.utils import ReplayBuffer, ReplayBufferState, LinearlyInterpolatedTable
 from core.utils.func_utils import try_call
 from core.utils.batch_utils import flatten_batched_tree
 
 from core.envs.base import Environment, Space
+from core.algos.base import Scheduleable, GreedyQActor
+
 from core.envs.wrappers import AutoResetWrapper
 from core.envs.utils import rollout, Actor
-from core.utils import ReplayBuffer, ReplayBufferState
 
 TEnvState = TypeVar("TEnvState")
 TEnvObs = TypeVar("TEnvObs")
 
 class TabularQFunc(Generic[TEnvObs], nnx.Module):
+    """Get Q values by looking up in a discrete Q table, rounding indices if they fall between gridpoints.
+    Implements the `core.algos.base.DiscreteQFunc` protocol."""
+
     def __init__(self, 
         num_actions: int,
         observation_space: Space[TEnvObs],
-        obs_resolution: ArrayLike = None, # pytree with same shape as env.observation_space, defaults to 1
+        obs_resolution: TEnvObs | None = None,
         q_table_values: jax.Array = None
     ) -> None:
         """`obs_resolution`: PyTree with same treedef/shape as env.observation_space, defaults to 1."""
@@ -43,8 +45,8 @@ class TabularQFunc(Generic[TEnvObs], nnx.Module):
         if obs_resolution is None:
             obs_resolution = jax.tree.map(np.ones_like, observation_space.low)
 
-        chex.assert_trees_all_equal_shapes(obs_resolution, observation_space.low)
         self.obs_resolution = jax.tree.map(lambda x: np.asarray(x), obs_resolution)
+        chex.assert_trees_all_equal_shapes(self.obs_resolution, observation_space.low)
 
         self.obs_low_flattened = np.asarray(flatten_util.ravel_pytree(observation_space.low)[0])
         self.obs_high_flattened = np.asarray(flatten_util.ravel_pytree(observation_space.high)[0])
@@ -62,8 +64,18 @@ class TabularQFunc(Generic[TEnvObs], nnx.Module):
         self.q_table_values = nnx.Param(q_table_values)
 
     def __call__(self, obs: TEnvObs, rngs: nnx.Rngs | None = None) -> jax.Array:
-        obs_indices = self.obs_table_indices(obs)
-        return jax.vmap(lambda qs: qs[obs_indices], out_axes=-1)(self.q_table_values.value)
+        """Returns a Q value for every possible action, given `obs`."""
+        return jax.vmap(self.get_table_value, in_axes=(None, 0), out_axes=-1)(obs, jnp.arange(self.num_actions))
+
+    def get_table_value(self, obs: TEnvObs, action: ArrayLike) -> ArrayLike:
+        """Returns the Q value for the given `obs` and `action`."""
+        indices = (action, *self.obs_table_indices(obs))
+        return self.q_table_values.value[indices]
+
+    def adjust_table_value(self, obs: TEnvObs, action: ArrayLike, adjust: ArrayLike) -> None:
+        """Adjust the Q table's value for the given `obs` and `action` by `adjust`."""
+        indices = (action, *self.obs_table_indices(obs))
+        self.q_table_values.value = self.q_table_values.value.at[indices].add(adjust)
 
     def obs_table_indices(self, obs: TEnvObs) -> Sequence[ArrayLike]:
         flattened_obs = flatten_batched_tree(self.obs_shapes_dtypes, obs)
@@ -75,13 +87,47 @@ class TabularQFunc(Generic[TEnvObs], nnx.Module):
 
         return tuple(jnp.moveaxis(array_is, -1, 0))
 
-    def get_table_value(self, obs: TEnvObs, action: ArrayLike) -> ArrayLike:
-        indices = (action, *self.obs_table_indices(obs))
-        return self.q_table_values.value[indices]
+class LinInterpTabularQFunc(Generic[TEnvObs], TabularQFunc[TEnvObs]):
+    """Get Q values by linearly interpolating nearby table corners.
+    Implements the `core.algos.base.DiscreteQFunc` protocol."""
 
-    def set_table_value(self, obs: TEnvObs, action: ArrayLike, q: ArrayLike) -> None:
-        indices = (action, *self.obs_table_indices(obs))
-        self.q_table_values.value = self.q_table_values.value.at[indices].set(q)
+    def __init__(self, 
+        num_actions: int,
+        observation_space: Space[TEnvObs],
+        obs_resolution: TEnvObs,
+        q_table_values: jax.Array = None
+    ) -> None:
+        """`obs_resolution`: PyTree with same treedef/shape as env.observation_space, defaults to 1."""
+
+        # `LinearlyInterpolatedTable` ensures the space is fully covered by the table corners, 
+            # while `TabularQFunc` rounds, potentially rounding down; correct for this
+        observation_space = Space(low=observation_space.low,
+            high=jax.tree.map(lambda lo, hi, res: np.ceil((hi-lo) / res)*res + lo, 
+                observation_space.low, observation_space.high, obs_resolution))
+
+        super().__init__(num_actions, observation_space, obs_resolution, q_table_values)
+
+        self.lin_interp_table = LinearlyInterpolatedTable(
+            min=self.obs_low_flattened,
+            max=self.obs_high_flattened,
+            step=self.obs_resolution_flattened
+        )
+
+    def get_table_value(self, obs: TEnvObs, action: ArrayLike) -> ArrayLike:
+        """Returns the Q value for the given `obs` and `action`."""
+        return self.lin_interp_table.get(self.q_table_values.value[action], self.obs_table_indices(obs))
+
+    def adjust_table_value(self, obs: TEnvObs, action: ArrayLike, adjust: ArrayLike) -> None:
+        """Adjust the Q table's value for the given `obs` and `action` by `adjust`."""
+
+        corner_indices, adjust_amounts = self.lin_interp_table.get_corner_adjustments(
+            self.q_table_values.value[action], self.obs_table_indices(obs), adjust)
+
+        adjust_indices_tuple = (action[:, None], ) + tuple(jnp.moveaxis(corner_indices, -1, 0))
+        self.q_table_values.value = self.q_table_values.value.at[adjust_indices_tuple].add(adjust_amounts)
+
+    def obs_table_indices(self, obs: TEnvObs) -> Sequence[ArrayLike]:
+        return flatten_batched_tree(self.obs_shapes_dtypes, obs)
 
 @dataclass(frozen=True)
 class Hyperparameters:
@@ -96,7 +142,7 @@ class Hyperparameters:
         # it is recommended to use a schedule: decay from 1 to ~0.05 over ~10% of training steps
         # eg. optax.schedules.linear_schedule(1, 0.05, 0.1*steps)
 
-    replay_buffer_size: int = 10_000
+    replay_buffer_size: int = 100_000
 
     train_freq: int = 4 # does around 1 gradient step per train_freq env steps
         # NOTE: if n_envs > train_freq, we take 1 step in each env, followed by multiple gradient steps
@@ -122,13 +168,11 @@ class TrainingState(Generic[TEnvState, TEnvObs]):
     policy_q_func: TabularQFunc
     target_q_func: TabularQFunc
 
-class TabularQ(Generic[TEnvState, TEnvObs]):
+class TabularQLearning(Generic[TEnvState, TEnvObs]):
     """Implementation of Tabular Q-Learning."""
 
     def __init__(self, 
         env: Environment[TEnvState, TEnvObs, ArrayLike],
-        obs_resolution: ArrayLike = None, # pytree with same shape as env.observation_space, defaults to 1
-        observation_space: Space[TEnvObs] = None, # override environment observation space
         hyperparameters: Hyperparameters = Hyperparameters()
     ) -> None:
         """IMPORTANT: `env` must already be batched; eg. wrap with `VmapWrapper` BEFORE passing in."""
@@ -144,12 +188,6 @@ class TabularQ(Generic[TEnvState, TEnvObs]):
 
         self.hyperparameters = hyperparameters
 
-        self.observation_space = observation_space if observation_space is not None else env.observation_space
-
-        if obs_resolution is None:
-            obs_resolution = jax.tree.map(np.ones_like, self.observation_space.low)
-        self.obs_resolution = jax.tree.map(lambda x: np.asarray(x), obs_resolution)
-
         # make replay buffer
         self.transition_shapes_dtypes = Transition(
             obs = self.env.observation_space.shapes_dtypes,
@@ -162,9 +200,18 @@ class TabularQ(Generic[TEnvState, TEnvObs]):
         self.replay_buffer = ReplayBuffer[Transition[TEnvObs]](
             self.transition_shapes_dtypes, self.hyperparameters.replay_buffer_size)
 
-    def create_default_policy(self, rngs: nnx.Rngs, init_val: ArrayLike = jnp.array(0, dtype=jnp.float32)) -> jax.Array:
-        return jnp.repeat(jnp.full(self.q_table_shape, init_val, dtype=jnp.float32)[None, ...], 
-            self.num_actions, axis=0)
+    def make_default_q_func(self, init_val: ArrayLike | None = None, rngs=None) -> TabularQFunc:
+        q_func = TabularQFunc(self.num_actions, self.env.observation_space)
+
+        if init_val is not None:
+            q_func.q_table_values.value = jnp.full_like(q_func.q_table_values.value, init_val)
+
+        return q_func
+
+    def make_actor(self, q_func: TabularQFunc | None = None, epsilon: ArrayLike | None = None, **kwargs) -> GreedyQActor:
+        if q_func is None: q_func = self.make_default_q_func(**kwargs)
+        if epsilon is None: epsilon = try_call(self.hyperparameters.epsilon, 0)
+        return GreedyQActor(q_func, self.num_actions, epsilon=epsilon)
 
     def rollout_transitions(self,
         rngs: nnx.Rngs, 
@@ -215,15 +262,15 @@ class TabularQ(Generic[TEnvState, TEnvObs]):
 
     def init_training_state(self,
         rngs: nnx.Rngs,
-        q_table_values: jax.Array | None = None,
+        policy_q_func: TabularQFunc | None = None,
+        target_q_func: TabularQFunc | None = None,
         replay_buffer_state: ReplayBufferState[Transition[TEnvObs]] | None = None,
         prefill_steps: int = 10_000
     ) -> TrainingState[TEnvState, TEnvObs]:
-        policy_q_func = TabularQFunc(self.num_actions, self.observation_space, self.obs_resolution, q_table_values)
-        target_q_func = TabularQFunc(self.num_actions, self.observation_space, self.obs_resolution, q_table_values)
+        if policy_q_func is None: policy_q_func = self.make_default_q_func()
+        if target_q_func is None: target_q_func = nnx.clone(policy_q_func)
 
-        epsilon = try_call(self.hyperparameters.epsilon, 0)
-        actor = GreedyQActor(policy_q_func, self.num_actions, epsilon=epsilon)
+        actor = self.make_actor(policy_q_func)
 
         if replay_buffer_state is None:
             replay_buffer_state = self.replay_buffer.init()
@@ -302,7 +349,7 @@ class TabularQ(Generic[TEnvState, TEnvObs]):
 
                 adjusts = try_call(self.hyperparameters.learning_rate, steps) * (target_qs - pred_qs) \
                     / self.hyperparameters.batch_size # make "learning rate" independent of batch size
-                policy_q_func.set_table_value(sampled_transitions.obs, sampled_transitions.action, pred_qs + adjusts)
+                policy_q_func.adjust_table_value(sampled_transitions.obs, sampled_transitions.action, adjusts)
 
                 return policy_q_func, { 'critic_loss': loss }
 
@@ -310,9 +357,11 @@ class TabularQ(Generic[TEnvState, TEnvObs]):
 
             # update target if enough steps have passed
             update_target = steps % self.hyperparameters.target_update_interval < total_steps_per_iter
-            target_q_func.q_table_values.value = jax.lax.cond(update_target, 
-                lambda: policy_q_func.q_table_values.value, 
-                lambda: target_q_func.q_table_values.value)
+            nnx.update(target_q_func, nnx.cond(update_target, 
+                lambda policy_q_func, target_q_func: nnx.state(policy_q_func), 
+                lambda policy_q_func, target_q_func: nnx.state(target_q_func),
+                policy_q_func, target_q_func
+            ))
 
             return TrainingState(
                 steps=steps,
@@ -324,6 +373,8 @@ class TabularQ(Generic[TEnvState, TEnvObs]):
                 target_q_func=target_q_func,
             ), jax.tree.map(lambda x: jnp.mean(x), metrics)
 
+        training_state.actor.train()
+        
         iterations = math.ceil(steps / total_steps_per_iter)
         training_state, metrics = nnx.scan(train_iteration)(training_state, rngs.fork(split=iterations))
 

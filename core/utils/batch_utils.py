@@ -1,31 +1,32 @@
-from typing import Callable
+from typing import Callable, Sequence
 
 import jax
 import jax.numpy as jnp
+from jax.typing import ArrayLike
 
 import chex
 
-def shape_matches_excluding_batch_dims(unbatched_shape, x_shape):
+def shape_matches_excluding_batch_dims(unbatched_shape: Sequence[int], x_shape: Sequence[int]) -> bool:
     if len(unbatched_shape) == 0: return True
     if len(unbatched_shape) > len(x_shape): return False
     return x_shape[-len(unbatched_shape):] == unbatched_shape
 
-def shape_is_batched(unbatched_shape, x_shape):
+def shape_is_batched(unbatched_shape: Sequence[int], x_shape: Sequence[int]) -> bool:
     return len(x_shape) > len(unbatched_shape) \
         and shape_matches_excluding_batch_dims(unbatched_shape, x_shape)
 
-def is_batched(unbatched_shape, x):
+def is_batched(unbatched_shape: Sequence[int], x: jax.Array) -> bool:
     return shape_is_batched(unbatched_shape, x.shape)
 
-def get_shape_batch_dims(unbatched_shape, x_shape):
+def get_shape_batch_dims(unbatched_shape: Sequence[int], x_shape: Sequence[int]) -> Sequence[int]:
     if len(unbatched_shape) == 0: return x_shape
     assert shape_matches_excluding_batch_dims(unbatched_shape, x_shape)
     return x_shape[:-len(unbatched_shape)]
 
-def get_batch_dims(unbatched_shape, x):
+def get_batch_dims(unbatched_shape: Sequence[int], x: jax.Array) -> Sequence[int]:
     return get_shape_batch_dims(unbatched_shape, x.shape)
 
-def get_tree_batch_dims(unbatched_shapes_dtypes, x):
+def get_tree_batch_dims(unbatched_shapes_dtypes, x) -> Sequence[int]:
     chex.assert_trees_all_equal_structs(x, unbatched_shapes_dtypes,
         custom_message="'x' must have the same treedef (structure) as 'unbatched_shapes_dtypes'.")
 
@@ -73,7 +74,7 @@ def flatten_batched_tree(unbatched_shapes_dtypes, x) -> jax.Array:
 
     return jnp.concatenate([ leaf.reshape((*batch_dims, -1)) for leaf in leaves_x ], axis=-1)
 
-def get_tree_vmap_dim(tree):
+def get_tree_vmap_dim(tree) -> int:
     """Finds the length of the leading axis of the PyTree leaves, ensuring that these lengths are all equal.
     This dimension would be the batch dimension if passed into a vmap'ed function.
     """
@@ -88,7 +89,7 @@ def get_tree_vmap_dim(tree):
 
     return dim
 
-def split_key_if_batched(key: chex.PRNGKey, batch_num: int | None = None):
+def split_key_if_batched(key: chex.PRNGKey, batch_num: int | None = None) -> chex.PRNGKey:
     """Splits key into an array of length `batch_num`.
     If `batch_num` is None, does nothing, returning `key` unaltered."""
     return key if batch_num is None else jax.random.split(key, batch_num)
@@ -103,3 +104,43 @@ def dummy_vmap(f: Callable) -> Callable:
         return jax.tree.map(lambda x: x[None, ...], f(*unbatched_args, **unbatched_kwargs))
 
     return dummy_vmapped
+
+def batched_index(arr: jax.Array, indices: jax.Array) -> tuple[jax.Array, ...]:
+    """Converts an array containing a batch of indices into a tuple of indices along individual 
+        axes of `arr`, ready for use in indexing into `arr`: `arr[batched_index(arr, indices)]`.
+
+    `arr` can have leading batch dimensions if they match with the rightmost batch dimensions of `indices`.
+        In this case, `indices` will select the corresponding batch slice from `arr`.
+
+    `arr`: Array to index into, of shape `(arr_batch_dims, *arr_dims)`.
+
+    `indices`: Array of shape `(*batch_dims, len(arr_dims))`; values along the last axis represent
+        indices along the corresponding axis of `arr`, while axes on the left are batch axes.
+
+    Returns: Tuple of length `len(arr.shape)`, where each item is an 
+        array of indices along the corresponding axis of `arr`.
+    """
+
+    indices_batch_dims = indices.shape[:-1]
+    n_indices_batch_dims = len(indices_batch_dims)
+
+    n_arr_batch_dims = len(arr.shape) - indices.shape[-1]
+    assert n_arr_batch_dims >= 0, (
+        "`indices` contains too many indices: "
+        f"{len(arr.shape)}-dimensional array cannot be indexed with {indices.shape[-1]} indices."
+    )
+
+    arr_batch_dims = arr.shape[:n_arr_batch_dims]
+    indices_trailing_batch_dims = indices_batch_dims[n_indices_batch_dims - n_arr_batch_dims:]
+    assert arr_batch_dims == indices_batch_dims[n_indices_batch_dims - n_arr_batch_dims:], (
+        f"Batch dimensions of `arr` {arr_batch_dims} do not match with " 
+        f"rightmost batch dimensions of `indices` {indices_trailing_batch_dims}."
+    )
+
+    extra_index_dims = []
+    for i, size in enumerate(arr_batch_dims):
+        shape = [1] * n_indices_batch_dims
+        shape[n_indices_batch_dims - n_arr_batch_dims + i] = size
+        extra_index_dims.append(jnp.arange(size).reshape(shape))
+
+    return tuple(extra_index_dims) + tuple(jnp.moveaxis(indices, -1, 0))

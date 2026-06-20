@@ -9,14 +9,14 @@ from flax import nnx
 
 from core.envs.gridworld import GridworldEnv, State
 
-from core.algos import tabular_q
+from core.algos import tabular_q_learning
 from core.envs.utils import evaluate_episodes
 from core.envs.wrappers import VmapWrapper
 
 rngs = nnx.Rngs(0, params=1, env=2, actions=3, transitions=4)
 
 MAP = "general"
-env = GridworldEnv.default_map(MAP)
+env = GridworldEnv.built_in_map(MAP)
 
 ### TRAIN ###
 STEPS = 200_000
@@ -24,7 +24,7 @@ LOG_INTERVAL_STEPS = 10_000
 EVAL_EPS = 2048#32 
     # very number of eval eps for maze env since high variance due to random starting position
 
-hyperparameters = tabular_q.Hyperparameters(
+hyperparameters = tabular_q_learning.Hyperparameters(
     discount_rate = 0.95,
     learning_rate = 0.1,
 
@@ -38,7 +38,7 @@ hyperparameters = tabular_q.Hyperparameters(
     target_update_interval = 100,
 )
 
-algo = tabular_q.TabularQ(VmapWrapper(env), hyperparameters=hyperparameters)
+algo = tabular_q_learning.TabularQLearning(VmapWrapper(env), hyperparameters=hyperparameters)
 
 training_state = algo.init_training_state(rngs)
 train = nnx.jit(algo.train, static_argnames=('steps',))
@@ -61,6 +61,7 @@ while training_state.steps < STEPS:
     print("Metrics: " + " ".join([ f"{key}={val}" for key, val in metrics.items() ]))
 
     # eval
+    training_state.actor.eval() # make greedy instead of epsilon-greedy
     returns, lengths = evaluate(rngs, training_state.actor)
 
     print(f"Episode Return: mean={jnp.mean(returns)} std={jnp.std(returns, ddof=1)}")
@@ -68,5 +69,5 @@ while training_state.steps < STEPS:
 
     print()
 
-print(training_state.policy_q_func.q_table_values.values)
-print(env.visualize_q_table(jnp.moveaxis(training_state.policy_q_func.q_table_values.values, 0, 2)))
+print(training_state.policy_q_func.q_table_values.value)
+print(env.visualize_q_table(jnp.moveaxis(training_state.policy_q_func.q_table_values.value, 0, 2)))

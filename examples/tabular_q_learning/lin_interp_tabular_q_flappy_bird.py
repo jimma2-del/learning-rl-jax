@@ -1,5 +1,7 @@
 import time
 
+import numpy as np
+
 import jax
 from jax.typing import ArrayLike
 import chex
@@ -17,8 +19,7 @@ from core.envs.base import Space
 
 from core.envs.utils import evaluate_episodes
 
-from core.algos import linearly_interpolated_tabular_q
-from core.utils import LinearlyInterpolatedTable
+from core.algos import tabular_q_learning
 
 DT = 0.1
 env = FlappyBirdEnv(DT)
@@ -40,26 +41,24 @@ env = FlappyBirdWrapper(env)
 
 ### TRAIN ###
 
-# q_table = LinearlyInterpolatedTable(
-#     min=( 0,  -600, -60,  175, 300, 175 ), 
-#     max=( 800, 1500, 300, 625, 660, 625 ), 
-#     step=( 25, 100,   30,  25,  30,  25 )
-#     #step=( 5,  50,   15,  5,   15,  5 )
-# ) # bird_pos_y, bird_vel_y, pipe1_pos_x, pipe1_pos_y, pipe2_pos_x, pipe2_pos_y
+# bird_pos_y, bird_vel_y, pipe1_pos_x, pipe1_pos_y, pipe2_pos_x, pipe2_pos_y
+# low  = (   0, -600, -60, 175, 300, 175 )
+# high = ( 800, 1500, 300, 625, 660, 625 ) 
+# res  = (  25,  100,  30,  25,  30,  25 )
+# #res  = (   5,   50,  15,   5,  15,   5 )
 
-q_table = LinearlyInterpolatedTable(
-    min=( -600, -625 ), 
-    max=( 1500,  625 ), 
-    step=(  50,    5 )
-) # bird_vel_y, pipe_dy
+# bird_vel_y, pipe_dy
+low  = (-600, -625)
+high = (1500,  625)
+res  = (  50,    5)
 
-rngs = nnx.Rngs(0, params=1, env=2, actions=3, transitions=4)
+rngs = nnx.Rngs(0, params=10, env=20, actions=30, transitions=40)
 
 STEPS = 2_000_000
 LOG_INTERVAL_STEPS = 200_000
 EVAL_EPS = 32
 
-hyperparameters = linearly_interpolated_tabular_q.Hyperparameters(
+hyperparameters = tabular_q_learning.Hyperparameters(
     discount_rate = 0.95,
     learning_rate = 0.1,
 
@@ -73,16 +72,17 @@ hyperparameters = linearly_interpolated_tabular_q.Hyperparameters(
     target_update_interval = 1000,
 )
 
-algo = linearly_interpolated_tabular_q.LinearlyInterpolatedTabularQ(VmapWrapper(env), q_table, hyperparameters)
-
-training_state = algo.init_training_state(rngs)
+algo = tabular_q_learning.TabularQLearning(VmapWrapper(env), hyperparameters)
 train = nnx.jit(algo.train, static_argnames=('steps',))
 
+q_func = tabular_q_learning.LinInterpTabularQFunc(
+    algo.num_actions, Space(np.array(low), np.array(high)), np.array(res))
+training_state = algo.init_training_state(rngs, q_func)
+
 @nnx.jit
-def evaluate(rngs, policy):
+def evaluate(rngs, actor):
     return evaluate_episodes(
-        rngs, VmapWrapper(env), 
-        nnx.vmap(lambda obs, rngs: algo.get_action(rngs, policy, obs)), 
+        rngs, VmapWrapper(env), actor, 
         EVAL_EPS, hyperparameters.n_envs
     )
 
@@ -97,7 +97,8 @@ while training_state.steps < STEPS:
     print("Metrics: " + " ".join([ f"{key}={val}" for key, val in metrics.items() ]))
 
     # eval
-    returns, lengths = evaluate(rngs, training_state.policy)
+    training_state.actor.eval() # make greedy instead of epsilon-greedy
+    returns, lengths = evaluate(rngs, training_state.actor)
 
     print(f"Episode Return: mean={jnp.mean(returns)} std={jnp.std(returns, ddof=1)}")
     print(f"Episode Length: mean={jnp.mean(lengths)} std={jnp.std(lengths, ddof=1)}")
@@ -109,14 +110,10 @@ from core.envs.utils import visualize_pygame
 
 rngs = nnx.Rngs(0, params=1, env=5, actions=3, transitions=4)
 
-def actor(obs, rngs):
-    #print(jax.vmap(algo.q_table.get, in_axes=[0, None])(training_state.policy, obs))
-    return algo.get_action(rngs, training_state.policy, obs)
-
 FPS = round(1/DT)
 
 visualize_pygame(
-    rngs, env, actor, 
+    rngs, env, training_state.actor, 
     fps=FPS, 
     verbose=False
 )

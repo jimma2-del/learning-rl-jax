@@ -22,7 +22,7 @@ LOG_INTERVAL = 1000
 SEED = 2
 key = random.key(SEED)
 
-env = GridworldEnv.default_map("general")
+env = GridworldEnv.built_in_map("general")
 
 cur_state_replay_buffer = CircularBufferNP(np.zeros((REPLAY_BUFFER_SIZE, *env.observation_space.low.shape), dtype="int32"))
 next_state_replay_buffer = CircularBufferNP(np.zeros((REPLAY_BUFFER_SIZE, *env.observation_space.low.shape), dtype="int32"))

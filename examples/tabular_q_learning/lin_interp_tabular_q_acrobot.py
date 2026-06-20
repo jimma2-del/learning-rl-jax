@@ -1,5 +1,7 @@
 import time
 
+import numpy as np
+
 import jax
 import jax.numpy as jnp
 
@@ -13,8 +15,7 @@ from core.envs.wrappers import Wrapper, VmapWrapper
 
 from core.envs.utils import evaluate_episodes
 
-from core.algos import linearly_interpolated_tabular_q
-from core.utils import LinearlyInterpolatedTable
+from core.algos import tabular_q_learning
 
 #jax.config.update("jax_log_compiles", True)
 
@@ -63,54 +64,43 @@ class AcrobotWrapper(Wrapper):
 env = AcrobotWrapper(env)
 
 ### TRAIN ###
-Q_TABLE_GRIDPOINTS_PER_AXIS = 10
+# Q_TABLE_GRIDPOINTS_PER_AXIS = 10
 
-# q_table = LinearlyInterpolatedTable(
-#     min=env.observation_space.low, 
-#     max=env.observation_space.high, 
-#     step=(env.observation_space.high - env.observation_space.low) / Q_TABLE_GRIDPOINTS_PER_AXIS
-# )
+# low  = env.observation_space.low
+# high = env.observation_space.high
+# res  = (env.observation_space.high - env.observation_space.low) / Q_TABLE_GRIDPOINTS_PER_AXIS
 
 # ACROBOT
-# q_table = LinearlyInterpolatedTable(
-#     min=(-1, -1, -1, -1, -13, -29), 
-#     max=(1, 1, 1, 1, 13, 29), 
-#     step=(0.2, 0.2, 0.2, 0.2, 2, 2)
-# )
-# q_table = LinearlyInterpolatedTable(
-#     min=(-3.2, -3.2, -13, -29), 
-#     max=(3.2, 3.2, 13, 29), 
-#     step=(0.4, 0.4, 2, 4)
-# )
+# low  = ( -1,  -1,  -1,  -1, -13, -29)
+# high = (  1,   1,   1,   1,  13,  29)
+# res  = (0.2, 0.2, 0.2, 0.2,   2,   2)
 
-q_table = LinearlyInterpolatedTable(
-    min=(-3.2, -3.2, -6, -15), 
-    max=(3.2, 3.2, 6, 15), 
-    step=(0.2, 0.4, 0.25, 0.25)
-)
+# low  = (-3.2, -3.2, -13, -29)
+# high = ( 3.2,  3.2,  13,  29)
+# res  = ( 0.4,  0.4,   2,   4)
+
+low  = (-3.2, -3.2,   -6,  -15)
+high = ( 3.2,  3.2,    6,   15)
+res  = ( 0.2,  0.4, 0.25, 0.25)
 
 # # testing performance on a smaller table
-# q_table = LinearlyInterpolatedTable(
-#     min=(-3.2, -3.2, -6, -15), 
-#     max=(3.2, 3.2, 6, 15), 
-#     step=(1.6, 1.6, 2, 2)
-# )
+# low  = (-3.2, -3.2, -6, -15)
+# high = ( 3.2,  3.2,  6,  15)
+# res  = ( 1.6,  1.6,  2,   2)
 
 # # CARTPOLE
-# q_table = LinearlyInterpolatedTable(
-#     min=(-2.4, -2.4, -0.2095, -2.4), 
-#     max=(2.4, 2.4, 0.2095, 2.4), 
-#     #step=(0.1, 0.1, 0.005, 0.05)
-#     step=(0.2, 0.2, 0.02, 0.2)
-# )
+# low  = (-2.4, -2.4, -0.2095, -2.4)
+# high = ( 2.4,  2.4,  0.2095,  2.4)
+# #res  = ( 0.1,  0.1,   0.005, 0.05)
+# res  = ( 0.2,  0.2,    0.02,  0.2)
 
 rngs = nnx.Rngs(0, params=1, env=2, actions=3, transitions=4)
 
 STEPS = 100_000_000
-LOG_INTERVAL_STEPS = 10_000_000#10_000_000
+LOG_INTERVAL_STEPS = 10_000_000
 EVAL_EPS = 256
 
-hyperparameters = linearly_interpolated_tabular_q.Hyperparameters(
+hyperparameters = tabular_q_learning.Hyperparameters(
     discount_rate = 0.98,
     learning_rate = 0.1,
 
@@ -124,16 +114,17 @@ hyperparameters = linearly_interpolated_tabular_q.Hyperparameters(
     target_update_interval = 1024
 )
 
-algo = linearly_interpolated_tabular_q.LinearlyInterpolatedTabularQ(VmapWrapper(env), q_table, hyperparameters)
-
-training_state = algo.init_training_state(rngs)
+algo = tabular_q_learning.TabularQLearning(VmapWrapper(env), hyperparameters)
 train = nnx.jit(algo.train, static_argnames=('steps',))
 
+q_func = tabular_q_learning.LinInterpTabularQFunc(
+    algo.num_actions, Space(np.array(low), np.array(high)), np.array(res))
+training_state = algo.init_training_state(rngs, q_func)
+
 @nnx.jit
-def evaluate(rngs, policy):
+def evaluate(rngs, actor):
     return evaluate_episodes(
-        rngs, VmapWrapper(env), 
-        nnx.vmap(lambda obs, rngs: algo.get_action(rngs, policy, obs)), 
+        rngs, VmapWrapper(env), actor, 
         EVAL_EPS, hyperparameters.n_envs
     )
 
@@ -148,7 +139,8 @@ while training_state.steps < STEPS:
     print("Metrics: " + " ".join([ f"{key}={val}" for key, val in metrics.items() ]))
 
     # eval
-    returns, lengths = evaluate(rngs, training_state.policy)
+    training_state.actor.eval() # make greedy instead of epsilon-greedy
+    returns, lengths = evaluate(rngs, training_state.actor)
 
     print(f"Episode Return: mean={jnp.mean(returns)} std={jnp.std(returns, ddof=1)}")
     print(f"Episode Length: mean={jnp.mean(lengths)} std={jnp.std(lengths, ddof=1)}")
@@ -167,10 +159,7 @@ from core.envs.utils import rollout_episode, visualize_pygame
 
 rngs = nnx.Rngs(0, params=1, env=5, actions=3, transitions=4)
 
-def actor(obs, rngs):
-    return algo.get_greedy_action(rngs, training_state.policy, obs)
-
-VISUALIZE_METHOD = "gif"
+VISUALIZE_METHOD = 'gif'
 
 if VISUALIZE_METHOD == 'gif':
     NUM_EPISODES = 1
@@ -179,7 +168,7 @@ if VISUALIZE_METHOD == 'gif':
     comb_cum_rewards = jnp.array((0,))
 
     for _ in range(NUM_EPISODES):
-        timesteps, state, info = rollout_episode(rngs, env, actor)
+        timesteps, state, info = rollout_episode(rngs, env, training_state.actor)
         cum_rewards = jnp.cumsum(timesteps.reward)
         steps = len(timesteps.reward)
 
@@ -189,15 +178,15 @@ if VISUALIZE_METHOD == 'gif':
         comb_cum_rewards = jnp.concatenate((comb_cum_rewards, jnp.array((0,)), cum_rewards), axis=0)
 
     vis = Visualizer(gymnax_env, gymnax_env_params, comb_states, comb_cum_rewards)
-    vis.animate("./examples/lin_interp_tabular_q/lin_interp_tabular_q_acrobot_anim2.gif")
-    #vis.animate("./examples/lin_interp_tabular_q/lin_interp_tabular_q_cartpole_anim.gif")
+    vis.animate("./examples/tabular_q_learning/visualizations/lin_interp_tabular_q_acrobot_anim2.gif")
+    #vis.animate("./examples/tabular_q_learning/visualizations/lin_interp_tabular_q_cartpole_anim.gif")
     #vis.animate(save_fname=None, view=True)
 
 elif VISUALIZE_METHOD == 'pygame':
     FPS = 10
 
     visualize_pygame(
-        rngs, env, actor, 
+        rngs, env, training_state.actor, 
         fps=FPS, 
         render_func=lambda state, action: render_acrobot(None, gymnax_env_params, state),
         verbose=False

@@ -30,7 +30,7 @@ class GridworldEnv(Environment[State, Array, ArrayLike, str]):
     ACTIONS = jnp.asarray(( (-1,0), (1,0), (0,-1), (0,1) ), dtype=jnp.int32)
 
     @classmethod
-    def default_map(cls, map_name: str, max_steps: int = 50):
+    def built_in_map(cls, map_name: str, max_steps: int = 50):
         try:
             with open(get_map_path(map_name + ".txt"), "r") as f:
                 map_data = f.read()

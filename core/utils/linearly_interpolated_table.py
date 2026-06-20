@@ -1,14 +1,18 @@
+import numpy as np
+
 import jax.numpy as jnp
 from jax.typing import ArrayLike
 import jax
-import functools
+
+from core.utils.batch_utils import batched_index, shape_matches_excluding_batch_dims
 
 class LinearlyInterpolatedTable:
+    """Supports batched positions -- getting/setting values at multiple positions at once."""
 
     def __init__(self, min: ArrayLike, max: ArrayLike, step: ArrayLike):
-        self.min = jnp.asarray(min)
-        self.max = jnp.asarray(max)
-        self.step = jnp.asarray(step)
+        self.min = np.asarray(min)
+        self.max = np.asarray(max)
+        self.step = np.asarray(step)
 
         assert self.min.shape == self.max.shape and self.min.shape == self.step.shape
 
@@ -19,63 +23,53 @@ class LinearlyInterpolatedTable:
                 int((max[i] - min[i]) // step[i] + 1 + ((max[i] - min[i]) % step[i] != 0))) 
                 # add an extra if not perfectly ending on max
 
-    #@functools.partial(jax.jit, static_argnames=('self'))
     def init(self, init: ArrayLike) -> jax.Array:
         return jnp.full(self.shape, init, dtype=jnp.float32)
 
-    #@functools.partial(jax.jit, static_argnames=('self'))
     def get(self, data: jax.Array, pos: ArrayLike) -> jax.Array:
-        assert data.shape == self.shape
-        assert len(pos) == len(self.shape)
+        assert shape_matches_excluding_batch_dims(self.shape, data.shape)
+        assert pos.shape[-1] == len(self.shape)
 
         lower_indices, offsets = self.get_lower_indices_and_offsets(pos)
         corner_indices, weights = self.get_corner_indices_and_weights(lower_indices, offsets)
 
-        result = 0
+        # move corner axis to the front
+        corner_indices = jnp.moveaxis(corner_indices, -2, 0)
+        weights = jnp.moveaxis(weights, -1, 0)
 
-        for corner, weight in zip(corner_indices, weights):
-            result += data[corner] * weight
+        return jnp.sum(data[batched_index(data, corner_indices)] * weights, axis=0)
 
-        return result
-
-    #@functools.partial(jax.jit, static_argnames=('self'))
-    def adjust_get_corner_adjustments(
+    def get_corner_adjustments(
         self, data: jax.Array, pos: ArrayLike, adjust_amount: ArrayLike
     ) -> tuple[jax.Array, jax.Array]:
-        assert data.shape == self.shape
-        assert len(pos) == len(self.shape)
+        """Returns: (*batch_dims, corner_dim, pos_dim), (*batch_dims, corner_dim)."""
+        assert shape_matches_excluding_batch_dims(self.shape, data.shape)
+        assert pos.shape[-1] == len(self.shape)
 
         lower_indices, offsets = self.get_lower_indices_and_offsets(pos)
         corner_indices, weights = self.get_corner_indices_and_weights(lower_indices, offsets)
-        
-        corner_indices = jnp.array(corner_indices)
-        weights = jnp.array(weights)
 
-        sum_squared_weights = jnp.sum(weights**2)
-        adjust_amounts = weights * adjust_amount / sum_squared_weights
+        sum_squared_weights = jnp.sum(weights**2, axis=-1)
+        adjust_amounts = weights * adjust_amount[..., None] / sum_squared_weights[..., None]
 
         return corner_indices, adjust_amounts
 
-    #@functools.partial(jax.jit, static_argnames=('self'))
-    def set_get_corner_adjustments(
-        self, data: jax.Array, pos: ArrayLike, value: ArrayLike
-    ) -> tuple[jax.Array, jax.Array]:
-        cur_value = self.get(data, pos)
-        return self.adjust_get_corner_adjustments(data, pos, value - cur_value)
-
-    #@functools.partial(jax.jit, static_argnames=('self'))
     def adjust(self, data: jax.Array, pos: ArrayLike, adjust_amount: ArrayLike) -> jax.Array:
-        corner_indices, adjust_amounts = self.adjust_get_corner_adjustments(data, pos, adjust_amount)
-        return data.at[tuple(corner_indices.T)].add(adjust_amounts)
+        corner_indices, adjust_amounts = self.get_corner_adjustments(data, pos, adjust_amount)
 
-    #@functools.partial(jax.jit, static_argnames=('self'))
+        # move corner axis to the front
+        corner_indices = jnp.moveaxis(corner_indices, -2, 0)
+        adjust_amounts = jnp.moveaxis(adjust_amounts, -1, 0)
+
+        return data.at[batched_index(data, corner_indices)].add(adjust_amounts)
+
     def set(self, data: jax.Array, pos: ArrayLike, value: ArrayLike) -> jax.Array:
         cur_value = self.get(data, pos)
         return self.adjust(data, pos, value - cur_value)
     
-    #@functools.partial(jax.jit, static_argnames=('self'))
-    def get_lower_indices_and_offsets(self, pos: ArrayLike):
-        assert len(pos) == len(self.shape)
+    def get_lower_indices_and_offsets(self, pos: ArrayLike) -> tuple[jax.Array, jax.Array]:
+        """Returns: (*batch_dims, pos_dim), (*batch_dims, pos_dim)."""
+        assert pos.shape[-1] == len(self.shape)
 
         indices = ((pos - self.min) // self.step).astype(int)
         indices = jnp.clip(indices, 0, jnp.array(self.shape) - 2)
@@ -86,21 +80,33 @@ class LinearlyInterpolatedTable:
 
         return indices, offsets
 
-    def get_corner_indices_and_weights(self, lower_indices, offsets, chosen_indices=(), weight=1):
-        assert len(offsets) == len(self.shape)
-        
-        if len(chosen_indices) == len(self.shape):
-            return [ chosen_indices ], [ weight ]
-        
-        indices_list1, weights_list1 = self.get_corner_indices_and_weights(lower_indices, offsets, 
-            (*chosen_indices, lower_indices[len(chosen_indices)]), weight * (1 - offsets[len(chosen_indices)]))
-        indices_list2, weights_list2 = self.get_corner_indices_and_weights(lower_indices, offsets, 
-            (*chosen_indices, lower_indices[len(chosen_indices)] + 1), weight * offsets[len(chosen_indices)])
+    def get_corner_indices_and_weights(self, lower_indices: ArrayLike, offsets: ArrayLike, chosen_indices=None, weight=None):
+        """Args: (*batch_dims, pos_dim), (*batch_dims, pos_dim), (*batch_dims, pos_dim), (*batch_dims).
+        Returns: (*batch_dims, corner_dim, pos_dim), (*batch_dims, corner_dim)."""
 
-        return indices_list1 + indices_list2, weights_list1 + weights_list2
+        assert offsets.shape[-1] == len(self.shape)
+
+        batch_dims = lower_indices.shape[:-1]
+        if chosen_indices is None: chosen_indices = jnp.zeros((*batch_dims, 0), dtype=jnp.int32)
+        if weight is None: weight = jnp.ones(batch_dims, dtype=jnp.float32)
+        
+        n_indices_chosen = chosen_indices.shape[-1]
+        if n_indices_chosen == len(self.shape):
+            return chosen_indices[..., None, :], weight[..., None]
+
+        next_lower_i = lower_indices[..., n_indices_chosen, None]
+        next_offset = offsets[..., n_indices_chosen]
+        
+        indices1, weights1 = self.get_corner_indices_and_weights(lower_indices, offsets, 
+            jnp.concatenate((chosen_indices, next_lower_i), axis=-1), weight * (1-next_offset))
+        indices2, weights2 = self.get_corner_indices_and_weights(lower_indices, offsets, 
+            jnp.concatenate((chosen_indices, next_lower_i + 1), axis=-1), weight * next_offset)
+
+        return jnp.concatenate((indices1, indices2), axis=-2), jnp.concatenate((weights1, weights2), axis=-1)
 
 if __name__ == "__main__":
-    table = LinearlyInterpolatedTable((0,1), (9,11), (2,3))
+    #table = LinearlyInterpolatedTable((0,1), (9,11), (2,3))
+    table = LinearlyInterpolatedTable((0,1), (9,11), (0.5,0.5))
     table_state = table.init(1)
 
     print(table_state)
@@ -118,6 +124,21 @@ if __name__ == "__main__":
 
         if abs(table.get(table_state, coords) - set_val) > 0.001:
             print(set_val, table.get(table_state, coords))
+
+    print(table_state)
+
+    BATCH_DIMS = (10, 3)
+    ADJUST_RATE = 1/np.prod(BATCH_DIMS)
+
+    key, subkey1, subkey2, = jax.random.split(key, 3)
+    coords = jax.random.uniform(subkey1, (*BATCH_DIMS, 2), minval=jnp.array((2,2)), maxval=jnp.array((8,8)))
+    correct_vals = jax.random.uniform(subkey2, BATCH_DIMS, minval=-10, maxval=10)
+
+    for i in range(1000):
+        table_state = table.adjust(table_state, coords, (correct_vals - table.get(table_state, coords)) * ADJUST_RATE)
+        print(jnp.sum((table.get(table_state, coords) - correct_vals) ** 2))
+
+    print(table.get(table_state, coords) - correct_vals)
 
     print(table_state)
 

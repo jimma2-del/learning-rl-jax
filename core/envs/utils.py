@@ -91,7 +91,7 @@ def evaluate_episodes(rngs: nnx.Rngs,
     env_state, info = env.reset(jax.random.split(rngs.env(), n_envs))
 
     eps_done, rngs, env_state, cur_return, eps_returns, cur_len, eps_lens = nnx.while_loop(
-        lambda input: jnp.all(input[0] < eps_per_env), 
+        lambda input: jnp.any(input[0] < eps_per_env), 
         batched_env_step, 
         (
             jnp.zeros(n_envs, dtype=jnp.int32), 
