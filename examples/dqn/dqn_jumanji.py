@@ -55,7 +55,7 @@ EVAL_EPS = 32
 hyperparameters = dqn.Hyperparameters(
     learning_rate = 2.5e-4,
     train_freq = 4,
-    n_envs = 64,#32,
+    n_envs = 32,
     batch_size = 32,
     epsilon = schedules.linear_schedule(1, 0.05, 0.1*STEPS),
     replay_buffer_size = 100_000
@@ -67,10 +67,9 @@ training_state = algo.init_training_state(rngs)
 train = nnx.jit(algo.train, static_argnames=('steps',))
 
 @nnx.jit
-def evaluate(rngs, policy):
+def evaluate(rngs, actor):
     return evaluate_episodes(
-        rngs, VmapWrapper(env), 
-        nnx.vmap(lambda obs, rngs: algo.get_action(rngs, policy, obs)),
+        rngs, VmapWrapper(env), actor, 
         EVAL_EPS, hyperparameters.n_envs
     )
 
@@ -84,15 +83,14 @@ while training_state.steps < STEPS:
     print(f"Completed steps={training_state.steps}; sps={sps:,.1f}")
     print("Metrics: " + " ".join([ f"{key}={val}" for key, val in metrics.items() ]))
 
-    # eval
-    returns, lengths = evaluate(rngs, training_state.policy)
+    #eval
+    training_state.actor.eval() # make greedy instead of epsilon-greedy
+    returns, lengths = evaluate(rngs, training_state.actor)
 
     print(f"Episode Return: mean={jnp.mean(returns)} std={jnp.std(returns, ddof=1)}")
     print(f"Episode Length: mean={jnp.mean(lengths)} std={jnp.std(lengths, ddof=1)}")
 
     print()
-
-q_net = training_state.policy
 
 ### ENJOY ###
 
@@ -103,14 +101,10 @@ ANIMATE_LIMIT = 300
 
 rngs = nnx.Rngs(0, params=1, env=2, actions=3, transitions=4)
 
-#@nnx.jit
-def actor(obs, rngs):
-    return algo.get_action(rngs, q_net, obs)
-
 comb_states = []
 
 for _ in range(NUM_EPISODES):
-    timesteps, state, info = rollout_episode(rngs, env, actor)
+    timesteps, state, info = rollout_episode(rngs, env, training_state.actor)
     eps_return = sum(timesteps.reward)
     steps = len(timesteps.reward)
 
@@ -118,4 +112,4 @@ for _ in range(NUM_EPISODES):
 
     comb_states += [ jax.tree.map(lambda x: x[i], timesteps.state) for i in range(steps + 1) ]
 
-jumanji_env.animate(comb_states[:ANIMATE_LIMIT], 100, f"./examples/dqn/dqn_{ENV_NAME}_animation.gif")
+jumanji_env.animate(comb_states[:ANIMATE_LIMIT], 100, f"./examples/dqn/visualizations/dqn_{ENV_NAME}_animation.gif")

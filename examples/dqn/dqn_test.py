@@ -26,7 +26,7 @@ rngs = nnx.Rngs(0, params=1, env=2, actions=3, transitions=4)
 
 # Gymnax
 
-gymnax_env = MountainCar()#Acrobot()#MinBreakout()#CartPole()
+gymnax_env = Acrobot()#MinBreakout()#CartPole()
 gymnax_env_params = gymnax_env.default_params
 
 env = GymnaxWrapper(gymnax_env)
@@ -58,10 +58,9 @@ training_state = algo.init_training_state(rngs)
 train = nnx.jit(algo.train, static_argnames=('steps',))
 
 @nnx.jit
-def evaluate(rngs, policy):
+def evaluate(rngs, actor):
     return evaluate_episodes(
-        rngs, VmapWrapper(env), 
-        nnx.vmap(lambda obs, rngs: algo.get_action(rngs, policy, obs)), 
+        rngs, VmapWrapper(env), actor, 
         EVAL_EPS, hyperparameters.n_envs
     )
 
@@ -76,24 +75,22 @@ while training_state.steps < STEPS:
     print("Metrics: " + " ".join([ f"{key}={val}" for key, val in metrics.items() ]))
 
     #eval
-    returns, lengths = evaluate(rngs, training_state.policy)
+    training_state.actor.eval() # make greedy instead of epsilon-greedy
+    returns, lengths = evaluate(rngs, training_state.actor)
 
     print(f"Episode Return: mean={jnp.mean(returns)} std={jnp.std(returns, ddof=1)}")
     print(f"Episode Length: mean={jnp.mean(lengths)} std={jnp.std(lengths, ddof=1)}")
 
     print()
 
-q_net = training_state.policy
-
 # test save
-#import orbax.checkpoint as ocp
+import orbax.checkpoint as ocp
 
-# SAVE_PATH = path.abspath('examples/dqn/_tmp/flappybird')
+SAVE_PATH = path.abspath('examples/dqn/_tmp/acrobot')
 
-# _, state = nnx.split(q_net)
-# checkpointer_save = ocp.StandardCheckpointer()
-# checkpointer_save.save(SAVE_PATH, state)
-
+_, state = nnx.split(training_state.actor)
+checkpointer_save = ocp.StandardCheckpointer()
+checkpointer_save.save(SAVE_PATH, state)
 
 ### ENJOY ###
 
@@ -104,14 +101,11 @@ from gymnax.visualize.vis_gym import render_acrobot
 
 rngs = nnx.Rngs(0, params=1, env=5, actions=3, transitions=4)
 
-def actor(obs, rngs):
-    return algo.get_action(rngs, q_net, obs)
-
 MAX_STEPS = 500
 
 EVAL_EPS = 256
-returns, lengths = nnx.jit(evaluate_episodes, static_argnums=(1, 2, 3, 4, 5))(
-    rngs, VmapWrapper(env), nnx.vmap(actor), EVAL_EPS, hyperparameters.n_envs)
+returns, lengths = nnx.jit(evaluate_episodes, static_argnums=(1, 3, 4))(
+    rngs, VmapWrapper(env), training_state.actor, EVAL_EPS, hyperparameters.n_envs)
 print(returns)
 print(lengths)
 print(f"Episode Return: mean={jnp.mean(returns)} std={jnp.std(returns, ddof=1)}")
@@ -127,7 +121,7 @@ if VISUALIZE_METHOD == 'gif':
     comb_cum_rewards = jnp.array((0,))
 
     for _ in range(NUM_EPISODES):
-        timesteps, state, info = rollout_episode(rngs, EpisodeStepCountWrapper(env, MAX_STEPS), actor)
+        timesteps, state, info = rollout_episode(rngs, EpisodeStepCountWrapper(env, MAX_STEPS), training_state.actor)
         cum_rewards = jnp.cumsum(timesteps.reward)
         steps = len(timesteps.reward)
 
@@ -145,7 +139,7 @@ elif VISUALIZE_METHOD == 'pygame':
     FPS = 10
 
     visualize_pygame(
-        rngs, env, actor, 
+        rngs, env, training_state.actor, 
         fps=FPS, 
         render_func=lambda state, action: render_acrobot(None, gymnax_env_params, state),
         episode_steps_limit=MAX_STEPS,
@@ -154,7 +148,7 @@ elif VISUALIZE_METHOD == 'pygame':
 
     ## Flappy Bird
     # visualize_pygame(
-    #     rngs, env, actor, 
+    #     rngs, env, training_state.actor, 
     #     fps=round(1/DT), 
     #     verbose=False
     # )

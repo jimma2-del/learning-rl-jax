@@ -21,15 +21,15 @@ from core.algos import dqn
 
 ## Gymnax
 
-# gymnax_env = Acrobot()#MinBreakout()#CartPole()
-# gymnax_env_params = gymnax_env.default_params
+gymnax_env = Acrobot()#MinBreakout()#CartPole()
+gymnax_env_params = gymnax_env.default_params
 
-#env = GymnaxWrapper(gymnax_env)
+env = GymnaxWrapper(gymnax_env)
 
 ## Flappy Bird
 
-DT = 0.1
-env = FlappyBirdEnv(DT)
+# DT = 0.1
+# env = FlappyBirdEnv(DT)
 
 #env = ObsRangeNormalizeWrapper(env)
 
@@ -37,15 +37,15 @@ algo = dqn.DQN(VmapWrapper(env))
 
 import orbax.checkpoint as ocp
 
-SAVE_PATH = path.abspath('examples/dqn/_tmp/flappybird')
+SAVE_PATH = path.abspath('examples/dqn/_tmp/acrobot')
 
 # test load
-abstract_model = nnx.eval_shape(lambda: algo.create_default_policy(rngs=nnx.Rngs(0)))
+abstract_model = nnx.eval_shape(lambda: algo.make_actor(rngs=nnx.Rngs(0)))
 graphdef, abstract_state = nnx.split(abstract_model)
 checkpointer_load = ocp.StandardCheckpointer()
 state_restored = checkpointer_load.restore(SAVE_PATH, abstract_state)
 
-q_net = nnx.merge(graphdef, state_restored)
+actor = nnx.merge(graphdef, state_restored)
 
 ### ENJOY ###
 
@@ -56,22 +56,19 @@ from gymnax.visualize.vis_gym import render_acrobot
 
 rngs = nnx.Rngs(0, params=1, env=5, actions=3, transitions=4)
 
-def actor(obs, rngs):
-    return algo.get_action(rngs, q_net, obs)
-
 N_ENVS = 32
 
 MAX_STEPS = 500
 
 EVAL_EPS = 256
-returns, lengths = nnx.jit(evaluate_episodes, static_argnums=(1, 2, 3, 4, 5))(
-    rngs, VmapWrapper(env), nnx.vmap(actor), EVAL_EPS, n_envs=N_ENVS)
+returns, lengths = nnx.jit(evaluate_episodes, static_argnums=(1, 3, 4))(
+    rngs, VmapWrapper(env), actor, EVAL_EPS, n_envs=N_ENVS)
 print(returns)
 print(lengths)
 print(f"Episode Return: mean={jnp.mean(returns)} std={jnp.std(returns, ddof=1)}")
 print(f"Episode Length: mean={jnp.mean(lengths)} std={jnp.std(lengths, ddof=1)}")
 
-VISUALIZE_METHOD = "pygame"
+VISUALIZE_METHOD = 'pygame'
 rngs = nnx.Rngs(0, params=1, env=5, actions=3, transitions=4)
 
 if VISUALIZE_METHOD == 'gif':
@@ -96,21 +93,21 @@ if VISUALIZE_METHOD == 'gif':
 
 elif VISUALIZE_METHOD == 'pygame':
     # Acrobot
-    # FPS = 10
-
-    # visualize_pygame(
-    #     rngs, env, actor, 
-    #     fps=FPS, 
-    #     render_func=lambda state, action: render_acrobot(None, gymnax_env_params, state),
-    #     episode_steps_limit=MAX_STEPS,
-    #     verbose=False
-    # )
-
-    ## Flappy Bird
-    FPS = round(1/DT)
+    FPS = 10
 
     visualize_pygame(
         rngs, env, actor, 
         fps=FPS, 
+        render_func=lambda state, action: render_acrobot(None, gymnax_env_params, state),
+        episode_steps_limit=MAX_STEPS,
         verbose=False
     )
+
+    ## Flappy Bird
+    # FPS = round(1/DT)
+
+    # visualize_pygame(
+    #     rngs, env, actor, 
+    #     fps=FPS, 
+    #     verbose=False
+    # )

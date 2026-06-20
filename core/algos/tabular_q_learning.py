@@ -311,16 +311,13 @@ class TabularQLearning(Generic[TEnvState, TEnvObs]):
             target_q_func = training_state.target_q_func
             
             ## sample transitions from environment ##
-            actor.epsilon = try_call(self.hyperparameters.epsilon, steps)
+            actor.epsilon.value = try_call(self.hyperparameters.epsilon, steps)
 
             actor.eval()
             actor.deterministic = False
 
             transitions, env_states = self.rollout_transitions(rngs, 
-                actor,
-                steps_per_env_per_iter,
-                env_states,
-            )
+                actor, steps_per_env_per_iter, env_states)
 
             replay_buffer_state = self.replay_buffer.insert(replay_buffer_state, transitions)
 

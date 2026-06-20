@@ -82,7 +82,7 @@ class GreedyQActor(Generic[TEnvObs], nnx.Module):
         self.num_actions = int(num_actions)
 
         self.deterministic = deterministic
-        self.epsilon = jnp.array(epsilon, dtype=jnp.float32)
+        self.epsilon = nnx.Variable(jnp.array(epsilon, dtype=jnp.float32))
 
     def __call__(self, obs: TEnvObs, rngs: nnx.Rngs | None = None,
             deterministic: bool | None = None, epsilon: ArrayLike | None = None) -> ArrayLike:
@@ -93,7 +93,7 @@ class GreedyQActor(Generic[TEnvObs], nnx.Module):
         """
 
         if deterministic is None: deterministic = self.deterministic
-        if epsilon is None: epsilon = self.epsilon
+        if epsilon is None: epsilon = self.epsilon.value
 
         greedy_action = self.greedy_action(obs, rngs=rngs)
         if deterministic: return greedy_action
