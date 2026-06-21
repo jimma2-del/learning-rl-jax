@@ -10,7 +10,7 @@ from brax.envs import create
 from core.envs.brax import BraxWrapper
 
 from core.envs.utils import rollout_episode, visualize_pygame, evaluate_episodes
-from core.envs.wrappers import JitWrapper, VmapWrapper
+from core.envs.wrappers import JitWrapper, VmapWrapper, PrecomputedResetsPoolWrapper
 
 from brax.io import html
 
@@ -27,10 +27,14 @@ brax_env = create(ENV_NAME, auto_reset=False, batch_size=None, episode_length=ST
 
 env = BraxWrapper(brax_env)
 
+RESETS_POOL_SIZE = 32768
+resets_pool_states_infos = jax.vmap(env.reset)(jax.random.split(rngs.env(), RESETS_POOL_SIZE))
+env = PrecomputedResetsPoolWrapper(env, resets_pool_states_infos)
+
 ### TRAIN ###
 
-STEPS = 60_000_000#1_000_000
-LOG_INTERVAL_STEPS = 10_000_000#100_000
+STEPS = 10_000_000#1_000_000
+LOG_INTERVAL_STEPS = 1_000_000#100_000
 
 MAX_STEPS = 500
 
@@ -39,10 +43,10 @@ N_ENVS = 2048#256
 EVAL_N_ENVS = 2048#256
 
 hyperparameters = a2c.Hyperparameters(
-    learning_rate = 10e-4,#2.5e-4,#schedules.linear_schedule(4e-4, 1e-4, STEPS),
+    learning_rate = 2.5e-4,#schedules.linear_schedule(4e-4, 1e-4, STEPS),
     n_envs = N_ENVS,
     rollout_length = 5,
-    ent_coef = 0.001#schedules.linear_schedule(0.0015, 0.0001, STEPS)
+    ent_coef = 0.01,#schedules.linear_schedule(0.0015, 0.0001, STEPS)
 )
 
 algo = a2c.A2C(VmapWrapper(env), hyperparameters)
@@ -51,10 +55,9 @@ training_state = algo.init_training_state(rngs)
 train = nnx.jit(algo.train, static_argnames=('steps',))
 
 @nnx.jit
-def evaluate(rngs, policy):
+def evaluate(rngs, actor):
     return evaluate_episodes(
-        rngs, VmapWrapper(env), 
-        nnx.vmap(lambda obs, rngs: algo.get_action(rngs, policy, obs, deterministic=True)), 
+        rngs, VmapWrapper(env), actor, 
         EVAL_EPS, EVAL_N_ENVS
     )
 
@@ -69,7 +72,8 @@ while training_state.steps < STEPS:
     print("Metrics: " + " ".join([ f"{key}={val}" for key, val in metrics.items() ]))
 
     # eval
-    returns, lengths = evaluate(rngs, training_state.policy)
+    training_state.actor.eval() # make deterministic (use dist modes instead of sampling)
+    returns, lengths = evaluate(rngs, training_state.actor)
 
     print(f"Episode Return: mean={jnp.mean(returns)} std={jnp.std(returns, ddof=1)}")
     print(f"Episode Length: mean={jnp.mean(lengths)} std={jnp.std(lengths, ddof=1)}")
@@ -81,24 +85,20 @@ while training_state.steps < STEPS:
 
 # SAVE_PATH = path.abspath(f'examples/a2c/_tmp/{ENV_NAME}')
 
-# _, state = nnx.split(training_state.policy)
+# _, state = nnx.split(training_state.actor)
 # checkpointer_save = ocp.StandardCheckpointer()
 # checkpointer_save.save(SAVE_PATH, state)
 
 ## enjoy ##
 rngs = nnx.Rngs(0, params=1, env=5, actions=3)
 
-#@nnx.jit
-def actor(obs, rngs):
-    return env.action_space.sample(rngs.actions())
-    
 VISUALIZE_METHOD = "html"
 
 if VISUALIZE_METHOD == 'html':
     states = []
 
     for _ in range(NUM_EPISODES):
-        timesteps, state, info = rollout_episode(rngs, JitWrapper(env), actor)
+        timesteps, state, info = rollout_episode(rngs, JitWrapper(env), training_state.actor)
 
         eps_return = sum(timesteps.reward)
         steps = len(timesteps.reward)
@@ -113,7 +113,7 @@ if VISUALIZE_METHOD == 'html':
 
 elif VISUALIZE_METHOD == 'pygame':
     visualize_pygame(
-        rngs, JitWrapper(env), actor, 
+        rngs, JitWrapper(env), training_state.actor, 
         fps=1.0 / brax_env.dt, 
         verbose=False
     )

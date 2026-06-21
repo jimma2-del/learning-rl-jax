@@ -99,7 +99,6 @@ class ObsRangeNormalizeWrapper(
     Ignores features with both sides unbounded (-inf, inf), keeping the values unaltered.
         NOTE: Keep in mind when using this wrapper that unbounded observation features
         are very common; this wrapper may not be suitable for many environments.
-        Try `ObsRunningStatsNormalizeWrapper(env)` instead.
 
     NOTE: May convert discrete (np.integer) data types to continuous (np.floating).
     """

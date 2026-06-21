@@ -84,13 +84,13 @@ while training_state.steps < STEPS:
     print()
 
 # test save
-import orbax.checkpoint as ocp
+# import orbax.checkpoint as ocp
 
-SAVE_PATH = path.abspath('examples/dqn/_tmp/acrobot')
+# SAVE_PATH = path.abspath('examples/dqn/_tmp/acrobot')
 
-_, state = nnx.split(training_state.actor)
-checkpointer_save = ocp.StandardCheckpointer()
-checkpointer_save.save(SAVE_PATH, state)
+# _, state = nnx.split(training_state.actor)
+# checkpointer_save = ocp.StandardCheckpointer()
+# checkpointer_save.save(SAVE_PATH, state)
 
 ### ENJOY ###
 

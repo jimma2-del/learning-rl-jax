@@ -323,7 +323,7 @@ class TabularQLearning(Generic[TEnvState, TEnvObs]):
 
             steps += total_steps_per_iter
 
-            ## update policy ##
+            ## update q functions ##
             actor.train()
 
             def learn_step(policy_q_func: TabularQFunc, rngs: nnx.Rngs) \
@@ -348,7 +348,7 @@ class TabularQLearning(Generic[TEnvState, TEnvObs]):
                     / self.hyperparameters.batch_size # make "learning rate" independent of batch size
                 policy_q_func.adjust_table_value(sampled_transitions.obs, sampled_transitions.action, adjusts)
 
-                return policy_q_func, { 'critic_loss': loss }
+                return policy_q_func, { 'q_loss': loss }
 
             policy_q_func, metrics = nnx.scan(learn_step)(policy_q_func, rngs.fork(split=learn_steps_per_iter))
 

@@ -29,7 +29,7 @@ class PolicyWithoutRngs(Generic[TEnvObs, TEnvAction], Protocol):
     def __call__(self, obs: TEnvObs) -> TEnvAction: ...
 Policy: TypeAlias = PolicyWithoutRngs[TEnvObs, TEnvAction] | PolicyWithRngs[TEnvObs, TEnvAction]
 
-class ActionDistributionActor(Generic[TEnvObs, TEnvAction], nnx.Module):
+class StochasticPolicyActor(Generic[TEnvObs, TEnvAction], nnx.Module):
     """Actor which chooses actions by sampling from a distribution outputted by the policy."""
 
     def __init__(self, policy: Policy[TEnvObs, TEnvAction], action_space: Space[TEnvAction],
@@ -114,6 +114,12 @@ class GreedyQActor(Generic[TEnvObs], nnx.Module):
     def random_action(self, rngs: nnx.Rngs, shape: Sequence[int] = ()) -> ArrayLike:
         return jax.random.randint(rngs.actions(), shape=shape, minval=0, maxval=self.num_actions)
 
+class ValueFuncWithRngs(Generic[TEnvObs], Protocol):
+    def __call__(self, obs: TEnvObs, rngs: nnx.Rngs) -> jax.Array: ...
+class ValueFuncWithoutRngs(Generic[TEnvObs], Protocol):
+    def __call__(self, obs: TEnvObs) -> jax.Array: ...
+ValueFunc: TypeAlias = ValueFuncWithRngs[TEnvObs] | ValueFuncWithoutRngs[TEnvObs]
+
 """UNOFFICIAL Algo spec; not currently enforced, subject to change
 
 class Algo(Generic[TTrainingState, TActor (bound=core.env.utils.Actor), TEnvState, TEnvObs, TEnvAction]):
@@ -124,7 +130,6 @@ class Algo(Generic[TTrainingState, TActor (bound=core.env.utils.Actor), TEnvStat
 
     methods:
         __init__(env, *nonstandard params (eg. hyperparameters))
-        get_action(rngs, policy, obs, deterministic flag?, optional params) -> TEnvAction
         init_training_state(rngs, optional params (eg. network, replay buffer state, prefill steps)) -> TTrainingState
         train(rngs, training_state, steps) -> TTrainingState, metrics dict
 

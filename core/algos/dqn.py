@@ -14,12 +14,11 @@ import optax
 
 from core.utils import ReplayBuffer, ReplayBufferState
 from core.utils.func_utils import try_call, optionally_pass
-
 from core.utils.networks import MLP, FlattenAndProject
 
-from core.envs.base import Environment
 from core.algos.base import Scheduleable, GreedyQActor, DiscreteQFunc
 
+from core.envs.base import Environment
 from core.envs.wrappers import AutoResetWrapper
 from core.envs.utils import rollout, Actor
 
@@ -240,8 +239,8 @@ class DQN(Generic[TEnvState, TEnvObs]):
             optimizer.opt_state.hyperparams['learning_rate'].value \
                 = try_call(self.hyperparameters.learning_rate, steps)
 
-            ## update policy ##
-            actor.train()
+            ## update q functions ##
+            policy_q_func.train()
 
             def learn_step(carry: tuple[DiscreteQFunc, nnx.Optimizer], rngs: nnx.Rngs) \
                     -> tuple[tuple[DiscreteQFunc, nnx.Optimizer], dict[Any, Any]]:
@@ -271,7 +270,7 @@ class DQN(Generic[TEnvState, TEnvObs]):
                 loss, grads = loss_grad_func(policy_q_func, rngs)
                 optimizer.update(grads) 
 
-                return (policy_q_func, optimizer), { 'critic_loss': loss }
+                return (policy_q_func, optimizer), { 'q_loss': loss }
 
             (policy_q_func, optimizer), metrics = nnx.scan(learn_step)((policy_q_func, optimizer), 
                 rngs.fork(split=learn_steps_per_iter))
@@ -283,6 +282,7 @@ class DQN(Generic[TEnvState, TEnvObs]):
                 lambda policy_q_func, target_q_func: nnx.state(target_q_func),
                 policy_q_func, target_q_func
             ))
+            target_q_func.eval()
 
             return TrainingState(
                 steps=steps,
@@ -295,7 +295,11 @@ class DQN(Generic[TEnvState, TEnvObs]):
                 optimizer=optimizer
             ), jax.tree.map(lambda x: jnp.mean(x), metrics)
 
-        training_state.actor.train()
+        training_state.actor.eval()
+        training_state.actor.deterministic = False
+
+        training_state.policy_q_func.train()
+        training_state.target_q_func.eval()
 
         iterations = math.ceil(steps / total_steps_per_iter)
         training_state, metrics = nnx.scan(train_iteration)(training_state, rngs.fork(split=iterations))

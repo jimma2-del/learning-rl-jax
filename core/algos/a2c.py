@@ -1,25 +1,23 @@
+from typing import TypeVar, Generic, Any
+
 import math
 
 import jax.numpy as jnp
 import jax
-
 from jax.typing import ArrayLike
 from chex import dataclass
-from typing import TypeVar, Generic, Any
-
-import functools
 
 from flax import nnx
 import optax
 
-from core.algos.base import Scheduleable
 from core.utils.func_utils import try_call, optionally_pass
+from core.utils.networks import MLP, FlattenAndProject, ActionDistributionHead
+
+from core.algos.base import Scheduleable, StochasticPolicyActor, Policy, ValueFunc
 
 from core.envs.base import Environment
 from core.envs.wrappers import AutoResetWrapper, SquashContinuousActionsToBoundsWrapper
 from core.envs.utils import rollout, Timestep
-
-from core.utils.networks import MLP, FlattenAndProject, ActionDistributionHead
 
 @dataclass(frozen=True)
 class Hyperparameters:
@@ -42,7 +40,7 @@ class Hyperparameters:
     normalize_advantages: bool = False
 
     bootstrap_truncated: bool = False # If False, truncation is treated the same as termination.
-        # If True, the critic is run an extra time for every environment sample
+        # If True, the value function is run an extra time for every environment sample
         # to compute next values; this is slightly slower.
     
 TEnvState = TypeVar("TEnvState")
@@ -50,15 +48,15 @@ TEnvObs = TypeVar("TEnvObs")
 TEnvAction = TypeVar("TEnvAction")
 
 class Networks(Generic[TEnvObs, TEnvAction], nnx.Module):
-    def __init__(self, policy: nnx.Module, critic: nnx.Module) -> None:
+    def __init__(self, policy: Policy, value_func: ValueFunc) -> None:
         self.policy = policy
-        self.critic = critic
+        self.value_func = value_func
 
 @dataclass(frozen=True)
 class TrainingState(Generic[TEnvState, TEnvObs]):
     steps: ArrayLike
     env_states: TEnvState
-    policy: nnx.Module # to match standard api
+    actor: StochasticPolicyActor
 
     networks: Networks[TEnvObs, TEnvAction]
     optimizer: nnx.Optimizer
@@ -75,16 +73,9 @@ class A2C(Generic[TEnvState, TEnvObs]):
 
         self.hyperparameters = hyperparameters
 
-    def get_action(self, rngs: nnx.Rngs, policy: nnx.module, obs: TEnvObs, deterministic: bool = False,
-            squash_continuous=True) -> TEnvAction:
-        action_distribution = optionally_pass(policy, rngs=rngs)(obs)
-
-        return self.env.action_space.sample_distribution(rngs.actions(), action_distribution, 
-            squash_continuous=squash_continuous, log_stds=True, deterministic=deterministic)
-
-    def create_default_critic(self, rngs: nnx.Rngs,
+    def make_default_value_func(self, rngs: nnx.Rngs,
         hidden_dim: int = 256, num_hidden_layers: int = 2, do_layer_norm: bool = True, activation_func=nnx.relu
-    ) -> nnx.Module:
+    ) -> ValueFunc:
         assert num_hidden_layers >= 1, "`num_hidden_layers` must be at least 1."
         layers = [ FlattenAndProject[TEnvObs](rngs, self.env.observation_space.shapes_dtypes, output_dim=hidden_dim) ]
 
@@ -101,7 +92,7 @@ class A2C(Generic[TEnvState, TEnvObs]):
 
         return nnx.Sequential(*layers)
 
-    def create_default_policy(self, rngs: nnx.Rngs,
+    def make_default_policy(self, rngs: nnx.Rngs,
         hidden_dim: int = 256, num_hidden_layers: int = 2, do_layer_norm: bool = True, activation_func=nnx.tanh
             # tanh is better for policy networks (https://arxiv.org/abs/2006.05990)
     ) -> nnx.Module:
@@ -125,27 +116,33 @@ class A2C(Generic[TEnvState, TEnvObs]):
 
         return nnx.Sequential(*layers)
 
+    def make_actor(self, policy: Policy | None = None, **kwargs) -> StochasticPolicyActor:
+        if policy is None: policy = self.make_default_policy(**kwargs)
+        return StochasticPolicyActor(policy, self.env.action_space)
+
     def init_training_state(self,
         rngs: nnx.Rngs,
-        policy: nnx.Module | None = None,
-        critic: nnx.Module | None = None,
+        policy: Policy | None = None,
+        value_func: ValueFunc | None = None,
     ) -> TrainingState[TEnvState, TEnvObs]:
-        if policy is None: policy = self.create_default_policy(rngs)
-        if critic is None: critic = self.create_default_critic(rngs)
+        if policy is None: policy = self.make_default_policy(rngs)
+        if value_func is None: value_func = self.make_default_value_func(rngs)
 
-        networks = Networks(policy, critic)
+        networks = Networks(policy, value_func)
 
         # shared optimizer
         optimizer = nnx.Optimizer(networks, optax.inject_hyperparams(optax.adamw)(
             learning_rate=try_call(self.hyperparameters.learning_rate, 0)))
+
+        actor = self.make_actor(policy)
 
         env_states, infos = self.env.reset(jax.random.split(rngs.env(), self.hyperparameters.n_envs))
 
         return TrainingState(
             steps = jnp.array(0, dtype=jnp.int32),
             env_states = env_states,
+            actor = actor,
 
-            policy = policy,
             networks = networks,
             optimizer = optimizer,
         )
@@ -160,17 +157,17 @@ class A2C(Generic[TEnvState, TEnvObs]):
                 -> tuple[TrainingState[TEnvState, TEnvObs], dict[Any, Any]]:
             env_states = training_state.env_states
             steps = training_state.steps
+            actor = training_state.actor
 
             networks = training_state.networks
             optimizer = training_state.optimizer
             
             ## sample transitions from environment ##
+            actor.eval()
+            actor.deterministic = False
 
             (unreset_obs, timesteps), env_states, final_infos = rollout(
-                rngs, SquashContinuousActionsToBoundsWrapper(self.env),
-                nnx.split_rngs(splits=self.hyperparameters.n_envs)(
-                    nnx.vmap(lambda obs, rngs: self.get_action(
-                        rngs, networks.policy, obs, squash_continuous=False))),
+                rngs, SquashContinuousActionsToBoundsWrapper(self.env), actor,
                 self.hyperparameters.rollout_length, self.hyperparameters.n_envs,
                 env_states,
 
@@ -195,7 +192,9 @@ class A2C(Generic[TEnvState, TEnvObs]):
             lr = try_call(self.hyperparameters.learning_rate, steps)
             optimizer.opt_state.hyperparams['learning_rate'].value = lr
 
-            ## update policy ##
+            ## update networks ##
+            networks.train()
+
             discount = try_call(self.hyperparameters.discount_rate, steps)
             gae_lambda = try_call(self.hyperparameters.gae_lambda, steps)
 
@@ -204,11 +203,11 @@ class A2C(Generic[TEnvState, TEnvObs]):
             ent_weight_continuous = try_call(self.hyperparameters.ent_weight_continuous, steps)
 
             def loss_func(networks: Networks[TEnvObs, TEnvAction], rngs: nnx.Rngs):
-                values = optionally_pass(networks.critic, rngs=rngs)(timesteps.obs)
+                values = optionally_pass(networks.value_func, rngs=rngs)(timesteps.obs)
                 const_values = jax.lax.stop_gradient(values)
 
                 if self.hyperparameters.bootstrap_truncated:
-                    next_values = optionally_pass(networks.critic, rngs=rngs)(
+                    next_values = optionally_pass(networks.value_func, rngs=rngs)(
                         jax.tree.map(lambda x: x[1:], unreset_obs))
                 else:
                     next_values = const_values[1:]
@@ -218,7 +217,7 @@ class A2C(Generic[TEnvState, TEnvObs]):
                     final_infos[AutoResetWrapper.UNRESET_STATE_INFO_KEY]
                 )
 
-                final_values = optionally_pass(networks.critic, rngs=rngs)(final_obs)
+                final_values = optionally_pass(networks.value_func, rngs=rngs)(final_obs)
                 next_values = jnp.append(next_values, final_values[None, ...], axis=0)
 
                 next_values = jax.lax.stop_gradient(next_values)
@@ -279,13 +278,23 @@ class A2C(Generic[TEnvState, TEnvObs]):
             return TrainingState(
                 steps=steps,
                 env_states=env_states,
+                actor=actor,
 
-                policy=networks.policy,
                 networks=networks,
                 optimizer=optimizer,
             ), jax.tree.map(lambda x: jnp.mean(x), metrics)
+        
+        training_state.actor.eval()
+        training_state.actor.deterministic = False
+
+        squash_continuous = training_state.actor.squash_continuous
+        training_state.actor.squash_continuous = False
+
+        training_state.networks.train()
 
         iterations = math.ceil(steps / total_steps_per_iter)
         training_state, metrics = nnx.scan(train_iteration)(training_state, rngs.fork(split=iterations))
+
+        training_state.actor.squash_continuous = squash_continuous
 
         return training_state, jax.tree.map(lambda x: jnp.mean(x), metrics)
