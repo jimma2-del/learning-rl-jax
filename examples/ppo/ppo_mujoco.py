@@ -21,11 +21,11 @@ from core.algos import ppo
 
 #jax.config.update("jax_log_compiles", True)
 
-ENV_NAME = "WalkerRun"
+ENV_NAME = "CartpoleSwingup"
 N_ENVS = 2048
-CAMERA = 'side' # None
+CAMERA = None#'side' # None
 
-rngs = nnx.Rngs(0, params=100, env=200, actions=300)
+rngs = nnx.Rngs(0, params=1, env=2, actions=3)
 
 config = registry.get_default_config(ENV_NAME)
 config.impl = 'jax' # 'warp' backend currently does not work
@@ -44,16 +44,16 @@ env = PrecomputedResetsPoolWrapper(env, resets_pool_states_infos)
 
 ### TRAIN ###
 
-STEPS = 100_000_000 #1_000_000
-LOG_INTERVAL_STEPS = 5_000_000 #100_000
+STEPS = 30_000_000 #1_000_000
+LOG_INTERVAL_STEPS = 1_000_000 #100_000
 
-MAX_STEPS = 200
+MAX_STEPS = 1000
 
 EVAL_EPS = 256#2048 # 
 EVAL_N_ENVS = 256#2048
 
 hyperparameters = ppo.Hyperparameters(
-    learning_rate = 2.5e-4,
+    learning_rate = 0.5e-4,
     n_envs = N_ENVS,
     gae_lambda = 0.95,
 
@@ -78,10 +78,9 @@ training_state = algo.init_training_state(rngs)
 train = nnx.jit(algo.train, static_argnames=('steps',))
 
 @nnx.jit
-def evaluate(rngs, policy):
+def evaluate(rngs, actor):
     return evaluate_episodes(
-        rngs, EpisodeStepCountWrapper(VmapWrapper(env), max_eps_len=MAX_STEPS), 
-        nnx.vmap(lambda obs, rngs: algo.get_action(rngs, policy, obs, deterministic=True)), 
+        rngs, EpisodeStepCountWrapper(VmapWrapper(env), max_eps_len=MAX_STEPS), actor, 
         EVAL_EPS, EVAL_N_ENVS
     )
 
@@ -96,7 +95,8 @@ while training_state.steps < STEPS:
     print("Metrics: " + " ".join([ f"{key}={val:.5g}" for key, val in metrics.items() ]))
 
     # eval
-    returns, lengths = evaluate(rngs, training_state.policy)
+    training_state.actor.eval() # make deterministic (use dist modes instead of sampling)
+    returns, lengths = evaluate(rngs, training_state.actor)
 
     print(f"Episode Return: mean={jnp.mean(returns)} std={jnp.std(returns, ddof=1)}")
     print(f"Episode Length: mean={jnp.mean(lengths)} std={jnp.std(lengths, ddof=1)}")
@@ -108,7 +108,7 @@ import orbax.checkpoint as ocp
 
 SAVE_PATH = path.abspath(f'examples/ppo/_tmp/{ENV_NAME}')
 
-_, state = nnx.split(training_state.policy)
+_, state = nnx.split(training_state.actor)
 checkpointer_save = ocp.StandardCheckpointer()
 checkpointer_save.save(SAVE_PATH, state)
 
@@ -117,13 +117,9 @@ import mediapy
 
 rngs = nnx.Rngs(0, params=1, env=5, actions=3)
 
-def actor(obs, rngs):
-    #print(training_state.policy(obs, rngs=rngs))
-    return algo.get_action(rngs, training_state.policy, obs, deterministic=True)
-
 EVAL_EPS = 256
-returns, lengths = nnx.jit(evaluate_episodes, static_argnums=(1, 2, 3, 4, 5))(
-    rngs, EpisodeStepCountWrapper(VmapWrapper(env), max_eps_len=MAX_STEPS), nnx.vmap(actor), EVAL_EPS, EVAL_N_ENVS)
+returns, lengths = nnx.jit(evaluate_episodes, static_argnums=(1, 3, 4))(
+    rngs, EpisodeStepCountWrapper(VmapWrapper(env), max_eps_len=MAX_STEPS), training_state.actor, EVAL_EPS, EVAL_N_ENVS)
 print(returns)
 print(lengths)
 print(f"Episode Return: mean={jnp.mean(returns)} std={jnp.std(returns, ddof=1)}")
@@ -140,7 +136,7 @@ if VISUALIZE_METHOD == 'video':
 
     for _ in range(NUM_EPISODES):
         timesteps, state, info = rollout_episode(rngs, 
-            JitWrapper(EpisodeStepCountWrapper(env, MAX_STEPS)), actor,
+            JitWrapper(EpisodeStepCountWrapper(env, MAX_STEPS)), training_state.actor,
 
             # remove unnecessary warp `_impl` property, which takes up a lot of memory
             take_func = lambda ts: ts.replace(state=ts.state.replace(
@@ -159,7 +155,7 @@ if VISUALIZE_METHOD == 'video':
 
 elif VISUALIZE_METHOD == 'pygame':
     visualize_pygame(
-        rngs, JitWrapper(env), actor, 
+        rngs, JitWrapper(env), training_state.actor, 
         fps=FPS, 
         verbose=False
     )

@@ -23,12 +23,12 @@ from core.algos import ppo
 
 rngs = nnx.Rngs(0, params=10, env=20, actions=30)
 
-ENV_NAME = "WalkerRun"
+ENV_NAME = "CartpoleSwingup"#"WalkerRun"
 N_ENVS = 256
 EVAL_EPS = 256
 MAX_STEPS = 500
 
-CAMERA = 'side'
+CAMERA = None#'side'
 
 config = registry.get_default_config(ENV_NAME)
 config.impl = 'jax' # 'warp' backend currently does not work
@@ -49,21 +49,17 @@ import orbax.checkpoint as ocp
 SAVE_PATH = path.abspath(f'examples/ppo/_tmp/{ENV_NAME}')
 
 # test load
-abstract_model = nnx.eval_shape(lambda: algo.create_default_policy(rngs=nnx.Rngs(0)))
+abstract_model = nnx.eval_shape(lambda: algo.make_actor(rngs=nnx.Rngs(0)))
 graphdef, abstract_state = nnx.split(abstract_model)
 checkpointer_load = ocp.StandardCheckpointer()
 state_restored = checkpointer_load.restore(SAVE_PATH, abstract_state)
 
-policy_state = nnx.merge(graphdef, state_restored)
+actor = nnx.merge(graphdef, state_restored)
 
 ### ENJOY ###
 import mediapy
 
 rngs = nnx.Rngs(0, params=1, env=5, actions=3)
-
-def actor(obs, rngs):
-    print(policy_state(obs, rngs=rngs))
-    return algo.get_action(rngs, policy_state, obs, deterministic=True)
 
 # returns, lengths = nnx.jit(evaluate_episodes, static_argnums=(1, 2, 3, 4, 5))(
 #     rngs, EpisodeStepCountWrapper(VmapWrapper(env), max_eps_len=MAX_STEPS), nnx.vmap(actor), EVAL_EPS, N_ENVS)

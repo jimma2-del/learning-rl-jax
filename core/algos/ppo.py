@@ -1,3 +1,5 @@
+from typing import TypeVar, Generic, Any
+
 import math
 
 import jax.numpy as jnp
@@ -5,17 +7,15 @@ import jax
 
 from jax.typing import ArrayLike
 from chex import dataclass
-from typing import TypeVar, Generic, Any
-
-import functools
 
 from flax import nnx
 import optax
 
-from core.algos.base import Scheduleable
 from core.utils.func_utils import try_call, optionally_pass
 
-from core.envs.base import Environment
+from core.algos.base import Scheduleable, StochasticPolicyActor, Policy, ValueFunc
+
+from core.envs.base import Environment, Space
 from core.envs.wrappers import AutoResetWrapper, SquashContinuousActionsToBoundsWrapper
 from core.envs.utils import rollout, Timestep
 
@@ -48,7 +48,7 @@ class Hyperparameters:
     normalize_advantages: bool = True
 
     bootstrap_truncated: bool = False # if False, truncation is treated the same as termination.
-        # if True, the critic is run an extra time for every environment sample
+        # if True, the value function is run an extra time for every environment sample
         # to compute next values; this is slightly slower.
 
     recompute_advantages: bool = False # if True, recomputes GAEs before every epoch.
@@ -62,15 +62,29 @@ TEnvObs = TypeVar("TEnvObs")
 TEnvAction = TypeVar("TEnvAction")
 
 class Networks(Generic[TEnvObs, TEnvAction], nnx.Module):
-    def __init__(self, policy: nnx.Module, critic: nnx.Module) -> None:
+    def __init__(self, policy: Policy, value_func: ValueFunc, action_space=None) -> None:
         self.policy = policy
-        self.critic = critic
+        self.value_func = value_func
+
+        self.action_space: Space[TEnvAction] = action_space
+
+    def __call__(self, obs: TEnvObs, rngs: nnx.Rngs) -> tuple[TEnvAction, dict[Any, Any]]:
+        action_dist = optionally_pass(self.policy, rngs=rngs)(obs)
+        value = optionally_pass(self.value_func, rngs=rngs)(obs)
+
+        action = self.action_space.sample_distribution(rngs.actions(), action_dist, 
+            squash_continuous=False, log_stds=True)
+        
+        log_p = self.action_space.log_probability(action, action_dist, 
+            continuous_squashed=False, log_stds=True)
+
+        return action, { 'value': value, 'log_p': log_p }
 
 @dataclass(frozen=True)
 class TrainingState(Generic[TEnvState, TEnvObs]):
     steps: ArrayLike
     env_states: TEnvState
-    policy: nnx.Module # to match standard api
+    actor: StochasticPolicyActor
 
     networks: Networks[TEnvObs, TEnvAction]
     optimizer: nnx.Optimizer
@@ -89,16 +103,9 @@ class PPO(Generic[TEnvState, TEnvObs]):
         assert hyperparameters.rollout_length*hyperparameters.n_envs % hyperparameters.n_minibatches == 0, \
             "Total rollout samples (`rollout_length * n_envs`) must be divisible by `n_minibatches`."
 
-    def get_action(self, rngs: nnx.Rngs, policy: nnx.module, obs: TEnvObs, deterministic: bool = False,
-            squash_continuous=True) -> TEnvAction:
-        action_distribution = optionally_pass(policy, rngs=rngs)(obs)
-
-        return self.env.action_space.sample_distribution(rngs.actions(), action_distribution, 
-            squash_continuous=squash_continuous, log_stds=True, deterministic=deterministic)
-
-    def create_default_critic(self, rngs: nnx.Rngs,
+    def make_default_value_func(self, rngs: nnx.Rngs,
         hidden_dim: int = 256, num_hidden_layers: int = 2, do_layer_norm: bool = True, activation_func=nnx.relu
-    ) -> nnx.Module:
+    ) -> ValueFunc:
         assert num_hidden_layers >= 1, "`num_hidden_layers` must be at least 1."
         layers = [ FlattenAndProject[TEnvObs](rngs, self.env.observation_space.shapes_dtypes, output_dim=hidden_dim) ]
 
@@ -115,7 +122,7 @@ class PPO(Generic[TEnvState, TEnvObs]):
 
         return nnx.Sequential(*layers)
 
-    def create_default_policy(self, rngs: nnx.Rngs,
+    def make_default_policy(self, rngs: nnx.Rngs,
         hidden_dim: int = 256, num_hidden_layers: int = 2, do_layer_norm: bool = True, activation_func=nnx.tanh
             # tanh is better for policy networks (https://arxiv.org/abs/2006.05990)
     ) -> nnx.Module:
@@ -139,27 +146,33 @@ class PPO(Generic[TEnvState, TEnvObs]):
 
         return nnx.Sequential(*layers)
 
+    def make_actor(self, policy: Policy | None = None, **kwargs) -> StochasticPolicyActor:
+        if policy is None: policy = self.make_default_policy(**kwargs)
+        return StochasticPolicyActor(policy, self.env.action_space)
+
     def init_training_state(self,
         rngs: nnx.Rngs,
-        policy: nnx.Module | None = None,
-        critic: nnx.Module | None = None, 
+        policy: Policy | None = None,
+        value_func: ValueFunc | None = None,
     ) -> TrainingState[TEnvState, TEnvObs]:
-        if policy is None: policy = self.create_default_policy(rngs)
-        if critic is None: critic = self.create_default_critic(rngs)
+        if policy is None: policy = self.make_default_policy(rngs)
+        if value_func is None: value_func = self.make_default_value_func(rngs)
 
-        networks = Networks(policy, critic)
+        networks = Networks(policy, value_func)
 
         # shared optimizer
         optimizer = nnx.Optimizer(networks, optax.inject_hyperparams(optax.adamw)(
             learning_rate=try_call(self.hyperparameters.learning_rate, 0)))
+
+        actor = self.make_actor(policy)
 
         env_states, infos = self.env.reset(jax.random.split(rngs.env(), self.hyperparameters.n_envs))
 
         return TrainingState(
             steps = jnp.array(0, dtype=jnp.int32),
             env_states = env_states,
+            actor = actor,
 
-            policy = policy,
             networks = networks,
             optimizer = optimizer,
         )
@@ -174,25 +187,17 @@ class PPO(Generic[TEnvState, TEnvObs]):
                 -> tuple[TrainingState[TEnvState, TEnvObs], dict[Any, Any]]:
             env_states = training_state.env_states
             steps = training_state.steps
+            actor = training_state.actor
 
             networks = training_state.networks
             optimizer = training_state.optimizer
             
             ## sample transitions from environment ##
-            def actor(obs: TEnvObs, rngs: nnx.Rngs) -> tuple[TEnvAction, dict[Any, Any]]:
-                action_dist = optionally_pass(networks.policy, rngs=rngs)(obs)
-                value = optionally_pass(networks.critic, rngs=rngs)(obs)
-
-                action = self.env.action_space.sample_distribution(rngs.actions(), action_dist, 
-                    squash_continuous=False, log_stds=True)
-                
-                log_p = self.env.action_space.log_probability(action, action_dist, 
-                    continuous_squashed=False, log_stds=True)
-
-                return action, { 'value': value, 'log_p': log_p }
+            actor.eval()
+            actor.deterministic = False
 
             (unreset_obs, timesteps), env_states, final_infos = rollout(
-                rngs, SquashContinuousActionsToBoundsWrapper(self.env), actor,
+                rngs, SquashContinuousActionsToBoundsWrapper(self.env), networks,
                 self.hyperparameters.rollout_length, self.hyperparameters.n_envs,
                 env_states,
 
@@ -218,7 +223,9 @@ class PPO(Generic[TEnvState, TEnvObs]):
             lr = try_call(self.hyperparameters.learning_rate, steps)
             optimizer.opt_state.hyperparams['learning_rate'].value = lr
 
-            ## update policy ##
+            ## update networks ##
+            networks.train()
+
             discount = try_call(self.hyperparameters.discount_rate, steps)
             gae_lambda = try_call(self.hyperparameters.gae_lambda, steps)
 
@@ -232,17 +239,17 @@ class PPO(Generic[TEnvState, TEnvObs]):
             def train_epoch(carry):
                 _, rngs, epoch_i, networks, optimizer, adv, target_vals, aggr_metrics = carry
 
-                def compute_gae(rngs, critic):
+                def compute_gae(rngs, value_func):
                     values = timesteps.action_info['value']
 
                     if self.hyperparameters.recompute_advantages:
                         values = nnx.cond(epoch_i != 0, 
-                            lambda critic: optionally_pass(critic, rngs=rngs)(timesteps.obs), 
+                            lambda value_func: optionally_pass(value_func, rngs=rngs)(timesteps.obs), 
                             lambda _: values,
-                            critic)
+                            value_func)
 
                     if self.hyperparameters.bootstrap_truncated:
-                        next_values = optionally_pass(critic, rngs=rngs)(
+                        next_values = optionally_pass(value_func, rngs=rngs)(
                             jax.tree.map(lambda x: x[1:], unreset_obs))
                     else:
                         next_values = values[1:]
@@ -252,7 +259,7 @@ class PPO(Generic[TEnvState, TEnvObs]):
                         final_infos[AutoResetWrapper.UNRESET_STATE_INFO_KEY]
                     )
 
-                    final_values = optionally_pass(critic, rngs=rngs)(final_obs)
+                    final_values = optionally_pass(value_func, rngs=rngs)(final_obs)
                     next_values = jnp.append(next_values, final_values[None, ...], axis=0)
 
                     def gae_iter(next_gae: jax.Array, timestep: Timestep[TEnvState, TEnvObs, TEnvAction],
@@ -278,8 +285,8 @@ class PPO(Generic[TEnvState, TEnvObs]):
                     return advantages, target_values
 
                 adv, target_vals = nnx.cond(jnp.logical_or(epoch_i == 0, self.hyperparameters.recompute_advantages),
-                    compute_gae, lambda rngs, critic: (adv, target_vals), 
-                    rngs, networks.critic)
+                    compute_gae, lambda rngs, value_func: (adv, target_vals), 
+                    rngs, networks.value_func)
 
                 train_samples = (timesteps.obs, timesteps.action, timesteps.action_info['log_p'], adv, target_vals)
                 train_samples = jax.tree.map(lambda x: jnp.reshape(x, (-1, *x.shape[2:])), train_samples)
@@ -310,7 +317,7 @@ class PPO(Generic[TEnvState, TEnvObs]):
                         policy_loss = - jnp.mean(jnp.minimum(ratio * normed_adv, clipped_ratio * normed_adv))
 
                         # value loss
-                        pred_values = optionally_pass(networks.critic, rngs=rngs)(obs)
+                        pred_values = optionally_pass(networks.value_func, rngs=rngs)(obs)
                         value_loss = jnp.mean(jnp.power(target_values - pred_values, 2)) # MSE
                         
                         # entropy loss
@@ -353,7 +360,7 @@ class PPO(Generic[TEnvState, TEnvObs]):
 
                 epoch_i = epoch_i + 1
 
-                not_done = epoch_i <= self.hyperparameters.n_epochs
+                not_done = epoch_i < self.hyperparameters.n_epochs
                 if target_kl is not None:
                     not_done = jnp.logical_and(not_done, metrics['approx_kl'] <= target_kl)
 
@@ -383,13 +390,24 @@ class PPO(Generic[TEnvState, TEnvObs]):
             return TrainingState(
                 steps=steps,
                 env_states=env_states,
+                actor=actor,
 
-                policy=networks.policy,
                 networks=networks,
                 optimizer=optimizer,
             ), metrics
 
+        training_state.actor.eval()
+        training_state.actor.deterministic = False
+        training_state.networks.action_space = self.env.action_space
+
+        squash_continuous = training_state.actor.squash_continuous
+        training_state.actor.squash_continuous = False
+
+        training_state.networks.train()
+
         iterations = math.ceil(steps / total_steps_per_iter)
         training_state, metrics = nnx.scan(train_iteration)(training_state, rngs.fork(split=iterations))
+
+        training_state.actor.squash_continuous = squash_continuous
 
         return training_state, jax.tree.map(lambda x: jnp.mean(x), metrics)
