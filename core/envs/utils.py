@@ -1,7 +1,9 @@
 import math
 
-from typing import Any, Generic, Callable, Protocol, TypeAlias
+from typing import Any, Generic, Callable, Protocol, TypeAlias, ParamSpec
 from typing_extensions import TypeVar
+
+from functools import wraps
 
 import chex
 
@@ -24,10 +26,19 @@ TEnvAction = TypeVar("TEnvAction")
 TRenderFrame = TypeVar("TRenderFrame", default=None)
 
 class ActorWithRngs(Generic[TEnvObs, TEnvAction], Protocol):
-    def __call__(self, obs: TEnvObs, rngs: nnx.Rngs) -> TEnvAction: ...
+    def __call__(self, obs: TEnvObs, rngs: nnx.Rngs) -> tuple[TEnvAction, dict[Any, Any]]: ...
 class ActorWithoutRngs(Generic[TEnvObs, TEnvAction], Protocol):
-    def __call__(self, obs: TEnvObs) -> TEnvAction: ...
+    def __call__(self, obs: TEnvObs) -> tuple[TEnvAction, dict[Any, Any]]: ...
 Actor: TypeAlias = ActorWithoutRngs[TEnvObs, TEnvAction] | ActorWithRngs[TEnvObs, TEnvAction]
+
+P = ParamSpec("P")
+R = TypeVar("R")
+
+def with_info(func: Callable[P, R]) -> Callable[P, tuple[R, dict[Any, Any]]]:
+    @wraps(func)
+    def wrapper(*args: P.args, **kwargs: P.kwargs) -> tuple[R, dict[Any, Any]]:
+        return func(*args, **kwargs), {}
+    return wrapper
 
 def evaluate_episodes(rngs: nnx.Rngs, 
     env: Environment[TEnvState, TEnvObs, TEnvAction, TRenderFrame], 
@@ -62,7 +73,7 @@ def evaluate_episodes(rngs: nnx.Rngs,
 
         # step env
         obs = env.get_obs(split_key_if_batched(rngs.env(), n_envs), env_state)
-        action = optionally_pass(actor, rngs=rngs)(obs)
+        action, action_info = optionally_pass(actor, rngs=rngs)(obs)
         env_state, reward, terminated, truncated, info = env.step(
             split_key_if_batched(rngs.env(), n_envs), env_state, action)
 
@@ -130,13 +141,9 @@ def rollout_episode(rngs: nnx.Rngs,
     actor: Actor[TEnvObs, TEnvAction],
     chunk_size: int = 100,
     take_func: TakeFunc[TEnvState, TEnvObs, TEnvAction, TTakeObj] | None = None,
-    actor_returns_info: bool = False
 ) -> tuple[TTakeObj, TEnvState, dict[Any, Any]]:
     """Rollout one episode. Intended for visualization, rather than training. Do NOT JIT.
     Performs rollout in chunks of `chunk_size` steps for speed, combining chunks at the end.
-
-    `actor_returns_info`: If True, `actor` should return a tuple `(action, info)`, 
-        where `info` is a dictionary of arbitrary values which will be saved to `timestep.action_info`.
 
     `take_func`: Optional function to specify which values to take from Timestep
         A full `Timestep` object is returned by default.
@@ -157,11 +164,7 @@ def rollout_episode(rngs: nnx.Rngs,
         actor, state, info = carry
 
         obs = env.get_obs(rngs.env(), state)
-        action = optionally_pass(actor, rngs=rngs)(obs)
-
-        action_info = {}
-        if actor_returns_info:
-            action, action_info = action
+        action, action_info = optionally_pass(actor, rngs=rngs)(obs)
 
         next_state, reward, terminated, truncated, next_info = env.step(rngs.env(), state, action)
 
@@ -202,7 +205,6 @@ def rollout(rngs: nnx.Rngs,
     initial_env_state: TEnvState | None = None,
     initial_env_info: dict[Any, Any] | None = None,
     take_func: TakeFunc[TEnvState, TEnvObs, TEnvAction, TTakeObj] | None = None,
-    actor_returns_info: bool = False
 ) -> tuple[TTakeObj, TEnvState, dict[Any, Any]]:
     """Runs the environment for `iters` steps, returning collected timesteps or user-defined take objs.
 
@@ -221,9 +223,6 @@ def rollout(rngs: nnx.Rngs,
     `take_func`: Optional function to specify which values to take from Timestep.
         A full `Timestep` object is returned by default.
         If the environment is batched, `take_func` should also handle batched timesteps.
-
-    `actor_returns_info`: If True, `actor` should return a tuple `(action, info)`, 
-        where `info` is a dictionary of arbitrary values which will be saved to `timestep.action_info`.
 
     Returns: timesteps, or user defined take objs for each timestep; final states; final infos.
         If the environment is batched, timesteps/take objs will have 
@@ -248,11 +247,7 @@ def rollout(rngs: nnx.Rngs,
         actor, states, infos = carry
 
         obs = env.get_obs(split_key_if_batched(rngs.env(), n_envs), states)
-        actions = optionally_pass(actor, rngs=rngs)(obs)
-
-        action_infos = {}
-        if actor_returns_info:
-            actions, action_infos = actions
+        actions, action_infos = optionally_pass(actor, rngs=rngs)(obs)
 
         new_states, rewards, terminateds, truncateds, new_infos = env.step(
             split_key_if_batched(rngs.env(), n_envs), states, actions)
@@ -321,7 +316,7 @@ def visualize_pygame(rngs: nnx.Rngs,
         
         else:
             obs = env.get_obs(rngs.env(), state)
-            action = optionally_pass(actor, rngs=rngs)(obs)
+            action, action_info = optionally_pass(actor, rngs=rngs)(obs)
 
             state, reward, terminated, truncated, info = env.step(rngs.env(), state, action)
 

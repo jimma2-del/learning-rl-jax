@@ -1,11 +1,10 @@
-from abc import ABC, abstractmethod
+from typing import TypeVar, Generic, Protocol, TypeAlias, Sequence, Any
 
 import jax.numpy as jnp
 import jax
 
 from jax.typing import ArrayLike
 from chex import dataclass
-from typing import TypeVar, Generic, Protocol, TypeAlias, Sequence
 
 from flax import nnx
 
@@ -41,8 +40,9 @@ class StochasticPolicyActor(Generic[TEnvObs, TEnvAction], nnx.Module):
         self.squash_continuous = squash_continuous
 
     def __call__(self, obs: TEnvObs, rngs: nnx.Rngs | None = None,
-            deterministic: bool | None = None, squash_continuous: bool | None = None) -> TEnvAction:
+            deterministic: bool | None = None, squash_continuous: bool | None = None) -> tuple[TEnvAction, dict[Any, Any]]:
         """Computes an action distribution for the given observation, and samples an action from it.
+        Returns the raw action distribution in `info['action_dist']`.
 
         `squash_continuous`: If False, does not squash continuous values, leaving them unbounded.
             Useful, eg. for sampling raw outputs, before softplus or tanh.
@@ -56,7 +56,7 @@ class StochasticPolicyActor(Generic[TEnvObs, TEnvAction], nnx.Module):
 
         action_dist = self.action_distribution(obs, rngs)
         return self.action_space.sample_distribution(rngs.actions(), action_dist, 
-            squash_continuous=squash_continuous, deterministic=deterministic)
+            squash_continuous=squash_continuous, deterministic=deterministic), {'action_dist': action_dist}
 
     def action_distribution(self, obs, rngs: nnx.Rngs | None = None) -> TEnvAction:
         """Applies the policy on the observation to compute an action distribution.
@@ -85,9 +85,10 @@ class GreedyQActor(Generic[TEnvObs], nnx.Module):
         self.epsilon = nnx.Variable(jnp.array(epsilon, dtype=jnp.float32))
 
     def __call__(self, obs: TEnvObs, rngs: nnx.Rngs | None = None,
-            deterministic: bool | None = None, epsilon: ArrayLike | None = None) -> ArrayLike:
+            deterministic: bool | None = None, epsilon: ArrayLike | None = None) -> tuple[TEnvAction, dict[Any, Any]]:
         """Returns a random action with probablity `epsilon`, otherwise 
             computes a Q value for every possible action and returns the action with the highest Q value.
+        Returns the raw Q values in `info['q_values']`, and whether a random action was used in `info['action_random']`.
 
         `deterministic`: If True, overrides `epsilon` and always returns a greedy action.
         """
@@ -95,21 +96,29 @@ class GreedyQActor(Generic[TEnvObs], nnx.Module):
         if deterministic is None: deterministic = self.deterministic
         if epsilon is None: epsilon = self.epsilon.value
 
-        greedy_action = self.greedy_action(obs, rngs=rngs)
-        if deterministic: return greedy_action
+        q_values = self.q_values(obs, rngs=rngs)
+        greedy_action = self.select_greedy_action(q_values)
+        
+        if deterministic: 
+            return greedy_action, { 'q_values': q_values, 'action_random': jnp.full_like(greedy_action, False) }
 
         random_action = self.random_action(rngs, shape=greedy_action.shape)
         take_random_action = jax.random.uniform(rngs.actions(), shape=greedy_action.shape) < epsilon
 
-        return jnp.where(take_random_action, random_action, greedy_action)
+        return jnp.where(take_random_action, random_action, greedy_action), \
+            { 'q_values': q_values, 'action_random': take_random_action }
 
     def q_values(self, obs, rngs: nnx.Rngs | None = None) -> jax.Array:
         """Applies the Q function on the observation to compute a Q value for every possible action."""
         return optionally_pass(self.q_func, rngs=rngs)(obs)
 
+    def select_greedy_action(self, q_values: jax.Array) -> ArrayLike:
+        """Returns the action with the highest Q value out of the Q values given."""
+        return jnp.argmax(q_values, axis=-1)
+
     def greedy_action(self, obs: TEnvObs, rngs: nnx.Rngs | None = None) -> ArrayLike:
         """Computes a Q value for every possible action and returns the action with the highest Q value."""
-        return jnp.argmax(self.q_values(obs, rngs=rngs), axis=-1)
+        return self.find_greedy_action(self.q_values(obs, rngs=rngs))
 
     def random_action(self, rngs: nnx.Rngs, shape: Sequence[int] = ()) -> ArrayLike:
         return jax.random.randint(rngs.actions(), shape=shape, minval=0, maxval=self.num_actions)

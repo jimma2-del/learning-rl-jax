@@ -277,7 +277,7 @@ class TabularQLearning(Generic[TEnvState, TEnvObs]):
 
         # prefill replay buffer
         transitions, env_states = nnx.jit(self.rollout_transitions, static_argnames=('iter', 'actor'))(rngs,
-            lambda obs, rngs: actor.random_action(rngs, (self.hyperparameters.n_envs,)),
+            lambda obs, rngs: (actor.random_action(rngs, (self.hyperparameters.n_envs,)), {}),
             math.ceil(prefill_steps / self.hyperparameters.n_envs),
         )
 

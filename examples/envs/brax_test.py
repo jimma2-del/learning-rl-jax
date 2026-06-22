@@ -24,7 +24,7 @@ env = BraxWrapper(brax_env)
 
 #@nnx.jit
 def actor(obs, rngs):
-    return env.action_space.sample(rngs.actions())
+    return env.action_space.sample(rngs.actions()), {}
 
 VISUALIZE_METHOD = "pygame"
 

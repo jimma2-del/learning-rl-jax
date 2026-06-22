@@ -22,7 +22,7 @@ env = JumanjiWrapper(jumanji_env)
 
 #@nnx.jit
 def actor(obs, rngs):
-    return env.action_space.sample(rngs.actions())
+    return env.action_space.sample(rngs.actions()), {}
 
 comb_states = []
 
