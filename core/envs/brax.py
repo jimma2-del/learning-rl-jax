@@ -28,8 +28,8 @@ class BraxWrapper(Environment[BraxState, jax.Array, jax.Array, np.ndarray]):
     def __init__(self, brax_env: PipelineEnv, render_settings: dict[Any, Any] = {}) -> None:
         """
         `brax_env`: Brax environment to convert.
-            IMPORTANT: For most use cases, ensure `brax_env` is not parallelized and does not auto reset.
-                Eg. pass `batch_size=None, auto_reset=False` to `brax.envs.create()`.
+            NOTE: Duplicate resets may be performed when using algorithms/utils if `brax_env` already auto-resets.
+                To avoid this, pass `auto_reset=False` to `brax.envs.create()`.
         """
 
         self.brax_env = brax_env

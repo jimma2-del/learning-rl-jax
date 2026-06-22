@@ -30,12 +30,7 @@ class MuJoCoPlaygroundWrapper(Environment[MjxState, jax.Array, jax.Array, np.nda
         return comb
 
     def __init__(self, mjx_env: MjxEnv, render_settings: dict[Any, Any] = {}) -> None:
-        """
-        `mjx_env`: MjxEnv instance to convert.
-            IMPORTANT: For most use cases, ensure `mjx_env` is not parallelized and does not auto reset.
-                Eg. do NOT apply `mujoco_playground.wrapper.wrap_for_brax_training()`.
-                However, this wrapper can handle the Brax EpisodeWrapper.
-        """
+        """`mjx_env`: MjxEnv instance to convert."""
 
         self.mjx_env = mjx_env
         self.render_settings = render_settings
