@@ -12,7 +12,7 @@ import jax.numpy as jnp
 
 from flax import nnx
 
-from core.utils.batch_utils import split_key_if_batched, get_tree_vmap_dim, dummy_vmap
+from core.utils.batch_utils import split_key_if_batched
 from core.utils.func_utils import optionally_pass
 
 from core.envs.base import Environment
@@ -50,23 +50,21 @@ def evaluate_episodes(rngs: nnx.Rngs,
     Runs at LEAST `episodes` episodes. If `episodes` is not a multiple of `n_envs`, will run the next multiple.
     """
 
-    eps_per_env = math.ceil(episodes / n_envs)
-
     if not isinstance(env, AutoResetWrapper):
         env = AutoResetWrapper(env)
 
-    if n_envs is None: # unbatched env
-        env = DummyVmapWrapper(env)
-        n_envs = 1
+    actor = nnx.Sequential(actor)
+
+    eps_per_env = math.ceil(episodes / (n_envs if n_envs is not None else 1))
 
     def batched_env_step(carry):
-        eps_done, rngs, env_state, cur_return, eps_returns, cur_len, eps_lens = carry
+        actor, eps_done, rngs, env_state, cur_return, eps_returns, cur_len, eps_lens = carry
 
         # step env
-        obs = env.get_obs(jax.random.split(rngs.env(), n_envs), env_state)
+        obs = env.get_obs(split_key_if_batched(rngs.env(), n_envs), env_state)
         action = optionally_pass(actor, rngs=rngs)(obs)
         env_state, reward, terminated, truncated, info = env.step(
-            jax.random.split(rngs.env(), n_envs), env_state, action)
+            split_key_if_batched(rngs.env(), n_envs), env_state, action)
 
         if eps_steps_limit is not None:
             truncated = jnp.logical_or(truncated, cur_len >= eps_steps_limit)
@@ -86,14 +84,15 @@ def evaluate_episodes(rngs: nnx.Rngs,
         cur_return = cur_return * not_done
         cur_len = cur_len * not_done
 
-        return eps_done, rngs, env_state, cur_return, eps_returns, cur_len, eps_lens
+        return actor, eps_done, rngs, env_state, cur_return, eps_returns, cur_len, eps_lens
 
-    env_state, info = env.reset(jax.random.split(rngs.env(), n_envs))
+    env_state, info = env.reset(split_key_if_batched(rngs.env(), n_envs))
 
-    eps_done, rngs, env_state, cur_return, eps_returns, cur_len, eps_lens = nnx.while_loop(
-        lambda input: jnp.any(input[0] < eps_per_env), 
+    actor, eps_done, rngs, env_state, cur_return, eps_returns, cur_len, eps_lens = nnx.while_loop(
+        lambda input: jnp.any(input[1] < eps_per_env), 
         batched_env_step, 
         (
+            actor,
             jnp.zeros(n_envs, dtype=jnp.int32), 
             rngs, 
             env_state, 
@@ -150,10 +149,12 @@ def rollout_episode(rngs: nnx.Rngs,
     if take_func is None:
         take_func = lambda x: x
 
+    actor = nnx.Sequential(actor)
+
     @nnx.jit
     @nnx.scan
     def rollout(carry, rngs):
-        state, info = carry
+        actor, state, info = carry
 
         obs = env.get_obs(rngs.env(), state)
         action = optionally_pass(actor, rngs=rngs)(obs)
@@ -167,7 +168,7 @@ def rollout_episode(rngs: nnx.Rngs,
         timestep = Timestep(state=state, obs=obs, action=action, reward=reward, info=info,
             terminated=terminated, truncated=truncated, action_info=action_info)
 
-        return (next_state, next_info), (optionally_pass(take_func, rngs=rngs)(timestep), terminated, truncated)
+        return (actor, next_state, next_info), (optionally_pass(take_func, rngs=rngs)(timestep), terminated, truncated)
 
     state, info = env.reset(rngs.env())
 
@@ -175,8 +176,8 @@ def rollout_episode(rngs: nnx.Rngs,
     done = False
     
     while not done:
-        (state, info), (take_vals, terminated, truncated) = rollout(
-            (state, info), rngs.fork(split=chunk_size))
+        (actor, state, info), (take_vals, terminated, truncated) = rollout(
+            (actor, state, info), rngs.fork(split=chunk_size))
 
         dones = jnp.logical_or(terminated, truncated)
         done_idx = jnp.argmax(dones)
@@ -232,52 +233,39 @@ def rollout(rngs: nnx.Rngs,
     if not isinstance(env, AutoResetWrapper):
         env = AutoResetWrapper(env)
 
-    unbatched_env = False
-
-    if n_envs is None: # unbatched env
-        unbatched_env = True
-
-        env = DummyVmapWrapper(env)
-        actor = dummy_vmap(actor)
-        n_envs = 1
-
-        if initial_env_info is not None:
-            initial_env_info = jax.tree.map(lambda x: x[None, ...], initial_env_info)
-
     if initial_env_state is None:
-        initial_env_state, initial_env_info = env.reset(jax.random.split(rngs.env(), n_envs))
+        initial_env_state, initial_env_info = env.reset(split_key_if_batched(rngs.env(), n_envs))
 
     if initial_env_info is None:
-        _, initial_env_info = env.reset(jax.random.split(jax.random.key(0), n_envs)) # dummy value
+        _, initial_env_info = env.reset(split_key_if_batched(jax.random.key(0), n_envs)) # dummy value
 
     if take_func is None:
         take_func = lambda x: x
 
-    def batched_env_step(carry: tuple[TEnvState, dict[Any,Any]], rngs: nnx.Rngs) -> tuple[TEnvState, TTakeObj]:
-        states, infos = carry
+    actor = nnx.Sequential(actor)
 
-        obs = env.get_obs(jax.random.split(rngs.env(), n_envs), states)
+    def batched_env_step(carry: tuple[TEnvState, dict[Any,Any]], rngs: nnx.Rngs) -> tuple[TEnvState, TTakeObj]:
+        actor, states, infos = carry
+
+        obs = env.get_obs(split_key_if_batched(rngs.env(), n_envs), states)
         actions = optionally_pass(actor, rngs=rngs)(obs)
 
         action_infos = {}
         if actor_returns_info:
             actions, action_infos = actions
 
-        new_states, rewards, terminateds, truncateds, new_infos = env.step(jax.random.split(rngs.env(), n_envs), states, actions)
+        new_states, rewards, terminateds, truncateds, new_infos = env.step(
+            split_key_if_batched(rngs.env(), n_envs), states, actions)
 
-        return (new_states, new_infos), optionally_pass(take_func, rngs=rngs)(Timestep(
+        return (actor, new_states, new_infos), optionally_pass(take_func, rngs=rngs)(Timestep(
             state=states, obs=obs, action=actions, reward=rewards, 
             info=infos, terminated=terminateds, truncated=truncateds, action_info=action_infos)
         )
 
-    (env_states, infos), take_values = nnx.scan(batched_env_step)(
-        (initial_env_state, initial_env_info), rngs.fork(split=iters))
+    (actor, env_states, infos), take_values = nnx.scan(batched_env_step)(
+        (actor, initial_env_state, initial_env_info), rngs.fork(split=iters))
 
-    result = (take_values, env_states, infos)
-    if unbatched_env:
-        result = jax.tree.map(lambda x: x[:, 0], result)
-
-    return result
+    return take_values, env_states, infos
 
 def visualize_pygame(rngs: nnx.Rngs, 
     env: Environment[TEnvState, TEnvObs, TEnvAction, TRenderFrame], 
