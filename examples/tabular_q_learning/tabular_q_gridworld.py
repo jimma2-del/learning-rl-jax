@@ -19,23 +19,16 @@ MAP = "general"
 env = GridworldEnv.built_in_map(MAP)
 
 ### TRAIN ###
-STEPS = 200_000
-LOG_INTERVAL_STEPS = 10_000
+STEPS = 50_000
+LOG_INTERVAL_STEPS = 5_000
 EVAL_EPS = 2048#32 
-    # very number of eval eps for maze env since high variance due to random starting position
+    # very high number of eval eps for maze env since high variance due to random starting position
 
 hyperparameters = tabular_q_learning.Hyperparameters(
     discount_rate = 0.95,
     learning_rate = 0.1,
-
     epsilon = schedules.linear_schedule(1, 0.05, 0.1*STEPS),
-
-    replay_buffer_size = 1000,
-    batch_size = 32,
-    train_freq = 4,
     n_envs = 32, #256,
-
-    target_update_interval = 100,
 )
 
 algo = tabular_q_learning.TabularQLearning(VmapWrapper(env), hyperparameters=hyperparameters)
@@ -61,12 +54,13 @@ while training_state.steps < STEPS:
     print("Metrics: " + " ".join([ f"{key}={val}" for key, val in metrics.items() ]))
 
     # eval
-    returns, lengths = evaluate(rngs, training_state.actor)
+    actor = algo.make_actor(training_state.q_func)
+    returns, lengths = evaluate(rngs, actor)
 
     print(f"Episode Return: mean={jnp.mean(returns)} std={jnp.std(returns, ddof=1)}")
     print(f"Episode Length: mean={jnp.mean(lengths)} std={jnp.std(lengths, ddof=1)}")
 
     print()
 
-print(training_state.policy_q_func.q_table_values.value)
-print(env.visualize_q_table(jnp.moveaxis(training_state.policy_q_func.q_table_values.value, 0, 2)))
+print(training_state.q_func.q_table_values.value)
+print(env.visualize_q_table(jnp.moveaxis(training_state.q_func.q_table_values.value, 0, 2)))

@@ -127,7 +127,7 @@ class GridworldEnv(Environment[State, Array, ArrayLike, str]):
 
     @property
     def action_space(self) -> Space[ArrayLike]:
-        return Space(low=jnp.array(0), high=jnp.array(3))
+        return Space(low=np.array(0, dtype=np.int32), high=np.array(3, dtype=np.int32))
 
 
     def visualize_q_table(self, q_vals) -> str:

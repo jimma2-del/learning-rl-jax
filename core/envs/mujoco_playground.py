@@ -35,11 +35,11 @@ class MuJoCoPlaygroundWrapper(Environment[MjxState, jax.Array, jax.Array, np.nda
         self.mjx_env = mjx_env
         self.render_settings = render_settings
 
-        obs_max = jax.tree.map(lambda leaf: jnp.full(leaf, jnp.inf), mjx_env.observation_size)
+        obs_max = jax.tree.map(lambda leaf: np.full(leaf, np.inf), mjx_env.observation_size)
         obs_min = jax.tree.map(lambda leaf: -leaf, obs_max)
         self._observation_space = Space(obs_min, obs_max)
 
-        ctrl_range = jnp.array(mjx_env.mj_model.actuator_ctrlrange, dtype=jnp.float32)    
+        ctrl_range = np.asarray(mjx_env.mj_model.actuator_ctrlrange, dtype=np.float32)    
         self._action_space = Space(ctrl_range[:, 0], ctrl_range[:, 1])
 
     def reset(self, key: chex.PRNGKey) -> tuple[MjxState, dict[Any, Any]]:

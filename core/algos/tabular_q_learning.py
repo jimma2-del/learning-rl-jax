@@ -14,12 +14,12 @@ import chex
 
 from flax import nnx
 
-from core.utils import ReplayBuffer, ReplayBufferState, LinearlyInterpolatedTable
+from core.utils import LinearlyInterpolatedTable
 from core.utils.func_utils import try_call
 from core.utils.batch_utils import flatten_batched_tree
 
 from core.envs.base import Environment, Space
-from core.algos.base import Scheduleable, GreedyQActor
+from core.algos.base import Scheduleable, GreedyQActor, set_algo_phase, AlgoPhase
 
 from core.envs.wrappers import AutoResetWrapper
 from core.envs.utils import rollout, Actor
@@ -136,19 +136,9 @@ class Hyperparameters:
     discount_rate: Scheduleable[float] = 0.95
     learning_rate: Scheduleable[float] = 0.1
 
-    batch_size: int = 32
-
     epsilon: Scheduleable[float] = 0.05
         # it is recommended to use a schedule: decay from 1 to ~0.05 over ~10% of training steps
         # eg. optax.schedules.linear_schedule(1, 0.05, 0.1*steps)
-
-    replay_buffer_size: int = 100_000
-
-    train_freq: int = 4 # does around 1 gradient step per train_freq env steps
-        # NOTE: if n_envs > train_freq, we take 1 step in each env, followed by multiple gradient steps
-        # NOTE: will round up or down if not divisible evenly
-
-    target_update_interval: int = 1000
 
 @dataclass(frozen=True)
 class Transition(Generic[TEnvObs]):
@@ -158,15 +148,12 @@ class Transition(Generic[TEnvObs]):
     next_obs: TEnvObs
     terminated: ArrayLike
 
-@dataclass(frozen=True)
+@dataclass
 class TrainingState(Generic[TEnvState, TEnvObs]):
     steps: ArrayLike
     env_states: TEnvState
-    actor: GreedyQActor
 
-    replay_buffer_state: ReplayBufferState[Transition[TEnvObs]]
-    policy_q_func: TabularQFunc
-    target_q_func: TabularQFunc
+    q_func: TabularQFunc
 
 class TabularQLearning(Generic[TEnvState, TEnvObs]):
     """Implementation of Tabular Q-Learning."""
@@ -184,34 +171,19 @@ class TabularQLearning(Generic[TEnvState, TEnvObs]):
         ), "Action space for Q-Learning must be discrete (jnp integer scalar, min=0)."
 
         self.env = env
-        self.num_actions = int(env.action_space.high + 1)
-
         self.hyperparameters = hyperparameters
 
-        # make replay buffer
-        self.transition_shapes_dtypes = Transition(
-            obs = self.env.observation_space.shapes_dtypes,
-            action = self.env.action_space.shapes_dtypes,
-            reward = jax.ShapeDtypeStruct(shape=(), dtype=jnp.float32),
-            next_obs = self.env.observation_space.shapes_dtypes,
-            terminated = jax.ShapeDtypeStruct(shape=(), dtype=jnp.bool)
-        )
-
-        self.replay_buffer = ReplayBuffer[Transition[TEnvObs]](
-            self.transition_shapes_dtypes, self.hyperparameters.replay_buffer_size)
-
     def make_default_q_func(self, init_val: ArrayLike | None = None, rngs=None) -> TabularQFunc:
-        q_func = TabularQFunc(self.num_actions, self.env.observation_space)
+        q_func = TabularQFunc(int(self.env.action_space.high + 1), self.env.observation_space)
 
         if init_val is not None:
             q_func.q_table_values.value = jnp.full_like(q_func.q_table_values.value, init_val)
 
         return q_func
 
-    def make_actor(self, q_func: TabularQFunc | None = None, epsilon: ArrayLike | None = None, **kwargs) -> GreedyQActor:
+    def make_actor(self, q_func: TabularQFunc | None = None, epsilon: ArrayLike = 0, **kwargs) -> GreedyQActor:
         if q_func is None: q_func = self.make_default_q_func(**kwargs)
-        if epsilon is None: epsilon = try_call(self.hyperparameters.epsilon, 0)
-        return GreedyQActor(q_func, self.num_actions, epsilon=epsilon)
+        return GreedyQActor(q_func, int(self.env.action_space.high + 1), epsilon=epsilon)
 
     def rollout_transitions(self,
         rngs: nnx.Rngs, 
@@ -260,115 +232,59 @@ class TabularQLearning(Generic[TEnvState, TEnvObs]):
 
         return transitions, env_states
 
-    def init_training_state(self,
-        rngs: nnx.Rngs,
-        policy_q_func: TabularQFunc | None = None,
-        target_q_func: TabularQFunc | None = None,
-        replay_buffer_state: ReplayBufferState[Transition[TEnvObs]] | None = None,
-        prefill_steps: int = 10_000
-    ) -> TrainingState[TEnvState, TEnvObs]:
-        if policy_q_func is None: policy_q_func = self.make_default_q_func()
-        if target_q_func is None: target_q_func = nnx.clone(policy_q_func)
-
-        actor = self.make_actor(policy_q_func)
-
-        if replay_buffer_state is None:
-            replay_buffer_state = self.replay_buffer.init()
-
-        # prefill replay buffer
-        transitions, env_states = nnx.jit(self.rollout_transitions, static_argnames=('iter', 'actor'))(rngs,
-            lambda obs, rngs: (actor.random_action(rngs, (self.hyperparameters.n_envs,)), {}),
-            math.ceil(prefill_steps / self.hyperparameters.n_envs),
-        )
-
-        replay_buffer_state = self.replay_buffer.insert(replay_buffer_state, transitions)
+    def init_training_state(self, rngs: nnx.Rngs, q_func: TabularQFunc | None = None) -> TrainingState[TEnvState, TEnvObs]:
+        if q_func is None: q_func = self.make_default_q_func()
+        env_states, _ = self.env.reset(jax.random.split(rngs.env(), self.hyperparameters.n_envs))
 
         return TrainingState(
             steps = jnp.array(0, dtype=jnp.int32),
             env_states = env_states,    
-            actor = actor,
-
-            replay_buffer_state = replay_buffer_state,
-            policy_q_func = policy_q_func,
-            target_q_func = target_q_func
+            q_func = q_func,
         )
 
     def train(self, rngs: nnx.Rngs, training_state: TrainingState[TEnvState, TEnvObs], steps: int) \
             -> tuple[TrainingState[TEnvState, TEnvObs], dict[Any, Any]]:
         """Train from the given `training_state`, returning an updated `training_state` and metrics."""
-        steps_per_env_per_iter = math.ceil(self.hyperparameters.train_freq / self.hyperparameters.n_envs)
-        total_steps_per_iter = steps_per_env_per_iter * self.hyperparameters.n_envs
-        learn_steps_per_iter = math.ceil(self.hyperparameters.n_envs / self.hyperparameters.train_freq)
 
         def train_iteration(training_state: TrainingState[TEnvState, TEnvObs], rngs: nnx.Rngs) \
                 -> tuple[TrainingState[TEnvState, TEnvObs], dict[Any, Any]]:
-            env_states = training_state.env_states
-            steps = training_state.steps
-            actor = training_state.actor
-
-            replay_buffer_state = training_state.replay_buffer_state
-            policy_q_func = training_state.policy_q_func
-            target_q_func = training_state.target_q_func
-            
             ## sample transitions from environment ##
-            actor.epsilon.value = try_call(self.hyperparameters.epsilon, steps)
+            set_algo_phase(training_state.q_func, AlgoPhase.ROLLOUT)
 
-            transitions, env_states = self.rollout_transitions(rngs, 
-                actor, steps_per_env_per_iter, env_states)
-
-            replay_buffer_state = self.replay_buffer.insert(replay_buffer_state, transitions)
-
-            steps += total_steps_per_iter
+            actor = self.make_actor(training_state.q_func, 
+                try_call(self.hyperparameters.epsilon, training_state.steps))
+            transitions, training_state.env_states = self.rollout_transitions(rngs, 
+                actor, 1, training_state.env_states)
+            training_state.steps += self.hyperparameters.n_envs
 
             ## update q functions ##
-            def learn_step(policy_q_func: TabularQFunc, rngs: nnx.Rngs) \
-                    -> tuple[TabularQFunc, dict[Any, Any]]:
+            set_algo_phase(training_state.q_func, AlgoPhase.OPTIMIZE)
 
-                sampled_transitions = self.replay_buffer.sample(rngs.transitions(), 
-                    replay_buffer_state, self.hyperparameters.batch_size)
+            next_qs = training_state.q_func(transitions.next_obs)
+            max_next_qs = jnp.max(next_qs, axis=-1)
+            # zero out q_val if terminated
+            max_next_qs = max_next_qs * jnp.logical_not(transitions.terminated)
 
-                next_qs = target_q_func(sampled_transitions.next_obs)
-                max_next_qs = jnp.max(next_qs, axis=-1)
-                # zero out q_val if terminated
-                max_next_qs = max_next_qs * jnp.logical_not(sampled_transitions.terminated)
+            target_qs = transitions.reward \
+                + try_call(self.hyperparameters.discount_rate, steps)*max_next_qs
+            pred_qs = training_state.q_func.get_table_value(transitions.obs, transitions.action)
 
-                target_qs = sampled_transitions.reward \
-                    + try_call(self.hyperparameters.discount_rate, steps)*max_next_qs
-                pred_qs = policy_q_func.get_table_value(sampled_transitions.obs, sampled_transitions.action)
+            adjusts = try_call(self.hyperparameters.learning_rate, steps) * (target_qs - pred_qs)
+            training_state.q_func.adjust_table_value(transitions.obs, transitions.action, adjusts)
 
-                # only used as a metric
-                loss = jnp.mean(jnp.power(target_qs - pred_qs, 2))
+            # loss is only used as a metric
+            loss = jnp.mean(jnp.power(target_qs - pred_qs, 2))
+            metrics = { 'q_loss': loss }
 
-                adjusts = try_call(self.hyperparameters.learning_rate, steps) * (target_qs - pred_qs) \
-                    / self.hyperparameters.batch_size # make "learning rate" independent of batch size
-                policy_q_func.adjust_table_value(sampled_transitions.obs, sampled_transitions.action, adjusts)
+            return training_state, jax.tree.map(lambda x: jnp.mean(x), metrics)
 
-                return policy_q_func, { 'q_loss': loss }
+        # phases must match phases at the end of train_iteration
+        set_algo_phase(training_state.q_func, AlgoPhase.OPTIMIZE)
 
-            policy_q_func, metrics = nnx.scan(learn_step)(policy_q_func, rngs.fork(split=learn_steps_per_iter))
-
-            # update target if enough steps have passed
-            update_target = steps % self.hyperparameters.target_update_interval < total_steps_per_iter
-            nnx.update(target_q_func, nnx.cond(update_target, 
-                lambda policy_q_func, target_q_func: nnx.state(policy_q_func), 
-                lambda policy_q_func, target_q_func: nnx.state(target_q_func),
-                policy_q_func, target_q_func
-            ))
-
-            return TrainingState(
-                steps=steps,
-                env_states=env_states,
-                actor=actor,
-
-                replay_buffer_state=replay_buffer_state,
-                policy_q_func=policy_q_func,
-                target_q_func=target_q_func,
-            ), jax.tree.map(lambda x: jnp.mean(x), metrics)
-
-        iterations = math.ceil(steps / total_steps_per_iter)
+        iterations = math.ceil(steps / self.hyperparameters.n_envs)
         training_state, metrics = nnx.scan(train_iteration)(training_state, rngs.fork(split=iterations))
 
         # set into eval mode for the user
-        training_state.actor.epsilon.value = jnp.array(0, dtype=jnp.float32)
+        set_algo_phase(training_state.q_func, AlgoPhase.EVAL)
 
         return training_state, jax.tree.map(lambda x: jnp.mean(x), metrics)

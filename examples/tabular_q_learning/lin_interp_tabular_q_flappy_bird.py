@@ -54,29 +54,22 @@ res  = (  50,    5)
 
 rngs = nnx.Rngs(0, params=10, env=20, actions=30, transitions=40)
 
-STEPS = 2_000_000
-LOG_INTERVAL_STEPS = 200_000
+STEPS = 1_000_000
+LOG_INTERVAL_STEPS = 100_000
 EVAL_EPS = 32
 
 hyperparameters = tabular_q_learning.Hyperparameters(
     discount_rate = 0.95,
     learning_rate = 0.1,
-
     epsilon = schedules.linear_schedule(1, 0.05, 0.1*STEPS),
-
-    replay_buffer_size = 100_000,
-    batch_size = 32,
-    train_freq = 4,
     n_envs = 32, #256,
-
-    target_update_interval = 1000,
 )
 
 algo = tabular_q_learning.TabularQLearning(VmapWrapper(env), hyperparameters)
 train = nnx.jit(algo.train, static_argnames=('steps',))
 
 q_func = tabular_q_learning.LinInterpTabularQFunc(
-    algo.num_actions, Space(np.array(low), np.array(high)), np.array(res))
+    int(env.action_space.high + 1), Space(np.array(low), np.array(high)), np.array(res))
 training_state = algo.init_training_state(rngs, q_func)
 
 @nnx.jit
@@ -97,7 +90,8 @@ while training_state.steps < STEPS:
     print("Metrics: " + " ".join([ f"{key}={val}" for key, val in metrics.items() ]))
 
     # eval
-    returns, lengths = evaluate(rngs, training_state.actor)
+    actor = algo.make_actor(training_state.q_func)
+    returns, lengths = evaluate(rngs, actor)
 
     print(f"Episode Return: mean={jnp.mean(returns)} std={jnp.std(returns, ddof=1)}")
     print(f"Episode Length: mean={jnp.mean(lengths)} std={jnp.std(lengths, ddof=1)}")
@@ -112,7 +106,7 @@ rngs = nnx.Rngs(0, params=1, env=5, actions=3, transitions=4)
 FPS = round(1/DT)
 
 visualize_pygame(
-    rngs, env, training_state.actor, 
+    rngs, env, actor, 
     fps=FPS, 
     verbose=False
 )

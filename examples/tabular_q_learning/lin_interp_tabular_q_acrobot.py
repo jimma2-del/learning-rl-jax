@@ -32,16 +32,15 @@ class AcrobotWrapper(Wrapper):
         step_key, obs_key = jax.random.split(key)
 
         state, reward, terminated, truncated, info = super().step(step_key, state, action)
-        obs = super().get_obs(obs_key, state)
 
-        height = (-obs[0] - (obs[0] * obs[2] - obs[1] * obs[3])) / 2 # [-1, 0.5]
-        h_d = ((obs[1] * (1 + obs[2]) + obs[0] * obs[3]) * obs[4] 
-            + (obs[1] * obs[2] + obs[0] * obs[3]) * obs[5]) / 2
+        ## Reward Shaping
+        # obs = super().get_obs(obs_key, state)
 
-        reward = reward + (height - 1)/2 + jnp.abs(h_d)/5
+        # height = (-obs[0] - (obs[0] * obs[2] - obs[1] * obs[3])) / 2 # [-1, 0.5]
+        # h_d = ((obs[1] * (1 + obs[2]) + obs[0] * obs[3]) * obs[4] 
+        #     + (obs[1] * obs[2] + obs[0] * obs[3]) * obs[5]) / 2
 
-        #jax.debug.print("reward={r} height={h} h_d={h_d}", r=reward, h=height, h_d=h_d)
-        #print(f"reward={reward} height={height} h_d={h_d}")
+        # reward = reward + (height - 1)/2 + jnp.abs(h_d)/5
 
         return state, reward, terminated, False, info
 
@@ -57,8 +56,8 @@ class AcrobotWrapper(Wrapper):
     @property
     def observation_space(self):
         return Space(
-            low=jnp.array((-jnp.pi, -jnp.pi, -13, -29), dtype=jnp.float32),
-            high=jnp.array((jnp.pi, jnp.pi, 13, 29), dtype=jnp.float32)
+            low=np.array((-np.pi, -np.pi, -13, -29), dtype=np.float32),
+            high=np.array((np.pi, np.pi, 13, 29), dtype=np.float32)
         )
 
 env = AcrobotWrapper(env)
@@ -96,29 +95,22 @@ res  = ( 0.2,  0.4, 0.25, 0.25)
 
 rngs = nnx.Rngs(0, params=1, env=2, actions=3, transitions=4)
 
-STEPS = 100_000_000
-LOG_INTERVAL_STEPS = 10_000_000
+STEPS = 70_000_000
+LOG_INTERVAL_STEPS = 7_000_000
 EVAL_EPS = 256
 
 hyperparameters = tabular_q_learning.Hyperparameters(
     discount_rate = 0.98,
     learning_rate = 0.1,
-
     epsilon = schedules.linear_schedule(1, 0.05, 0.1*STEPS),
-
-    replay_buffer_size = 100_000,#4096, #1024,
-    batch_size = 32,
-    train_freq = 4,
     n_envs = 256, #64,
-
-    target_update_interval = 1024
 )
 
 algo = tabular_q_learning.TabularQLearning(VmapWrapper(env), hyperparameters)
 train = nnx.jit(algo.train, static_argnames=('steps',))
 
 q_func = tabular_q_learning.LinInterpTabularQFunc(
-    algo.num_actions, Space(np.array(low), np.array(high)), np.array(res))
+    int(env.action_space.high + 1), Space(np.array(low), np.array(high)), np.array(res))
 training_state = algo.init_training_state(rngs, q_func)
 
 @nnx.jit
@@ -139,7 +131,8 @@ while training_state.steps < STEPS:
     print("Metrics: " + " ".join([ f"{key}={val}" for key, val in metrics.items() ]))
 
     # eval
-    returns, lengths = evaluate(rngs, training_state.actor)
+    actor = algo.make_actor(training_state.q_func)
+    returns, lengths = evaluate(rngs, actor)
 
     print(f"Episode Return: mean={jnp.mean(returns)} std={jnp.std(returns, ddof=1)}")
     print(f"Episode Length: mean={jnp.mean(lengths)} std={jnp.std(lengths, ddof=1)}")
@@ -167,7 +160,7 @@ if VISUALIZE_METHOD == 'gif':
     comb_cum_rewards = jnp.array((0,))
 
     for _ in range(NUM_EPISODES):
-        timesteps, state, info = rollout_episode(rngs, env, training_state.actor)
+        timesteps, state, info = rollout_episode(rngs, env, actor)
         cum_rewards = jnp.cumsum(timesteps.reward)
         steps = len(timesteps.reward)
 
@@ -185,7 +178,7 @@ elif VISUALIZE_METHOD == 'pygame':
     FPS = 10
 
     visualize_pygame(
-        rngs, env, training_state.actor, 
+        rngs, env, actor, 
         fps=FPS, 
         render_func=lambda state, action: render_acrobot(None, gymnax_env_params, state),
         verbose=False

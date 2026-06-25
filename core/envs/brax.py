@@ -35,10 +35,10 @@ class BraxWrapper(Environment[BraxState, jax.Array, jax.Array, np.ndarray]):
         self.brax_env = brax_env
         self.render_settings = render_settings
 
-        obs = jnp.inf * jnp.ones(brax_env.observation_size, dtype=jnp.float32)
+        obs = np.inf * np.ones(brax_env.observation_size, dtype=np.float32)
         self._observation_space = Space(-obs, obs)
 
-        action = brax_env.sys.actuator.ctrl_range
+        action = np.asarray(brax_env.sys.actuator.ctrl_range)
         self._action_space = Space(action[:, 0], action[:, 1])
 
     def reset(self, key: chex.PRNGKey) -> tuple[BraxState, dict[Any, Any]]:

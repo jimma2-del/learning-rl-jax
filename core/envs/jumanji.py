@@ -7,7 +7,7 @@ from typing import Any, Generic, Callable
 from typing_extensions import TypeVar
 from abc import ABC, abstractmethod
 
-import functools
+import numpy as np
 
 import jax
 from jax.typing import ArrayLike
@@ -23,22 +23,22 @@ from core.envs.base import Environment, Space
 def space_from_jumanji_spec(spec: specs.Spec) -> Space:
     if isinstance(spec, specs.BoundedArray):
         return Space(
-            low=jnp.broadcast_to(spec.minimum, spec.shape).astype(spec.dtype), 
-            high=jnp.broadcast_to(spec.maximum, spec.shape).astype(spec.dtype)
+            low=np.asarray(jnp.broadcast_to(spec.minimum, spec.shape).astype(spec.dtype)), 
+            high=np.asarray(jnp.broadcast_to(spec.maximum, spec.shape).astype(spec.dtype))
         )
 
     elif isinstance(spec, specs.Array):
         if jnp.issubdtype(spec.dtype, jnp.integer):
             iinfo = jnp.iinfo(spec.dtype)
-            min_val = iinfo.min
-            max_val = iinfo.max
+            min_val = np.asarray(iinfo.min)
+            max_val = np.asarray(iinfo.max)
         else:
-            min_val = -jnp.inf
-            max_val = +jnp.inf
+            min_val = -np.inf
+            max_val = +np.inf
 
         return Space(
-            low=jnp.full(spec.shape, min_val, dtype=spec.dtype), 
-            high=jnp.full(spec.shape, max_val, dtype=spec.dtype)
+            low=np.full(spec.shape, min_val, dtype=spec.dtype), 
+            high=np.full(spec.shape, max_val, dtype=spec.dtype)
         )
 
     else: # nested spec

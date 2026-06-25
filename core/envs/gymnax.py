@@ -7,7 +7,7 @@ from typing import Any, Generic
 from typing_extensions import TypeVar
 from abc import ABC, abstractmethod
 
-import functools
+import numpy as np
 
 import jax
 from jax.typing import ArrayLike
@@ -22,12 +22,12 @@ from core.envs.base import Environment, Space
 
 def space_from_gymnax_space(gymnax_space: GymnaxSpaces.Space) -> Space:
     if isinstance(gymnax_space, GymnaxSpaces.Discrete):
-        return Space(low=jnp.array(0, dtype=jnp.int32), high=jnp.array(gymnax_space.n - 1, dtype=jnp.int32))
+        return Space(low=np.array(0, dtype=np.int32), high=np.array(gymnax_space.n - 1, dtype=np.int32))
 
     if isinstance(gymnax_space, GymnaxSpaces.Box):
         return Space(
-            low=jnp.broadcast_to(gymnax_space.low, gymnax_space.shape).astype(jnp.float32), 
-            high=jnp.broadcast_to(gymnax_space.high, gymnax_space.shape).astype(dtype=jnp.float32)
+            low=np.asarray(jnp.broadcast_to(gymnax_space.low, gymnax_space.shape).astype(jnp.float32)), 
+            high=np.asarray(jnp.broadcast_to(gymnax_space.high, gymnax_space.shape).astype(dtype=jnp.float32))
         )
 
     if isinstance(gymnax_space, GymnaxSpaces.Dict):

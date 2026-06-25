@@ -84,7 +84,8 @@ while training_state.steps < STEPS:
     print("Metrics: " + " ".join([ f"{key}={val}" for key, val in metrics.items() ]))
 
     #eval
-    returns, lengths = evaluate(rngs, training_state.actor)
+    actor = algo.make_actor(training_state.opt_networks, epsilon=0)
+    returns, lengths = evaluate(rngs, actor)
 
     print(f"Episode Return: mean={jnp.mean(returns)} std={jnp.std(returns, ddof=1)}")
     print(f"Episode Length: mean={jnp.mean(lengths)} std={jnp.std(lengths, ddof=1)}")
@@ -103,7 +104,7 @@ rngs = nnx.Rngs(0, params=1, env=2, actions=3, transitions=4)
 comb_states = []
 
 for _ in range(NUM_EPISODES):
-    timesteps, state, info = rollout_episode(rngs, env, training_state.actor)
+    timesteps, state, info = rollout_episode(rngs, env, actor)
     eps_return = sum(timesteps.reward)
     steps = len(timesteps.reward)
 
