@@ -49,7 +49,10 @@ hyperparameters = dqn.Hyperparameters(
     train_freq = 4,
     n_envs = 32,
     epsilon = schedules.linear_schedule(1, 0.05, 0.1*STEPS),
-    replay_buffer_size = 100_000
+    replay_buffer_size = 100_000,
+
+    #target_update_interval = 1000
+    polyak_tau = 0.005
 )
 
 algo = dqn.DQN(VmapWrapper(env), hyperparameters)

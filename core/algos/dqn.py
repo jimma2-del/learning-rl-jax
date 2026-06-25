@@ -41,7 +41,10 @@ class Hyperparameters:
         # NOTE: if n_envs > train_freq, we take 1 step in each env, followed by multiple gradient steps
         # NOTE: will round up or down if not divisible evenly
 
-    target_update_interval: int = 1000
+    target_update_interval: int = 10_000 # environment steps
+
+    polyak_tau: Scheduleable[float] | None = None # if not None, OVERRIDES `target_update_interval``
+        # target is updated after EVERY gradient step if not None
 
 TEnvState = TypeVar("TEnvState")
 TEnvObs = TypeVar("TEnvObs")
@@ -213,6 +216,10 @@ class DQN(Generic[TEnvState, TEnvObs]):
         target_networks = nnx.clone(networks)
         set_algo_phase(target_networks, AlgoPhase.EVAL)
 
+        if self.hyperparameters.polyak_tau is not None: # convert datatypes to floats
+            nnx.update(target_networks, optax.incremental_update(
+                nnx.state(target_networks), nnx.state(target_networks), 0.5))
+
         if replay_buffer_state is None:
             replay_buffer_state = self.replay_buffer.init()
 
@@ -263,14 +270,14 @@ class DQN(Generic[TEnvState, TEnvObs]):
             ## update q functions ##
             set_algo_phase(training_state.opt_networks, AlgoPhase.OPTIMIZE)
 
-            def learn_step(carry: tuple[Networks, nnx.Optimizer], rngs: nnx.Rngs) \
-                    -> tuple[tuple[Networks, nnx.Optimizer], dict[Any, Any]]:
-                opt_networks, optimizer = carry
+            def learn_step(carry: tuple[Networks, Networks, nnx.Optimizer], rngs: nnx.Rngs) \
+                    -> tuple[tuple[Networks, Networks, nnx.Optimizer], dict[Any, Any]]:
+                opt_networks, target_networks, optimizer = carry
 
                 sampled_transitions = self.replay_buffer.sample(rngs.transitions(), 
                     training_state.replay_buffer_state, self.hyperparameters.batch_size)
 
-                next_qs = optionally_pass(training_state.target_networks, rngs=rngs)(sampled_transitions.next_obs)
+                next_qs = optionally_pass(target_networks, rngs=rngs)(sampled_transitions.next_obs)
                 max_next_qs = jnp.max(next_qs, axis=-1)
                 # zero out q_val if terminated
                 max_next_qs = max_next_qs * jnp.logical_not(sampled_transitions.terminated)
@@ -291,20 +298,33 @@ class DQN(Generic[TEnvState, TEnvObs]):
                 loss, grads = loss_grad_func(opt_networks, rngs)
                 optimizer.update(grads) 
 
+                # update target network if using polyak averaging
+                if self.hyperparameters.polyak_tau is not None:
+                    tau = try_call(self.hyperparameters.polyak_tau, training_state.steps)
+                    nnx.update(target_networks, optax.incremental_update(
+                        nnx.state(opt_networks), nnx.state(target_networks), tau))
+
                 return carry, { 'q_loss': loss }
 
-            _, metrics = nnx.scan(learn_step)((training_state.opt_networks, training_state.optimizer), 
-                rngs.fork(split=learn_steps_per_iter))
+            _, metrics = nnx.scan(learn_step)(
+                (training_state.opt_networks, training_state.target_networks, training_state.optimizer), 
+                rngs.fork(split=learn_steps_per_iter)
+            )
 
-            # update target if enough steps have passed
-            update_target = training_state.steps % self.hyperparameters.target_update_interval < total_steps_per_iter
-            nnx.update(training_state.target_networks, jax.lax.cond(update_target, 
-                lambda opt_state, target_state: opt_state, 
-                lambda opt_state, target_state: target_state,
-                nnx.state(training_state.opt_networks), nnx.state(training_state.target_networks)
-            ))
+            # update target if enough steps have passed (not using polyak averaging)
+            if self.hyperparameters.polyak_tau is None:
+                update_target = training_state.steps % self.hyperparameters.target_update_interval < total_steps_per_iter
+                nnx.update(training_state.target_networks, jax.lax.cond(update_target, 
+                    lambda opt_state, target_state: opt_state, 
+                    lambda opt_state, target_state: target_state,
+                    nnx.state(training_state.opt_networks), nnx.state(training_state.target_networks)
+                ))
 
             return training_state, jax.tree.map(lambda x: jnp.mean(x), metrics)
+
+        if self.hyperparameters.polyak_tau is not None: # convert datatypes to floats
+            nnx.update(training_state.target_networks, optax.incremental_update(
+                nnx.state(training_state.target_networks), nnx.state(training_state.target_networks), 0.5))
 
         # phases must match phases at the end of train_iteration
         set_algo_phase(training_state.target_networks, AlgoPhase.EVAL)
