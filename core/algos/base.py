@@ -1,4 +1,5 @@
 from typing import TypeVar, Generic, Protocol, TypeAlias, Sequence, Any
+from enum import Enum
 
 import jax.numpy as jnp
 import jax
@@ -19,6 +20,17 @@ class Schedule(Generic[TScheduleValue], Protocol):
 
 Scheduleable: TypeAlias = TScheduleValue | Schedule[TScheduleValue]
 
+class AlgoPhase(Enum):
+    ROLLOUT = 'rollout'
+    OPTIMIZE = 'optimize'
+    EVAL = 'eval'
+
+def set_algo_phase(module: nnx.Module, phase: AlgoPhase) -> None:
+    if phase == AlgoPhase.OPTIMIZE:
+        module.train(algo_phase=phase)
+    else:
+        module.eval(algo_phase=phase)
+
 TEnvObs = TypeVar("TEnvObs")
 TEnvAction = TypeVar("TEnvAction")
 
@@ -32,31 +44,33 @@ class StochasticPolicyActor(Generic[TEnvObs, TEnvAction], nnx.Module):
     """Actor which chooses actions by sampling from a distribution outputted by the policy."""
 
     def __init__(self, policy: Policy[TEnvObs, TEnvAction], action_space: Space[TEnvAction],
-            deterministic: bool = False, squash_continuous: bool = True) -> None:
+            deterministic_sampling: bool = False, squash_continuous: bool = True) -> None:
         self.policy = policy
         self.action_space = action_space
 
-        self.deterministic = deterministic
+        # configurations for `self.__call__()`
+        self.deterministic_sdeterministic_samplingample = deterministic_sampling
         self.squash_continuous = squash_continuous
 
     def __call__(self, obs: TEnvObs, rngs: nnx.Rngs | None = None,
-            deterministic: bool | None = None, squash_continuous: bool | None = None) -> tuple[TEnvAction, dict[Any, Any]]:
+        deterministic_sampling: bool | None = None, squash_continuous: bool | None = None
+    ) -> tuple[TEnvAction, dict[Any, Any]]:
         """Computes an action distribution for the given observation, and samples an action from it.
         Returns the raw action distribution in `info['action_dist']`.
 
         `squash_continuous`: If False, does not squash continuous values, leaving them unbounded.
             Useful, eg. for sampling raw outputs, before softplus or tanh.
 
-        `deterministic`: If True, takes the mode of the action distribution instead of 
-            sampling a random action. See `Space.sample_distribution()`.
+        `deterministic_sampling`: If True, returns a deterministc representative value of the action distribution 
+            instead of sampling a random value: either the median or the mode. See `Space.sample_distribution()`.
         """
 
-        if deterministic is None: deterministic = self.deterministic
+        if deterministic_sampling is None: deterministic_sampling = self.deterministic_sampling
         if squash_continuous is None: squash_continuous = self.squash_continuous
 
         action_dist = self.action_distribution(obs, rngs)
         return self.action_space.sample_distribution(rngs.actions(), action_dist, 
-            squash_continuous=squash_continuous, deterministic=deterministic), {'action_dist': action_dist}
+            squash_continuous=squash_continuous, deterministic=deterministic_sampling), {'action_dist': action_dist}
 
     def action_distribution(self, obs, rngs: nnx.Rngs | None = None) -> TEnvAction:
         """Applies the policy on the observation to compute an action distribution.
@@ -76,31 +90,23 @@ class GreedyQActor(Generic[TEnvObs], nnx.Module):
     Supports epsilon-greedy actions, returning a random action instead with probability epsilon.
     """
 
-    def __init__(self, q_func: DiscreteQFunc[TEnvObs], num_actions: int, 
-            deterministic: bool = False, epsilon: ArrayLike = jnp.array(0.0)) -> None:
+    def __init__(self, q_func: DiscreteQFunc[TEnvObs], num_actions: int, epsilon: ArrayLike = jnp.array(0.0)) -> None:
         self.q_func = q_func
         self.num_actions = int(num_actions)
 
-        self.deterministic = deterministic
         self.epsilon = nnx.Variable(jnp.array(epsilon, dtype=jnp.float32))
 
     def __call__(self, obs: TEnvObs, rngs: nnx.Rngs | None = None,
-            deterministic: bool | None = None, epsilon: ArrayLike | None = None) -> tuple[TEnvAction, dict[Any, Any]]:
+            epsilon: ArrayLike | None = None) -> tuple[TEnvAction, dict[Any, Any]]:
         """Returns a random action with probablity `epsilon`, otherwise 
             computes a Q value for every possible action and returns the action with the highest Q value.
         Returns the raw Q values in `info['q_values']`, and whether a random action was used in `info['action_random']`.
-
-        `deterministic`: If True, overrides `epsilon` and always returns a greedy action.
         """
 
-        if deterministic is None: deterministic = self.deterministic
         if epsilon is None: epsilon = self.epsilon.value
 
         q_values = self.q_values(obs, rngs=rngs)
         greedy_action = self.select_greedy_action(q_values)
-        
-        if deterministic: 
-            return greedy_action, { 'q_values': q_values, 'action_random': jnp.full_like(greedy_action, False) }
 
         random_action = self.random_action(rngs, shape=greedy_action.shape)
         take_random_action = jax.random.uniform(rngs.actions(), shape=greedy_action.shape) < epsilon

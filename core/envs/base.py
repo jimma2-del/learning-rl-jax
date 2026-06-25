@@ -1,4 +1,4 @@
-from typing import Any, Generic
+from typing import Any, Generic, Sequence
 from typing_extensions import TypeVar
 from abc import ABC, abstractmethod
 
@@ -14,7 +14,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from core.utils.math import inv_softplus, normal_entropy
-from core.utils.batch_utils import get_tree_batch_dims
+from core.utils.batch_utils import flatten_batched_tree, unflatten_batched_tree, get_tree_flattened_dim
 
 TSpaceElement = TypeVar("TSpaceElement")
 
@@ -72,6 +72,17 @@ class Space(Generic[TSpaceElement]):
             self.low, self.high
         )), "`low` cannot equal `high` for continuous leaves, since `high` bound is exclusive while `low` is inclusive."
 
+
+    def flatten(self, x: TSpaceElement) -> jax.Array:
+        return flatten_batched_tree(self.shapes_dtypes, x)
+
+    def unflatten(self, x: jax.Array) -> TSpaceElement:
+        return unflatten_batched_tree(self.shapes_dtypes, x)
+
+    @property
+    def flattened_dim(self) -> int:
+        return get_tree_flattened_dim(self.shapes_dtypes)
+
     def contains(self, x: TSpaceElement, batched: bool = False) -> bool:
         """Check if `x` is a valid member of this space. 
         If batched=True, disregards leading batch dimensions"""
@@ -94,32 +105,36 @@ class Space(Generic[TSpaceElement]):
         return jax.tree.all(leaf_matches, x, self.low, self.high, self.shapes_dtypes)
 
     #@functools.partial(jax.jit, static_argnames=('self'))
-    def sample(self, key: chex.PRNGKey) -> TSpaceElement:
-        """Samples a single element from the space, according to a uniform distribution.
+    def sample(self, key: chex.PRNGKey, batch_dims: Sequence[int] = ()) -> TSpaceElement:
+        """Samples a batch of elements of shape `batch_dims` from the space.
         
-        Continuous (np.floating) items can be unbounded by setting 
+        Bounded features are sampled according to a uniform distribution.
+        
+        Continuous (np.floating) features can be unbounded by setting 
         `low` to `-np.inf` and/or `high` to `np.inf`.
             - If one bound is infinite, samples from a standard exponential distribution.
-            - If both bounds are infinite, samples from standard normal distribution."""
+            - If both bounds are infinite, samples from standard normal distribution.
+        """
 
         keys = jax.random.split(key, num=self.treedef.num_leaves)
         keys_tree = jax.tree.unflatten(self.treedef, keys)
 
         def sample_leaf(cur_low, cur_high, shape_dtype: jax.ShapeDtypeStruct, key: chex.PRNGKey):
+            shape = batch_dims + shape_dtype.shape
 
             if np.issubdtype(shape_dtype.dtype, np.integer):
-                return jax.random.randint(key, shape=shape_dtype.shape, dtype=shape_dtype.dtype,
+                return jax.random.randint(key, shape=shape, dtype=shape_dtype.dtype,
                     minval=cur_low, maxval=cur_high + 1)
 
             else:
-                sample = jnp.empty(shape_dtype.shape, dtype=shape_dtype.dtype)
+                sample = jnp.empty(shape, dtype=shape_dtype.dtype)
 
                 if np.logical_not(np.logical_or(np.isinf(cur_low), np.isinf(cur_high))).any():
-                    sample = jax.random.uniform(key, shape=shape_dtype.shape, dtype=shape_dtype.dtype,
+                    sample = jax.random.uniform(key, shape=shape, dtype=shape_dtype.dtype,
                         minval=cur_low, maxval=cur_high)
 
                 if np.logical_xor(np.isinf(cur_low), np.isinf(cur_high)).any():
-                    exp = jax.random.exponential(key, shape=shape_dtype.shape)
+                    exp = jax.random.exponential(key, shape=shape)
 
                     if np.isinf(cur_low).any():
                         sample = jnp.where(np.isinf(cur_low), cur_high - exp, sample)
@@ -129,7 +144,7 @@ class Space(Generic[TSpaceElement]):
 
                 both_unbounded = np.logical_and(np.isinf(cur_low), np.isinf(cur_high))
                 if both_unbounded.any():
-                    sample = jnp.where(both_unbounded, jax.random.normal(key, shape=shape_dtype.shape), sample)
+                    sample = jnp.where(both_unbounded, jax.random.normal(key, shape=shape), sample)
 
                 return sample
 
@@ -208,9 +223,9 @@ class Space(Generic[TSpaceElement]):
 
         return jax.tree.map(map_func, x, self.low, self.high, self.shapes_dtypes)
 
-    def sample_distribution(self, key: chex.PRNGKey, distribution: TSpaceElement, 
+    def sample_distribution(self, key: chex.PRNGKey, distribution: TSpaceElement, batch_dims: Sequence[int] = (),
             squash_continuous=True, deterministic=False, log_stds=False) -> TSpaceElement:
-        """Samples a single element from the space, according to the given distribution.
+        """Samples a batch of elements of shape `batch_dims` from the space, according to the given distribution.
         
         The distribution should have the same treedef as the Space. Each leaf should have the same shape,
         but with an extra trailing axis as follows:
@@ -230,9 +245,9 @@ class Space(Generic[TSpaceElement]):
         `squash_continuous`: If False, does not squash continuous values, leaving them unbounded.
             Useful, eg. for sampling raw outputs, before softplus or tanh.
 
-        `deterministic`: If True, takes the mode.
-            Discrete (jnp.integer) leaves: selects the choice with the highest probability.
-            Continuous (jnp.floating) leaves: takes the mean of the distribution.
+        `deterministic`: If True, returns a deterministic representative value instead of a random sample.
+            Discrete (jnp.integer) leaves: selects the choice with the highest probability (mode).
+            Continuous (jnp.floating) leaves: takes the median of the distribution.
 
         `log_stds`: If True, treats stds as log stds: uses exp(feature[1]) as the standard deviation.
         """
@@ -241,14 +256,19 @@ class Space(Generic[TSpaceElement]):
         keys_tree = jax.tree.unflatten(self.treedef, keys)
 
         def sample_leaf(cur_dist, cur_low, shape_dtype: jax.ShapeDtypeStruct, key: chex.PRNGKey):
+            shape = batch_dims + shape_dtype.shape
+
             if np.issubdtype(shape_dtype.dtype, np.integer):
-                if deterministic: indices = jnp.argmax(cur_dist, axis=-1)
-                else: indices = jax.random.categorical(key, cur_dist, axis=-1)
+                if deterministic: 
+                    indices = jnp.argmax(cur_dist, axis=-1)
+                    indices = jnp.tile(jnp.expand_dims(indices, batch_dims), batch_dims + (1,)*len(shape_dtype.shape))
+                else: 
+                    indices = jax.random.categorical(key, cur_dist, axis=-1, shape=shape)
 
                 return cur_low + indices
             else:
-                if deterministic: z = 0
-                else: z = jax.random.normal(key, shape=shape_dtype.shape, dtype=shape_dtype.dtype)
+                if deterministic: z = jnp.zeros(shape)
+                else: z = jax.random.normal(key, shape=shape, dtype=shape_dtype.dtype)
 
                 std = jnp.exp(cur_dist[..., 1]) if log_stds else cur_dist[..., 1]
 
@@ -364,9 +384,8 @@ class Space(Generic[TSpaceElement]):
                 "`monte_carlo_key` must be provided for monte carlo estimation."
 
             # NOTE: unnecessary sample and log_p computations will be optimized out by the compiler
-            samples = jax.vmap(lambda key: self.sample_distribution(key, 
-                distribution, squash_continuous=False, log_stds=log_stds)
-            )(jax.random.split(monte_carlo_key, monte_carlo_n_samples))
+            samples = self.sample_distribution(monte_carlo_key, distribution, batch_dims=(monte_carlo_n_samples,),
+                squash_continuous=False, log_stds=log_stds)
 
             log_ps = self.log_probabilities(samples, distribution, 
                 continuous_squashed=False, log_stds=log_stds)

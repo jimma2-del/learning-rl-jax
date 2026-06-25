@@ -11,7 +11,7 @@ from flax import nnx
 import optax
 
 from core.utils.func_utils import try_call, optionally_pass
-from core.utils.networks import MLP, FlattenAndProject, ActionDistributionHead
+from core.utils.nnx_modules import MLP, FlattenAndProject, ActionDistributionHead
 
 from core.algos.base import Scheduleable, StochasticPolicyActor, Policy, ValueFunc
 

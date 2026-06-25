@@ -19,7 +19,7 @@ from core.envs.base import Environment, Space
 from core.envs.wrappers import AutoResetWrapper, SquashContinuousActionsToBoundsWrapper
 from core.envs.utils import rollout, Timestep
 
-from core.utils.networks import MLP, FlattenAndProject, ActionDistributionHead
+from core.utils.nnx_modules import MLP, FlattenAndProject, ActionDistributionHead
 
 @dataclass(frozen=True)
 class Hyperparameters:

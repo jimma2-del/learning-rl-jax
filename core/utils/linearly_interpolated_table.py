@@ -4,7 +4,7 @@ import jax.numpy as jnp
 from jax.typing import ArrayLike
 import jax
 
-from core.utils.batch_utils import batched_index, shape_matches_excluding_batch_dims
+from core.utils.batch_utils import batched_index, shape_matches_excluding_batch_axes
 
 class LinearlyInterpolatedTable:
     """Supports batched positions -- getting/setting values at multiple positions at once."""
@@ -27,7 +27,7 @@ class LinearlyInterpolatedTable:
         return jnp.full(self.shape, init, dtype=jnp.float32)
 
     def get(self, data: jax.Array, pos: ArrayLike) -> jax.Array:
-        assert shape_matches_excluding_batch_dims(self.shape, data.shape)
+        assert shape_matches_excluding_batch_axes(self.shape, data.shape)
         assert pos.shape[-1] == len(self.shape)
 
         lower_indices, offsets = self.get_lower_indices_and_offsets(pos)
@@ -43,7 +43,7 @@ class LinearlyInterpolatedTable:
         self, data: jax.Array, pos: ArrayLike, adjust_amount: ArrayLike
     ) -> tuple[jax.Array, jax.Array]:
         """Returns: (*batch_dims, corner_dim, pos_dim), (*batch_dims, corner_dim)."""
-        assert shape_matches_excluding_batch_dims(self.shape, data.shape)
+        assert shape_matches_excluding_batch_axes(self.shape, data.shape)
         assert pos.shape[-1] == len(self.shape)
 
         lower_indices, offsets = self.get_lower_indices_and_offsets(pos)

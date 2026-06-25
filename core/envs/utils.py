@@ -14,11 +14,11 @@ import jax.numpy as jnp
 
 from flax import nnx
 
-from core.utils.batch_utils import split_key_if_batched
+from core.utils.batch_utils import split_key_if_batched, get_tree_batch_dims
 from core.utils.func_utils import optionally_pass
 
-from core.envs.base import Environment
-from core.envs.wrappers import AutoResetWrapper, DummyVmapWrapper
+from core.envs.base import Environment, Space
+from core.envs.wrappers import AutoResetWrapper
 
 TEnvState = TypeVar("TEnvState")
 TEnvObs = TypeVar("TEnvObs")
@@ -39,6 +39,23 @@ def with_info(func: Callable[P, R]) -> Callable[P, tuple[R, dict[Any, Any]]]:
     def wrapper(*args: P.args, **kwargs: P.kwargs) -> tuple[R, dict[Any, Any]]:
         return func(*args, **kwargs), {}
     return wrapper
+
+class RandomActor(Generic[TEnvObs, TEnvAction]):
+    """Actor which chooses actions by sampling from a uniform distribution."""
+
+    def __init__(self, action_space: Space[TEnvAction], 
+            observation_space: Space[TEnvObs] | None = None) -> None:
+        """
+        `observation_space` is needed to determine batch dims if processing batched observations.
+            If not given, `__call__` will always only output a single action, regardless of `obs`.
+        """
+        self.action_space = action_space
+        self.observation_space = observation_space
+
+    def __call__(self, obs: TEnvObs, rngs: nnx.Rngs) -> tuple[TEnvAction, dict[Any, Any]]:
+        batch_dims = () if self.observation_space is None \
+            else get_tree_batch_dims(self.observation_space.shapes_dtypes, obs)
+        return self.action_space.sample(rngs.actions(), batch_dims=batch_dims), {}
 
 def evaluate_episodes(rngs: nnx.Rngs, 
     env: Environment[TEnvState, TEnvObs, TEnvAction, TRenderFrame], 

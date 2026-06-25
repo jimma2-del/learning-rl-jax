@@ -1,4 +1,4 @@
-from typing import TypeVar, Generic, Any
+from typing import TypeVar, Generic, Any, Sequence, Self
 
 import math
 
@@ -12,15 +12,15 @@ from chex import dataclass
 from flax import nnx
 import optax
 
-from core.utils import ReplayBuffer, ReplayBufferState
+from core.utils import ReplayBuffer, ReplayBufferState, RunningMeanVar
 from core.utils.func_utils import try_call, optionally_pass
-from core.utils.networks import MLP, FlattenAndProject
+from core.utils.nnx_modules import MLP, RunningMeanVarNorm
 
-from core.algos.base import Scheduleable, GreedyQActor, DiscreteQFunc
+from core.algos.base import Scheduleable, GreedyQActor, AlgoPhase, set_algo_phase
 
-from core.envs.base import Environment
+from core.envs.base import Environment, Space
 from core.envs.wrappers import AutoResetWrapper
-from core.envs.utils import rollout, Actor
+from core.envs.utils import rollout, Actor, RandomActor
 
 @dataclass(frozen=True)
 class Hyperparameters:
@@ -46,6 +46,49 @@ class Hyperparameters:
 TEnvState = TypeVar("TEnvState")
 TEnvObs = TypeVar("TEnvObs")
 
+class Networks(nnx.Module, Generic[TEnvObs]):
+    def __init__(self, obs_trunk, qs_head) -> None:
+        self.obs_trunk = obs_trunk
+        self.qs_head = qs_head
+
+    def __call__(self, obs: TEnvObs, rngs: nnx.Rngs | None = None):
+        trunk_out = optionally_pass(self.obs_trunk, rngs=rngs)(obs)
+        return self.qs_head(trunk_out)
+
+    @classmethod
+    def make_default(cls, rngs: nnx.Rngs, observation_space: Space[TEnvObs], action_space: Space[ArrayLike]) -> Self:
+        return cls(
+            cls.make_default_obs_trunk(observation_space),
+            cls.make_default_qs_head(rngs, observation_space.flattened_dim, action_space)
+        )
+
+    @staticmethod
+    def make_default_obs_trunk(
+        observation_space: Space[TEnvObs],
+        normalize_observations: bool = True, 
+        obs_running_mean_var: RunningMeanVar[TEnvObs] | None = None, 
+        obs_clip_threshold: float | None = None
+    ) -> nnx.Sequential:
+        layers = []
+
+        if normalize_observations:
+            inp = observation_space.shapes_dtypes if obs_running_mean_var is None else obs_running_mean_var
+            layers.append(RunningMeanVarNorm(inp, clip_threshold=obs_clip_threshold))
+
+        layers.append(observation_space.flatten)
+
+        return nnx.Sequential(*layers)
+
+    @staticmethod
+    def make_default_qs_head(
+        rngs: nnx.Rngs, input_dim: int, action_space: Space[ArrayLike],
+        hidden_dims: Sequence[int] = (128, 128), do_layer_norm: bool = True, activation_func=nnx.relu
+    ) -> nnx.Module:
+        return MLP(
+            rngs, (input_dim, *hidden_dims, int(action_space.high + 1)), 
+            do_layer_norm=do_layer_norm, activation_func=activation_func
+        )
+
 @dataclass(frozen=True)
 class Transition(Generic[TEnvObs]):
     obs: TEnvObs
@@ -54,16 +97,16 @@ class Transition(Generic[TEnvObs]):
     next_obs: TEnvObs
     terminated: ArrayLike
 
-@dataclass(frozen=True)
+@dataclass
 class TrainingState(Generic[TEnvState, TEnvObs]):
     steps: ArrayLike
     env_states: TEnvState
-    actor: GreedyQActor
 
-    replay_buffer_state: ReplayBufferState[Transition[TEnvObs]]
-    policy_q_func: DiscreteQFunc
-    target_q_func: DiscreteQFunc
+    opt_networks: Networks
     optimizer: nnx.Optimizer
+
+    target_networks: Networks
+    replay_buffer_state: ReplayBufferState[Transition[TEnvObs]]
 
 class DQN(Generic[TEnvState, TEnvObs]):
     """Implementation of DQN."""
@@ -81,8 +124,6 @@ class DQN(Generic[TEnvState, TEnvObs]):
         ), "Action space for Q-Learning must be discrete (jnp integer scalar, min=0)."
 
         self.env = env
-        self.num_actions = int(env.action_space.high + 1)
-
         self.hyperparameters = hyperparameters
 
         # make replay buffer
@@ -97,27 +138,18 @@ class DQN(Generic[TEnvState, TEnvObs]):
         self.replay_buffer = ReplayBuffer[Transition[TEnvObs]](
             self.transition_shapes_dtypes, self.hyperparameters.replay_buffer_size)
 
-    def make_default_q_func(self, rngs: nnx.Rngs, 
-        hidden_dim: int = 256, num_hidden_layers: int = 2, do_layer_norm: bool = True, activation_func=nnx.relu
-    ) -> nnx.Module:
-        assert num_hidden_layers >= 1, "`num_hidden_layers` must be at least 1."
-        layers = [ FlattenAndProject[TEnvObs](rngs, self.env.observation_space.shapes_dtypes, output_dim=hidden_dim) ]
+    def make_actor(self, networks: Networks | None = None, epsilon: ArrayLike = jnp.array(0.0), 
+            rngs: nnx.Rngs | None = None) -> GreedyQActor:
+        """`rngs` is only necessary if `networks` is not provided."""
 
-        if do_layer_norm: layers.append(nnx.LayerNorm(hidden_dim, rngs=rngs))
-        layers.append(activation_func)
+        if networks is None: 
+            networks = Networks.make_default(rngs, self.env.observation_space, self.env.action_space)
 
-        layers.append(MLP(rngs, 
-            input_dim=hidden_dim, output_dim=self.num_actions,
-            hidden_dim=hidden_dim, num_hidden_layers=num_hidden_layers-1, 
-            do_layer_norm=do_layer_norm, activation_func=activation_func
-        ))
-
-        return nnx.Sequential(*layers)
-
-    def make_actor(self, q_func: DiscreteQFunc | None = None, epsilon: ArrayLike | None = None, **kwargs) -> GreedyQActor:
-        if q_func is None: q_func = self.make_default_q_func(**kwargs)
-        if epsilon is None: epsilon = try_call(self.hyperparameters.epsilon, 0)
-        return GreedyQActor(q_func, self.num_actions, epsilon=epsilon)
+        return GreedyQActor(
+            nnx.Sequential(networks.obs_trunk, networks.qs_head), 
+            int(self.env.action_space.high + 1), 
+            epsilon=epsilon
+        )
 
     def rollout_transitions(self,
         rngs: nnx.Rngs, 
@@ -168,25 +200,25 @@ class DQN(Generic[TEnvState, TEnvObs]):
 
     def init_training_state(self,
         rngs: nnx.Rngs,
-        policy_q_func: DiscreteQFunc | None = None,
-        target_q_func: DiscreteQFunc | None = None,
+        networks: Networks | None = None,
         replay_buffer_state: ReplayBufferState[Transition[TEnvObs]] | None = None,
-        prefill_steps: int = 10_000
+        prefill_steps: int = 10_000,
     ) -> TrainingState[TEnvState, TEnvObs]:
-        if policy_q_func is None: policy_q_func = self.make_default_q_func(rngs)
-        if target_q_func is None: target_q_func = nnx.clone(policy_q_func)
+        if networks is None: 
+            networks = Networks.make_default(rngs, self.env.observation_space, self.env.action_space)
 
-        optimizer = nnx.Optimizer(policy_q_func, optax.inject_hyperparams(optax.adamw)(
+        optimizer = nnx.Optimizer(networks, optax.inject_hyperparams(optax.adamw)(
             learning_rate=try_call(self.hyperparameters.learning_rate, 0)))
 
-        actor = self.make_actor(policy_q_func)
+        target_networks = nnx.clone(networks)
+        set_algo_phase(target_networks, AlgoPhase.EVAL)
 
         if replay_buffer_state is None:
             replay_buffer_state = self.replay_buffer.init()
 
         # prefill replay buffer
         transitions, env_states = nnx.jit(self.rollout_transitions, static_argnames=('iter', 'actor'))(rngs,
-            lambda obs, rngs: (actor.random_action(rngs, (self.hyperparameters.n_envs,)), {}),
+            RandomActor(self.env.action_space, self.env.observation_space),
             math.ceil(prefill_steps / self.hyperparameters.n_envs),
         )
 
@@ -195,12 +227,12 @@ class DQN(Generic[TEnvState, TEnvObs]):
         return TrainingState(
             steps = jnp.array(0, dtype=jnp.int32),
             env_states = env_states,
-            actor = actor,
 
+            opt_networks = networks,
+            optimizer = optimizer,
+
+            target_networks = target_networks,
             replay_buffer_state = replay_buffer_state,
-            policy_q_func = policy_q_func,
-            target_q_func = target_q_func,
-            optimizer = optimizer
         )
     
     def train(self, rngs: nnx.Rngs, training_state: TrainingState[TEnvState, TEnvObs], steps: int) \
@@ -213,52 +245,41 @@ class DQN(Generic[TEnvState, TEnvObs]):
 
         def train_iteration(training_state: TrainingState[TEnvState, TEnvObs], rngs: nnx.Rngs) \
                 -> tuple[TrainingState[TEnvState, TEnvObs], dict[Any, Any]]:
-            env_states = training_state.env_states
-            steps = training_state.steps
-            actor = training_state.actor
-
-            replay_buffer_state = training_state.replay_buffer_state
-            policy_q_func = training_state.policy_q_func
-            target_q_func = training_state.target_q_func
-            optimizer = training_state.optimizer    
-            
             ## sample transitions from environment ##
-            actor.epsilon.value = try_call(self.hyperparameters.epsilon, steps)
+            set_algo_phase(training_state.opt_networks, AlgoPhase.ROLLOUT)
 
-            actor.eval()
-            actor.deterministic = False
+            actor = self.make_actor(training_state.opt_networks, 
+                try_call(self.hyperparameters.epsilon, training_state.steps))
+            transitions, training_state.env_states = self.rollout_transitions(rngs, 
+                actor, steps_per_env_per_iter, training_state.env_states)
+            training_state.steps += total_steps_per_iter
 
-            transitions, env_states = self.rollout_transitions(rngs, 
-                actor, steps_per_env_per_iter, env_states)
-
-            replay_buffer_state = self.replay_buffer.insert(replay_buffer_state, transitions)
-
-            steps += total_steps_per_iter
+            training_state.replay_buffer_state = self.replay_buffer.insert(training_state.replay_buffer_state, transitions)
 
             # update optimizer schedules using env steps (rather than default grad steps)
-            optimizer.opt_state.hyperparams['learning_rate'].value \
-                = try_call(self.hyperparameters.learning_rate, steps)
+            training_state.optimizer.opt_state.hyperparams['learning_rate'].value \
+                = try_call(self.hyperparameters.learning_rate, training_state.steps)
 
             ## update q functions ##
-            policy_q_func.train()
+            set_algo_phase(training_state.opt_networks, AlgoPhase.OPTIMIZE)
 
-            def learn_step(carry: tuple[DiscreteQFunc, nnx.Optimizer], rngs: nnx.Rngs) \
-                    -> tuple[tuple[DiscreteQFunc, nnx.Optimizer], dict[Any, Any]]:
-                policy_q_func, optimizer = carry
+            def learn_step(carry: tuple[Networks, nnx.Optimizer], rngs: nnx.Rngs) \
+                    -> tuple[tuple[Networks, nnx.Optimizer], dict[Any, Any]]:
+                opt_networks, optimizer = carry
 
                 sampled_transitions = self.replay_buffer.sample(rngs.transitions(), 
-                    replay_buffer_state, self.hyperparameters.batch_size)
+                    training_state.replay_buffer_state, self.hyperparameters.batch_size)
 
-                next_qs = optionally_pass(target_q_func, rngs=rngs)(sampled_transitions.next_obs)
+                next_qs = optionally_pass(training_state.target_networks, rngs=rngs)(sampled_transitions.next_obs)
                 max_next_qs = jnp.max(next_qs, axis=-1)
                 # zero out q_val if terminated
                 max_next_qs = max_next_qs * jnp.logical_not(sampled_transitions.terminated)
 
                 target_qs = sampled_transitions.reward \
-                    + try_call(self.hyperparameters.discount_rate, steps)*max_next_qs
+                    + try_call(self.hyperparameters.discount_rate, training_state.steps)*max_next_qs
 
-                def loss_func(policy_q_func: nnx.Module, rngs: nnx.Rngs):
-                    pred_qs_all_actions = optionally_pass(policy_q_func, rngs=rngs)(sampled_transitions.obs)
+                def loss_func(opt_networks: nnx.Module, rngs: nnx.Rngs):
+                    pred_qs_all_actions = optionally_pass(opt_networks, rngs=rngs)(sampled_transitions.obs)
                         # q-net returns a q-value for every action
                     pred_qs = pred_qs_all_actions[jnp.arange(self.hyperparameters.batch_size), sampled_transitions.action]
                         # take only the q-value corresponding to the chosen action
@@ -267,41 +288,32 @@ class DQN(Generic[TEnvState, TEnvObs]):
                     return jnp.mean(jnp.power(target_qs - pred_qs, 2))
 
                 loss_grad_func = nnx.value_and_grad(loss_func)
-                loss, grads = loss_grad_func(policy_q_func, rngs)
+                loss, grads = loss_grad_func(opt_networks, rngs)
                 optimizer.update(grads) 
 
-                return (policy_q_func, optimizer), { 'q_loss': loss }
+                return carry, { 'q_loss': loss }
 
-            (policy_q_func, optimizer), metrics = nnx.scan(learn_step)((policy_q_func, optimizer), 
+            _, metrics = nnx.scan(learn_step)((training_state.opt_networks, training_state.optimizer), 
                 rngs.fork(split=learn_steps_per_iter))
 
             # update target if enough steps have passed
-            update_target = steps % self.hyperparameters.target_update_interval < total_steps_per_iter
-            nnx.update(target_q_func, nnx.cond(update_target, 
-                lambda policy_q_func, target_q_func: nnx.state(policy_q_func), 
-                lambda policy_q_func, target_q_func: nnx.state(target_q_func),
-                policy_q_func, target_q_func
+            update_target = training_state.steps % self.hyperparameters.target_update_interval < total_steps_per_iter
+            nnx.update(training_state.target_networks, jax.lax.cond(update_target, 
+                lambda opt_state, target_state: opt_state, 
+                lambda opt_state, target_state: target_state,
+                nnx.state(training_state.opt_networks), nnx.state(training_state.target_networks)
             ))
-            target_q_func.eval()
 
-            return TrainingState(
-                steps=steps,
-                env_states=env_states,
-                actor=actor,
+            return training_state, jax.tree.map(lambda x: jnp.mean(x), metrics)
 
-                replay_buffer_state=replay_buffer_state,
-                policy_q_func=policy_q_func,
-                target_q_func=target_q_func,
-                optimizer=optimizer
-            ), jax.tree.map(lambda x: jnp.mean(x), metrics)
-
-        training_state.actor.eval()
-        training_state.actor.deterministic = False
-
-        training_state.policy_q_func.train()
-        training_state.target_q_func.eval()
+        # phases must match phases at the end of train_iteration
+        set_algo_phase(training_state.target_networks, AlgoPhase.EVAL)
+        set_algo_phase(training_state.opt_networks, AlgoPhase.OPTIMIZE)
 
         iterations = math.ceil(steps / total_steps_per_iter)
         training_state, metrics = nnx.scan(train_iteration)(training_state, rngs.fork(split=iterations))
+
+        # set into eval mode for the user
+        set_algo_phase(training_state.opt_networks, AlgoPhase.EVAL)
 
         return training_state, jax.tree.map(lambda x: jnp.mean(x), metrics)

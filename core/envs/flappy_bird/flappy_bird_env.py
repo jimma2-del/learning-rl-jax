@@ -1,3 +1,5 @@
+import numpy as np
+
 from chex import dataclass
 from jax.typing import ArrayLike
 from jax import Array
@@ -8,7 +10,6 @@ from core.envs.base import Environment, Space
 
 import jax.numpy as jnp
 import jax
-import functools
 import dataclasses
 
 @dataclass(frozen=True)
@@ -60,7 +61,6 @@ class FlappyBirdEnv(Environment[State, Array, ArrayLike, Array]):
         self.rewards = rewards
         self.render_settings = render_settings
 
-    # @functools.partial(jax.jit, static_argnames=('self'))
     def reset(self, key: chex.PRNGKey) -> tuple[State, dict[Any, Any]]:
         pipe1_key, pipe2_key = jax.random.split(key, 2)
 
@@ -75,7 +75,6 @@ class FlappyBirdEnv(Environment[State, Array, ArrayLike, Array]):
             pipe2_pos_y = self._gen_pipe_y(pipe2_key)
         ), {}
 
-    # @functools.partial(jax.jit, static_argnames=('self'))
     def step(self, key: chex.PRNGKey, state: State, action: ArrayLike) \
         -> tuple[State, Array, Array, Array, dict[Any, Any]]:
 
@@ -136,8 +135,6 @@ class FlappyBirdEnv(Environment[State, Array, ArrayLike, Array]):
 
         return state, reward, terminated, False, {}
     
-    
-    # @functools.partial(jax.jit, static_argnames=('self'))
     def _gen_pipe_y(self, key):
         height_to_center = self.settings.pipe_min_height + self.settings.pipe_gap_height/2
 
@@ -146,7 +143,6 @@ class FlappyBirdEnv(Environment[State, Array, ArrayLike, Array]):
             maxval=self.settings.window_size[0] - height_to_center + 1
         )
 
-    # @functools.partial(jax.jit, static_argnames=('self'))
     def get_obs(self, key: chex.PRNGKey, state: State) -> Array:
         use_pipe2 = state.pipe1_pos_x + self.settings.pipe_width/2 + self.settings.bird_size < self.settings.bird_pos_x
 
@@ -158,7 +154,6 @@ class FlappyBirdEnv(Environment[State, Array, ArrayLike, Array]):
 
         return jnp.array((state.bird_vel_y, pipe_dy, pipe_dx))
 
-    # @functools.partial(jax.jit, static_argnames=('self'))
     def render(self, state: State, Action: ArrayLike) -> Array:
         image = jnp.full((*self.settings.window_size, 3), self.render_settings.background_color, dtype=jnp.uint8)
 
@@ -197,9 +192,12 @@ class FlappyBirdEnv(Environment[State, Array, ArrayLike, Array]):
     def observation_space(self) -> Space[Array]:
         """Observation space of the environment."""
         # TODO: values should depend on self.settings
-        return Space(low=jnp.array((-600.0, -625.0, -100)), high=jnp.array((1500.0,  625.0, 255)))
+        return Space(
+            low=np.array((-600.0, -625.0, -100), dtype=np.float32), 
+            high=np.array((1500.0,  625.0, 255), dtype=np.float32)
+        )
 
     @property
     def action_space(self) -> Space[ArrayLike]:
         """Action space of the environment."""
-        return Space(low=jnp.array(0), high=jnp.array(1))
+        return Space(low=np.array(0, dtype=np.int32), high=np.array(1, dtype=np.int32))

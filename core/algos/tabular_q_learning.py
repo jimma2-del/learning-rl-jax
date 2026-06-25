@@ -313,9 +313,6 @@ class TabularQLearning(Generic[TEnvState, TEnvObs]):
             ## sample transitions from environment ##
             actor.epsilon.value = try_call(self.hyperparameters.epsilon, steps)
 
-            actor.eval()
-            actor.deterministic = False
-
             transitions, env_states = self.rollout_transitions(rngs, 
                 actor, steps_per_env_per_iter, env_states)
 
@@ -324,8 +321,6 @@ class TabularQLearning(Generic[TEnvState, TEnvObs]):
             steps += total_steps_per_iter
 
             ## update q functions ##
-            actor.train()
-
             def learn_step(policy_q_func: TabularQFunc, rngs: nnx.Rngs) \
                     -> tuple[TabularQFunc, dict[Any, Any]]:
 
@@ -370,9 +365,10 @@ class TabularQLearning(Generic[TEnvState, TEnvObs]):
                 target_q_func=target_q_func,
             ), jax.tree.map(lambda x: jnp.mean(x), metrics)
 
-        training_state.actor.train()
-        
         iterations = math.ceil(steps / total_steps_per_iter)
         training_state, metrics = nnx.scan(train_iteration)(training_state, rngs.fork(split=iterations))
+
+        # set into eval mode for the user
+        training_state.actor.epsilon.value = jnp.array(0, dtype=jnp.float32)
 
         return training_state, jax.tree.map(lambda x: jnp.mean(x), metrics)

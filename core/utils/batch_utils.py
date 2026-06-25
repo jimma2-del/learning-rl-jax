@@ -1,4 +1,6 @@
-from typing import Callable, Sequence
+from typing import Callable, Sequence, TypeVar, Any
+
+import math
 
 import jax
 import jax.numpy as jnp
@@ -6,34 +8,36 @@ from jax.typing import ArrayLike
 
 import chex
 
-def shape_matches_excluding_batch_dims(unbatched_shape: Sequence[int], x_shape: Sequence[int]) -> bool:
+def shape_matches_excluding_batch_axes(unbatched_shape: Sequence[int], x_shape: Sequence[int]) -> bool:
     if len(unbatched_shape) == 0: return True
     if len(unbatched_shape) > len(x_shape): return False
     return x_shape[-len(unbatched_shape):] == unbatched_shape
 
 def shape_is_batched(unbatched_shape: Sequence[int], x_shape: Sequence[int]) -> bool:
     return len(x_shape) > len(unbatched_shape) \
-        and shape_matches_excluding_batch_dims(unbatched_shape, x_shape)
+        and shape_matches_excluding_batch_axes(unbatched_shape, x_shape)
 
 def is_batched(unbatched_shape: Sequence[int], x: jax.Array) -> bool:
     return shape_is_batched(unbatched_shape, x.shape)
 
 def get_shape_batch_dims(unbatched_shape: Sequence[int], x_shape: Sequence[int]) -> Sequence[int]:
     if len(unbatched_shape) == 0: return x_shape
-    assert shape_matches_excluding_batch_dims(unbatched_shape, x_shape)
+    assert shape_matches_excluding_batch_axes(unbatched_shape, x_shape)
     return x_shape[:-len(unbatched_shape)]
 
 def get_batch_dims(unbatched_shape: Sequence[int], x: jax.Array) -> Sequence[int]:
     return get_shape_batch_dims(unbatched_shape, x.shape)
 
-def get_tree_batch_dims(unbatched_shapes_dtypes, x) -> Sequence[int]:
+TInput = TypeVar('TInput')
+
+def get_tree_batch_dims(unbatched_shapes_dtypes: TInput, x: TInput) -> Sequence[int]:
     chex.assert_trees_all_equal_structs(x, unbatched_shapes_dtypes,
         custom_message="'x' must have the same treedef (structure) as 'unbatched_shapes_dtypes'.")
 
     assert len(jax.tree.leaves(x)) != 0, "Trees cannot be empty."
     
     assert jax.tree.all(jax.tree.map(
-        lambda shape_dtype, x_leaf: shape_matches_excluding_batch_dims(shape_dtype.shape, x_leaf.shape), 
+        lambda shape_dtype, x_leaf: shape_matches_excluding_batch_axes(shape_dtype.shape, x_leaf.shape), 
         unbatched_shapes_dtypes, x
     )), "Leaves of 'x' must have the shape defined in the corresponding leaf of 'unbatched_shapes_dtypes'."
 
@@ -53,17 +57,15 @@ def get_tree_batch_dims(unbatched_shapes_dtypes, x) -> Sequence[int]:
 
     return batch_dims_shapes_dtypes_leaves[0].shape
 
-
-def flatten_batched_tree(unbatched_shapes_dtypes, x) -> jax.Array:
+def flatten_batched_tree(unbatched_shapes_dtypes: TInput, x: TInput) -> jax.Array:
     """Flattens a batched PyTree into a single array while preserving leading batch axes.
     
-    Args:
-        unbatched_shapes_dtypes: A PyTree of jax.ShapeDtypeStruct leaves, eg. from jax.eval_shape().
-        x: A PyTree with the same structure as unbatched_shapes_dtypes and leaves with corresponding shapes, 
-            but potentially with extra leading batch axes.
+    `unbatched_shapes_dtypes`: A PyTree of jax.ShapeDtypeStruct leaves, eg. from jax.eval_shape().
+    `x`: A PyTree with the same structure as unbatched_shapes_dtypes and leaves with corresponding shapes, 
+        but potentially with extra leading batch axes.
         
-    Returns:
-        A jax.Array of shape (*batch_dims, total_flattened_size)."""
+    Returns: jax.Array of shape (*batch_dims, total_flattened_size).
+    """
 
     leaves_x = jax.tree.leaves(x)
 
@@ -73,6 +75,41 @@ def flatten_batched_tree(unbatched_shapes_dtypes, x) -> jax.Array:
     batch_dims = get_tree_batch_dims(unbatched_shapes_dtypes, x)
 
     return jnp.concatenate([ leaf.reshape((*batch_dims, -1)) for leaf in leaves_x ], axis=-1)
+
+def unflatten_batched_tree(unbatched_shapes_dtypes: TInput, arr: jax.Array) -> TInput:
+    """Unflattens a batched PyTree from a single array while preserving leading batch axes.
+
+    `unbatched_shapes_dtypes`: A PyTree of jax.ShapeDtypeStruct leaves, eg. from jax.eval_shape().
+    `arr`: The flattened array to unflatten, potentially with extra leading batch axes.
+        
+    Returns: PyTree with structure/shape of `unbatched_shapes_dtypes`, but potentially with extra leading batch axes.
+    """
+    leaves_shape_dtype, treedef = jax.tree.flatten(unbatched_shapes_dtypes)
+
+    sizes = [ math.prod(leaf.shape) for leaf in leaves_shape_dtype ]
+    end_is = jnp.cumsum(jnp.array(sizes))
+
+    assert arr.shape[-1] == end_is[-1], \
+        f"Expected flattened (trailing) dimension of {end_is[-1]}, got {arr.shape[-1]}."
+
+    flat_leaves = jnp.split(arr, end_is[:-1], axis=-1)
+    leaves = [ leaf.reshape(shape_dtype.shape) for leaf, shape_dtype in zip(flat_leaves, leaves_shape_dtype) ]
+
+    return jax.tree.unflatten(treedef, leaves)
+
+def get_tree_flattened_dim(shapes_dtypes: Any) -> int:
+    return jax.tree.reduce(
+        lambda cum_len, shape_dtype: cum_len + math.prod(shape_dtype.shape), 
+        shapes_dtypes, 0
+    )
+
+def flatten_batch_axes(unbatched_shape: Sequence[int], x: jax.Array):
+    """Flattens leading batch axes into a singular batch axis. Adds a batch axis if none exist."""
+    return jnp.reshape(x, (-1, *unbatched_shape))
+
+def flatten_tree_batch_axes(unbatched_shapes_dtypes: TInput, x: TInput) -> TInput:
+    """Flattens leading batch axes into a singular batch axis. Adds a batch axis if none exist."""
+    return jax.tree.map(lambda x, s_dt: flatten_batch_axes(s_dt.shape, x), x, unbatched_shapes_dtypes)
 
 def get_tree_vmap_dim(tree) -> int:
     """Finds the length of the leading axis of the PyTree leaves, ensuring that these lengths are all equal.
