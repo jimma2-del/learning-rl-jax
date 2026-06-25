@@ -22,7 +22,6 @@ from core.envs.base import Environment, Space
 from core.algos.base import Scheduleable, GreedyQActor, set_algo_phase, AlgoPhase
 
 from core.envs.wrappers import AutoResetWrapper
-from core.envs.utils import rollout, Actor
 
 TEnvState = TypeVar("TEnvState")
 TEnvObs = TypeVar("TEnvObs")
@@ -140,14 +139,6 @@ class Hyperparameters:
         # it is recommended to use a schedule: decay from 1 to ~0.05 over ~10% of training steps
         # eg. optax.schedules.linear_schedule(1, 0.05, 0.1*steps)
 
-@dataclass(frozen=True)
-class Transition(Generic[TEnvObs]):
-    obs: TEnvObs
-    action: ArrayLike
-    reward: ArrayLike
-    next_obs: TEnvObs
-    terminated: ArrayLike
-
 @dataclass
 class TrainingState(Generic[TEnvState, TEnvObs]):
     steps: ArrayLike
@@ -185,53 +176,6 @@ class TabularQLearning(Generic[TEnvState, TEnvObs]):
         if q_func is None: q_func = self.make_default_q_func(**kwargs)
         return GreedyQActor(q_func, int(self.env.action_space.high + 1), epsilon=epsilon)
 
-    def rollout_transitions(self,
-        rngs: nnx.Rngs, 
-        actor: Actor, 
-        iter: int,
-        initial_env_states: TEnvState | None = None,
-    ) -> tuple[Transition[TEnvObs], TEnvState]:
-        """Collect a rollout of `Transition`s.
-
-        Runs `n_envs` environments in parallel for `iter` steps each,
-            for a total of `iter * n_envs` transitions.
-
-        Initializes initial environment states if none given.
-
-        Returns: transitions, final environment states
-        """
-
-        (unreset_obs, timesteps), env_states, final_infos = rollout(
-            rngs, self.env, actor,
-            iter, self.hyperparameters.n_envs,
-            initial_env_states,
-
-            take_func = lambda timesteps, rngs: (
-                self.env.get_obs(
-                    jax.random.split(rngs.env(), self.hyperparameters.n_envs), 
-                    timesteps.info[AutoResetWrapper.UNRESET_STATE_INFO_KEY]
-                ), 
-                timesteps.replace(state=None, info=None) # remove unnecessary fields to save memory
-            )
-        )
-
-        final_obs = self.env.get_obs(
-            jax.random.split(rngs.env(), self.hyperparameters.n_envs), 
-            final_infos[AutoResetWrapper.UNRESET_STATE_INFO_KEY]
-        )
-        
-        next_obs = jax.tree.map(lambda middles, finals: 
-                jnp.concatenate((middles[1:], finals[None, ...]), axis=0),
-            unreset_obs, final_obs)
-
-        timesteps = jax.tree.map(lambda x: x.reshape(-1, *x.shape[2:]), timesteps) # flatten to remove axis 0
-        next_obs = jax.tree.map(lambda x: x.reshape(-1, *x.shape[2:]), next_obs) # flatten to remove axis 0
-
-        transitions = Transition(obs=timesteps.obs, action=timesteps.action, 
-            reward=timesteps.reward, next_obs=next_obs, terminated=timesteps.terminated)
-
-        return transitions, env_states
-
     def init_training_state(self, rngs: nnx.Rngs, q_func: TabularQFunc | None = None) -> TrainingState[TEnvState, TEnvObs]:
         if q_func is None: q_func = self.make_default_q_func()
         env_states, _ = self.env.reset(jax.random.split(rngs.env(), self.hyperparameters.n_envs))
@@ -253,24 +197,32 @@ class TabularQLearning(Generic[TEnvState, TEnvObs]):
 
             actor = self.make_actor(training_state.q_func, 
                 try_call(self.hyperparameters.epsilon, training_state.steps))
-            transitions, training_state.env_states = self.rollout_transitions(rngs, 
-                actor, 1, training_state.env_states)
+
+            obs = self.env.get_obs(jax.random.split(rngs.env(), self.hyperparameters.n_envs), training_state.env_states)
+            actions, _ = actor(obs, rngs=rngs)
+
+            training_state.env_states, rewards, terminateds, truncated, infos = AutoResetWrapper(self.env).step(
+                jax.random.split(rngs.env(), self.hyperparameters.n_envs), training_state.env_states, actions)
+
+            next_obs = self.env.get_obs(jax.random.split(rngs.env(), self.hyperparameters.n_envs), 
+                infos[AutoResetWrapper.UNRESET_STATE_INFO_KEY])
+
             training_state.steps += self.hyperparameters.n_envs
 
             ## update q functions ##
             set_algo_phase(training_state.q_func, AlgoPhase.OPTIMIZE)
 
-            next_qs = training_state.q_func(transitions.next_obs)
+            next_qs = training_state.q_func(next_obs)
             max_next_qs = jnp.max(next_qs, axis=-1)
             # zero out q_val if terminated
-            max_next_qs = max_next_qs * jnp.logical_not(transitions.terminated)
+            max_next_qs = max_next_qs * jnp.logical_not(terminateds)
 
-            target_qs = transitions.reward \
+            target_qs = rewards \
                 + try_call(self.hyperparameters.discount_rate, steps)*max_next_qs
-            pred_qs = training_state.q_func.get_table_value(transitions.obs, transitions.action)
+            pred_qs = training_state.q_func.get_table_value(obs, actions)
 
             adjusts = try_call(self.hyperparameters.learning_rate, steps) * (target_qs - pred_qs)
-            training_state.q_func.adjust_table_value(transitions.obs, transitions.action, adjusts)
+            training_state.q_func.adjust_table_value(obs, actions, adjusts)
 
             # loss is only used as a metric
             loss = jnp.mean(jnp.power(target_qs - pred_qs, 2))
