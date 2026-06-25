@@ -26,7 +26,7 @@ rngs = nnx.Rngs(0, params=1, env=2, actions=3)
 
 ## Gymnax
 
-gymnax_env = CartPole()
+gymnax_env = Acrobot()
 gymnax_env_params = gymnax_env.default_params
 
 env = GymnaxWrapper(gymnax_env)
@@ -74,8 +74,8 @@ while training_state.steps < STEPS:
     print("Metrics: " + " ".join([ f"{key}={val}" for key, val in metrics.items() ]))
 
     # eval
-    training_state.actor.eval() # make deterministic (use dist modes instead of sampling)
-    returns, lengths = evaluate(rngs, training_state.actor)
+    actor = algo.make_actor(training_state.networks, deterministic_sampling=True)
+    returns, lengths = evaluate(rngs, actor)
 
     print(f"Episode Return: mean={jnp.mean(returns)} std={jnp.std(returns, ddof=1)}")
     print(f"Episode Length: mean={jnp.mean(lengths)} std={jnp.std(lengths, ddof=1)}")
@@ -87,7 +87,7 @@ while training_state.steps < STEPS:
 
 # SAVE_PATH = path.abspath('examples/a2c/_tmp/acrobot')
 
-# _, state = nnx.split(training_state.actor)
+# _, state = nnx.split(actor)
 # checkpointer_save = ocp.StandardCheckpointer()
 # checkpointer_save.save(SAVE_PATH, state)
 
@@ -105,7 +105,7 @@ MAX_STEPS = 500
 
 EVAL_EPS = 256
 returns, lengths = nnx.jit(evaluate_episodes, static_argnums=(1, 3, 4))(
-    rngs, VmapWrapper(env), training_state.actor, EVAL_EPS, hyperparameters.n_envs)
+    rngs, VmapWrapper(env), actor, EVAL_EPS, hyperparameters.n_envs)
 print(returns)
 print(lengths)
 print(f"Episode Return: mean={jnp.mean(returns)} std={jnp.std(returns, ddof=1)}")
@@ -121,7 +121,7 @@ if VISUALIZE_METHOD == 'gif':
     comb_cum_rewards = jnp.array((0,))
 
     for _ in range(NUM_EPISODES):
-        timesteps, state, info = rollout_episode(rngs, EpisodeStepCountWrapper(env, MAX_STEPS), training_state.actor)
+        timesteps, state, info = rollout_episode(rngs, EpisodeStepCountWrapper(env, MAX_STEPS), actor)
         cum_rewards = jnp.cumsum(timesteps.reward)
         steps = len(timesteps.reward)
 
@@ -139,7 +139,7 @@ elif VISUALIZE_METHOD == 'pygame':
     FPS = 10
 
     visualize_pygame(
-        rngs, env, training_state.actor, 
+        rngs, env, actor, 
         fps=FPS, 
         render_func=lambda state, action: render_acrobot(None, gymnax_env_params, state),
         episode_steps_limit=MAX_STEPS,
@@ -148,7 +148,7 @@ elif VISUALIZE_METHOD == 'pygame':
 
     ## Flappy Bird
     # visualize_pygame(
-    #     rngs, env, training_state.actor, 
+    #     rngs, env, actor, 
     #     fps=round(1/DT), 
     #     verbose=False
     # )

@@ -80,8 +80,8 @@ while training_state.steps < STEPS:
     print("Metrics: " + " ".join([ f"{key}={val}" for key, val in metrics.items() ]))
 
     # eval
-    training_state.actor.eval() # make deterministic (use dist modes instead of sampling)
-    returns, lengths = evaluate(rngs, training_state.actor)
+    actor = algo.make_actor(training_state.networks, deterministic_sampling=True)
+    returns, lengths = evaluate(rngs, actor)
 
     print(f"Episode Return: mean={jnp.mean(returns)} std={jnp.std(returns, ddof=1)}")
     print(f"Episode Length: mean={jnp.mean(lengths)} std={jnp.std(lengths, ddof=1)}")
@@ -93,7 +93,7 @@ import orbax.checkpoint as ocp
 
 SAVE_PATH = path.abspath(f'examples/a2c/_tmp/{ENV_NAME}')
 
-_, state = nnx.split(training_state.actor)
+_, state = nnx.split(actor)
 checkpointer_save = ocp.StandardCheckpointer()
 checkpointer_save.save(SAVE_PATH, state)
 
@@ -104,7 +104,7 @@ rngs = nnx.Rngs(0, params=1, env=5, actions=3)
 
 EVAL_EPS = 256
 returns, lengths = nnx.jit(evaluate_episodes, static_argnums=(1, 3, 4))(
-    rngs, EpisodeStepCountWrapper(VmapWrapper(env), max_eps_len=MAX_STEPS), training_state.actor, EVAL_EPS, EVAL_N_ENVS)
+    rngs, EpisodeStepCountWrapper(VmapWrapper(env), max_eps_len=MAX_STEPS), actor, EVAL_EPS, EVAL_N_ENVS)
 print(returns)
 print(lengths)
 print(f"Episode Return: mean={jnp.mean(returns)} std={jnp.std(returns, ddof=1)}")
@@ -121,7 +121,7 @@ if VISUALIZE_METHOD == 'video':
 
     for _ in range(NUM_EPISODES):
         timesteps, state, info = rollout_episode(rngs, 
-            JitWrapper(EpisodeStepCountWrapper(env, MAX_STEPS)), training_state.actor,
+            JitWrapper(EpisodeStepCountWrapper(env, MAX_STEPS)), actor,
 
             # remove unnecessary warp `_impl` property, which takes up a lot of memory
             take_func = lambda ts: ts.replace(state=ts.state.replace(
@@ -140,7 +140,7 @@ if VISUALIZE_METHOD == 'video':
 
 elif VISUALIZE_METHOD == 'pygame':
     visualize_pygame(
-        rngs, JitWrapper(env), training_state.actor, 
+        rngs, JitWrapper(env), actor, 
         fps=FPS, 
         verbose=False
     )

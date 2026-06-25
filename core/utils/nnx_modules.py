@@ -1,5 +1,7 @@
 from typing import Any, Generic, TypeVar, overload, Container, ParamSpec, Callable, Sequence
 
+from functools import update_wrapper
+
 import math
 
 from jax.typing import ArrayLike
@@ -58,6 +60,8 @@ class StatefulFunc(nnx.Module, Generic[TStatefulFuncState, TStatefulFuncParams, 
         self.func = func
         self.state_args = state_args
         self.state_kwargs = state_kwargs
+
+        update_wrapper(self, func) # update function metadata
 
     def __call__(self, *args: TStatefulFuncParams.args, **kwargs: TStatefulFuncParams.kwargs) -> TOutput:
         return self.func(*self.state_args, *args, **self.state_kwargs, **kwargs)
@@ -141,31 +145,31 @@ class ActionDistributionHead(nnx.Module, Generic[TEnvAction]):
         self.action_space = action_space
         self.do_state_independent_stds = do_state_independent_stds
 
-        self.output_dim = 0
+        self.input_dim = 0
         self.num_continuous = 0
         self._leaves_descrip = []
 
         for cur_low, cur_high in zip(jax.tree.leaves(action_space.low), jax.tree.leaves(action_space.high)):
             if np.issubdtype(cur_low.dtype, np.integer):
                 n_choices = cur_high - cur_low + 1
-                output_layer_dim = int(np.sum(n_choices))
-                self.output_dim += output_layer_dim
+                n_values_needed = int(np.sum(n_choices))
+                self.input_dim += n_values_needed
 
                 self._leaves_descrip.append({ 
                     'discrete': True, 
-                    'output_layer_dim': output_layer_dim,
+                    'n_values_needed': n_values_needed,
                     'shape': (*cur_low.shape, int(np.max(n_choices))),
                     'n_choices': n_choices.tolist() # convert to list to mark as static
                 })
             else:
                 dim = math.prod(cur_low.shape)
                 self.num_continuous += dim
-                output_layer_dim = dim * (2 - do_state_independent_stds)
-                self.output_dim += output_layer_dim
+                n_values_needed = dim * (2 - do_state_independent_stds)
+                self.input_dim += n_values_needed
 
                 self._leaves_descrip.append({ 
                     'discrete': False, 
-                    'output_layer_dim': output_layer_dim,
+                    'n_values_needed': n_values_needed,
                     'shape': (*cur_low.shape, 2), # mean, std
                 })
         
@@ -179,8 +183,8 @@ class ActionDistributionHead(nnx.Module, Generic[TEnvAction]):
         state_indep_log_stds_i = 0
 
         for leaf_descrip in self._leaves_descrip:
-            vals = x[..., i : i+leaf_descrip['output_layer_dim']]
-            i += leaf_descrip['output_layer_dim']
+            vals = x[..., i : i+leaf_descrip['n_values_needed']]
+            i += leaf_descrip['n_values_needed']
 
             if leaf_descrip['discrete']:
                 leaf = jnp.full(vals.shape[:-1] + leaf_descrip['shape'], -jnp.inf)
@@ -195,8 +199,8 @@ class ActionDistributionHead(nnx.Module, Generic[TEnvAction]):
             else:
                 if self.do_state_independent_stds:
                     state_indep_log_stds = self.state_independent_log_stds.value \
-                        [state_indep_log_stds_i : state_indep_log_stds_i + leaf_descrip['output_layer_dim']]
-                    state_indep_log_stds_i += leaf_descrip['output_layer_dim']
+                        [state_indep_log_stds_i : state_indep_log_stds_i + leaf_descrip['n_values_needed']]
+                    state_indep_log_stds_i += leaf_descrip['n_values_needed']
 
                     means = vals.reshape(vals.shape[:-1] + leaf_descrip['shape'][:-1])
 

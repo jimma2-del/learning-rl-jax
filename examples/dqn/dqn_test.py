@@ -78,7 +78,7 @@ while training_state.steps < STEPS:
     print("Metrics: " + " ".join([ f"{key}={val}" for key, val in metrics.items() ]))
 
     #eval
-    actor = algo.make_actor(training_state.opt_networks, epsilon=0)
+    actor = algo.make_actor(training_state.networks, epsilon=0)
     returns, lengths = evaluate(rngs, actor)
 
     print(f"Episode Return: mean={jnp.mean(returns)} std={jnp.std(returns, ddof=1)}")

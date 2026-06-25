@@ -72,8 +72,8 @@ while training_state.steps < STEPS:
     print("Metrics: " + " ".join([ f"{key}={val}" for key, val in metrics.items() ]))
 
     # eval
-    training_state.actor.eval() # make deterministic (use dist modes instead of sampling)
-    returns, lengths = evaluate(rngs, training_state.actor)
+    actor = algo.make_actor(training_state.networks, deterministic_sampling=True)
+    returns, lengths = evaluate(rngs, actor)
 
     print(f"Episode Return: mean={jnp.mean(returns)} std={jnp.std(returns, ddof=1)}")
     print(f"Episode Length: mean={jnp.mean(lengths)} std={jnp.std(lengths, ddof=1)}")
@@ -85,7 +85,7 @@ while training_state.steps < STEPS:
 
 # SAVE_PATH = path.abspath(f'examples/a2c/_tmp/{ENV_NAME}')
 
-# _, state = nnx.split(training_state.actor)
+# _, state = nnx.split(actor)
 # checkpointer_save = ocp.StandardCheckpointer()
 # checkpointer_save.save(SAVE_PATH, state)
 
@@ -98,7 +98,7 @@ if VISUALIZE_METHOD == 'html':
     states = []
 
     for _ in range(NUM_EPISODES):
-        timesteps, state, info = rollout_episode(rngs, JitWrapper(env), training_state.actor)
+        timesteps, state, info = rollout_episode(rngs, JitWrapper(env), actor)
 
         eps_return = sum(timesteps.reward)
         steps = len(timesteps.reward)
@@ -113,7 +113,7 @@ if VISUALIZE_METHOD == 'html':
 
 elif VISUALIZE_METHOD == 'pygame':
     visualize_pygame(
-        rngs, JitWrapper(env), training_state.actor, 
+        rngs, JitWrapper(env), actor, 
         fps=1.0 / brax_env.dt, 
         verbose=False
     )

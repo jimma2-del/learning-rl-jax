@@ -49,7 +49,7 @@ class StochasticPolicyActor(Generic[TEnvObs, TEnvAction], nnx.Module):
         self.action_space = action_space
 
         # configurations for `self.__call__()`
-        self.deterministic_sdeterministic_samplingample = deterministic_sampling
+        self.deterministic_sampling = deterministic_sampling
         self.squash_continuous = squash_continuous
 
     def __call__(self, obs: TEnvObs, rngs: nnx.Rngs | None = None,
@@ -145,17 +145,19 @@ class Algo(Generic[TTrainingState, TActor (bound=core.env.utils.Actor), TEnvStat
 
     methods:
         __init__(env, *nonstandard params (eg. hyperparameters))
-        init_training_state(rngs, optional params (eg. network, replay buffer state, prefill steps)) -> TTrainingState
+        init_training_state(rngs, networks, optional params (eg. replay buffer state, prefill steps)) -> TTrainingState
         train(rngs, training_state, steps) -> TTrainingState, metrics dict
 
-        make_actor(rngs, optional params?)? 
+        make_actor(networks, optional rngs, optional params?)? 
             can be used as dummy for loading orbax checkpoints if only the actor was saved
 
 @chex.dataclass
 class TrainingState(ABC, Generic[TEnvState, TActor]): should this be standardized?
-    attributes: steps: ArrayLike (jnp int scalar), env_states: TEnvState, actor: TActor
+    attributes: steps: ArrayLike (jnp int scalar), env_states: TEnvState,
 
     not enforced as not all algorithms have it: `networks`, `optimizer`
-        - `(optimized_?)networks` is an nnx.Module which holds all networks that are trained by `optimizer`;
+        - `networks` is an nnx.Module which holds all networks that are trained by `optimizer`;
             use this name for consistency
+
+    for off-policy algorithms: `target_networks`
 """

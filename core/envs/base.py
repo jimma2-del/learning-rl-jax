@@ -104,7 +104,6 @@ class Space(Generic[TSpaceElement]):
 
         return jax.tree.all(leaf_matches, x, self.low, self.high, self.shapes_dtypes)
 
-    #@functools.partial(jax.jit, static_argnames=('self'))
     def sample(self, key: chex.PRNGKey, batch_dims: Sequence[int] = ()) -> TSpaceElement:
         """Samples a batch of elements of shape `batch_dims` from the space.
         
@@ -256,7 +255,7 @@ class Space(Generic[TSpaceElement]):
         keys_tree = jax.tree.unflatten(self.treedef, keys)
 
         def sample_leaf(cur_dist, cur_low, shape_dtype: jax.ShapeDtypeStruct, key: chex.PRNGKey):
-            shape = batch_dims + shape_dtype.shape
+            shape = batch_dims + cur_dist.shape[:-1]
 
             if np.issubdtype(shape_dtype.dtype, np.integer):
                 if deterministic: 

@@ -164,7 +164,7 @@ class TabularQLearning(Generic[TEnvState, TEnvObs]):
         self.env = env
         self.hyperparameters = hyperparameters
 
-    def make_default_q_func(self, init_val: ArrayLike | None = None, rngs=None) -> TabularQFunc:
+    def make_default_q_func(self, init_val: ArrayLike | None = None, rngs=None) -> TabularQFunc[TEnvObs]:
         q_func = TabularQFunc(int(self.env.action_space.high + 1), self.env.observation_space)
 
         if init_val is not None:
@@ -172,11 +172,13 @@ class TabularQLearning(Generic[TEnvState, TEnvObs]):
 
         return q_func
 
-    def make_actor(self, q_func: TabularQFunc | None = None, epsilon: ArrayLike = 0, **kwargs) -> GreedyQActor:
+    def make_actor(self, q_func: TabularQFunc[TEnvObs] | None = None, 
+            epsilon: ArrayLike = 0, **kwargs) -> GreedyQActor[TEnvObs]:
         if q_func is None: q_func = self.make_default_q_func(**kwargs)
         return GreedyQActor(q_func, int(self.env.action_space.high + 1), epsilon=epsilon)
 
-    def init_training_state(self, rngs: nnx.Rngs, q_func: TabularQFunc | None = None) -> TrainingState[TEnvState, TEnvObs]:
+    def init_training_state(self, rngs: nnx.Rngs, q_func: TabularQFunc[TEnvObs] | None = None) \
+            -> TrainingState[TEnvState, TEnvObs]:
         if q_func is None: q_func = self.make_default_q_func()
         env_states, _ = self.env.reset(jax.random.split(rngs.env(), self.hyperparameters.n_envs))
 

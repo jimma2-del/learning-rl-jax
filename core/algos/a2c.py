@@ -1,4 +1,4 @@
-from typing import TypeVar, Generic, Any
+from typing import TypeVar, Generic, Any, Sequence, Self, Callable
 
 import math
 
@@ -11,17 +11,18 @@ from flax import nnx
 import optax
 
 from core.utils.func_utils import try_call, optionally_pass
-from core.utils.nnx_modules import MLP, FlattenAndProject, ActionDistributionHead
+from core.utils import RunningMeanVar
+from core.utils.nnx_modules import MLP, RunningMeanVarNorm, ActionDistributionHead
 
-from core.algos.base import Scheduleable, StochasticPolicyActor, Policy, ValueFunc
+from core.algos.base import Scheduleable, StochasticPolicyActor, Policy, ValueFunc, set_algo_phase, AlgoPhase
 
-from core.envs.base import Environment
+from core.envs.base import Environment, Space
 from core.envs.wrappers import AutoResetWrapper, SquashContinuousActionsToBoundsWrapper
 from core.envs.utils import rollout, Timestep
 
 @dataclass(frozen=True)
 class Hyperparameters:
-    n_envs: int = 32
+    n_envs: int = 256
 
     discount_rate: Scheduleable[float] = 0.99
     learning_rate: Scheduleable[float] = 2.5e-4
@@ -46,19 +47,81 @@ class Hyperparameters:
 TEnvState = TypeVar("TEnvState")
 TEnvObs = TypeVar("TEnvObs")
 TEnvAction = TypeVar("TEnvAction")
+TTrunkOut = TypeVar("TTrunkOut")
 
-class Networks(Generic[TEnvObs, TEnvAction], nnx.Module):
-    def __init__(self, policy: Policy, value_func: ValueFunc) -> None:
-        self.policy = policy
-        self.value_func = value_func
+class Networks(nnx.Module, Generic[TEnvObs, TEnvAction, TTrunkOut]):
+    def __init__(self, obs_trunk: Callable[[TEnvObs], TTrunkOut], 
+            policy_head: Callable[[TTrunkOut], TEnvAction], value_head: Callable[[TTrunkOut], jax.Array]) -> None:
+        self.obs_trunk = obs_trunk
+        self.policy_head = policy_head
+        self.value_head = value_head
 
-@dataclass(frozen=True)
-class TrainingState(Generic[TEnvState, TEnvObs]):
+    def __call__(self, obs: TEnvObs, rngs: nnx.Rngs | None = None) -> tuple[TEnvAction, jax.Array]:
+        trunk_out = optionally_pass(self.obs_trunk, rngs=rngs)(obs)
+
+        action_dist = optionally_pass(self.policy_head, rngs=rngs)(trunk_out)
+        value = optionally_pass(self.value_head, rngs=rngs)(trunk_out)
+
+        return action_dist, value
+
+    @classmethod
+    def make_default(cls, rngs: nnx.Rngs, observation_space: Space[TEnvObs], action_space: Space[ArrayLike]) -> Self:
+        return cls(
+            cls.make_default_obs_trunk(observation_space),
+            cls.make_default_policy_head(rngs, observation_space.flattened_dim, action_space),
+            cls.make_default_value_head(rngs, observation_space.flattened_dim),
+        )
+
+    @staticmethod
+    def make_default_obs_trunk(
+        observation_space: Space[TEnvObs],
+        normalize_observations: bool = True, 
+        obs_running_mean_var: RunningMeanVar[TEnvObs] | None = None, 
+        obs_clip_threshold: float | None = None
+    ) -> Callable[[TEnvObs], TTrunkOut]:
+        layers = []
+
+        if normalize_observations:
+            inp = observation_space.shapes_dtypes if obs_running_mean_var is None else obs_running_mean_var
+            layers.append(RunningMeanVarNorm(inp, clip_threshold=obs_clip_threshold))
+
+        layers.append(observation_space.flatten)
+
+        return nnx.Sequential(*layers)
+
+    @staticmethod
+    def make_default_policy_head(
+        rngs: nnx.Rngs, input_dim: int, action_space: Space[ArrayLike], do_state_independent_stds: bool = True,
+        hidden_dims: Sequence[int] = (128, 128), do_layer_norm: bool = True, activation_func=nnx.tanh
+    ) -> Callable[[TTrunkOut], TEnvAction]:
+        head = ActionDistributionHead(action_space, do_state_independent_stds)
+
+        mlp = MLP(
+            rngs, (input_dim, *hidden_dims, head.input_dim), 
+            do_layer_norm=do_layer_norm, activation_func=activation_func
+        )
+
+        return nnx.Sequential(mlp, head)
+
+    @staticmethod
+    def make_default_value_head(
+        rngs: nnx.Rngs, input_dim: int,
+        hidden_dims: Sequence[int] = (128, 128), do_layer_norm: bool = True, activation_func=nnx.relu
+    ) -> Callable[[TTrunkOut], jax.Array]:
+        return nnx.Sequential(
+            MLP(
+                rngs, (input_dim, *hidden_dims, 1), 
+                do_layer_norm=do_layer_norm, activation_func=activation_func
+            ),
+            lambda x: jnp.squeeze(x, axis=-1)
+        )
+
+@dataclass
+class TrainingState(Generic[TEnvState, TEnvObs, TEnvAction, TTrunkOut]):
     steps: ArrayLike
     env_states: TEnvState
-    actor: StochasticPolicyActor
 
-    networks: Networks[TEnvObs, TEnvAction]
+    networks: Networks[TEnvObs, TEnvAction, TTrunkOut]
     optimizer: nnx.Optimizer
 
 class A2C(Generic[TEnvState, TEnvObs]):
@@ -70,106 +133,60 @@ class A2C(Generic[TEnvState, TEnvObs]):
     ) -> None:
         """IMPORTANT: `env` must already be batched; eg. wrap with `VmapWrapper` BEFORE passing in."""
         self.env = env
-
         self.hyperparameters = hyperparameters
 
-    def make_default_value_func(self, rngs: nnx.Rngs,
-        hidden_dim: int = 256, num_hidden_layers: int = 2, do_layer_norm: bool = True, activation_func=nnx.relu
-    ) -> ValueFunc:
-        assert num_hidden_layers >= 1, "`num_hidden_layers` must be at least 1."
-        layers = [ FlattenAndProject[TEnvObs](rngs, self.env.observation_space.shapes_dtypes, output_dim=hidden_dim) ]
+    def make_actor(self, 
+        networks: Networks[TEnvObs, TEnvAction, TTrunkOut] | None = None, 
+        deterministic_sampling: bool = False, squash_continuous: bool = True,
+        rngs: nnx.Rngs | None = None
+    ) -> StochasticPolicyActor[TEnvObs, TEnvAction]:
+        """`rngs` is only necessary if `networks` is not provided."""
 
-        if do_layer_norm: layers.append(nnx.LayerNorm(hidden_dim, rngs=rngs))
-        layers.append(activation_func)
+        if networks is None: 
+            networks = Networks.make_default(rngs, self.env.observation_space, self.env.action_space)
 
-        layers.append(MLP(rngs, 
-            input_dim=hidden_dim, output_dim=1,
-            hidden_dim=hidden_dim, num_hidden_layers=num_hidden_layers-1, 
-            do_layer_norm=do_layer_norm, activation_func=activation_func
-        ))
+        return StochasticPolicyActor(
+            nnx.Sequential(networks.obs_trunk, networks.policy_head), 
+            self.env.action_space,
+            deterministic_sampling=deterministic_sampling,
+            squash_continuous=squash_continuous
+        )
 
-        layers.append(lambda x: jnp.squeeze(x, axis=-1))
+    def init_training_state(self, rngs: nnx.Rngs, networks: Networks[TEnvObs, TEnvAction, TTrunkOut] | None = None) \
+            -> TrainingState[TEnvState, TEnvObs, TEnvAction, TTrunkOut]:
+        if networks is None: 
+            networks = Networks.make_default(rngs, self.env.observation_space, self.env.action_space)
 
-        return nnx.Sequential(*layers)
-
-    def make_default_policy(self, rngs: nnx.Rngs,
-        hidden_dim: int = 256, num_hidden_layers: int = 2, do_layer_norm: bool = True, activation_func=nnx.tanh
-            # tanh is better for policy networks (https://arxiv.org/abs/2006.05990)
-    ) -> nnx.Module:
-        assert num_hidden_layers >= 1, "`num_hidden_layers` must be at least 1."
-        layers = [ FlattenAndProject[TEnvObs](rngs, self.env.observation_space.shapes_dtypes, output_dim=hidden_dim) ]
-
-        if do_layer_norm: layers.append(nnx.LayerNorm(hidden_dim, rngs=rngs))
-        layers.append(activation_func)
-
-        if num_hidden_layers > 1:
-            layers.append(MLP(rngs, 
-                input_dim=hidden_dim, output_dim=hidden_dim,
-                hidden_dim=hidden_dim, num_hidden_layers=num_hidden_layers-2, 
-                do_layer_norm=do_layer_norm, activation_func=activation_func
-            ))
-
-            if do_layer_norm: layers.append(nnx.LayerNorm(hidden_dim, rngs=rngs))
-            layers.append(activation_func)
-
-        layers.append(ActionDistributionHead[TEnvAction](rngs, self.env.action_space, input_dim=hidden_dim))
-
-        return nnx.Sequential(*layers)
-
-    def make_actor(self, policy: Policy | None = None, **kwargs) -> StochasticPolicyActor:
-        if policy is None: policy = self.make_default_policy(**kwargs)
-        return StochasticPolicyActor(policy, self.env.action_space)
-
-    def init_training_state(self,
-        rngs: nnx.Rngs,
-        policy: Policy | None = None,
-        value_func: ValueFunc | None = None,
-    ) -> TrainingState[TEnvState, TEnvObs]:
-        if policy is None: policy = self.make_default_policy(rngs)
-        if value_func is None: value_func = self.make_default_value_func(rngs)
-
-        networks = Networks(policy, value_func)
-
-        # shared optimizer
         optimizer = nnx.Optimizer(networks, optax.inject_hyperparams(optax.adamw)(
             learning_rate=try_call(self.hyperparameters.learning_rate, 0)))
-
-        actor = self.make_actor(policy)
 
         env_states, infos = self.env.reset(jax.random.split(rngs.env(), self.hyperparameters.n_envs))
 
         return TrainingState(
             steps = jnp.array(0, dtype=jnp.int32),
             env_states = env_states,
-            actor = actor,
 
             networks = networks,
             optimizer = optimizer,
         )
     
-    def train(self, rngs: nnx.Rngs, training_state: TrainingState[TEnvState, TEnvObs], steps: int) \
-            -> tuple[TrainingState[TEnvState, TEnvObs], dict[Any, Any]]:
+    def train(self, rngs: nnx.Rngs, training_state: TrainingState[TEnvState, TEnvObs, TEnvAction, TTrunkOut], steps: int) \
+            -> tuple[TrainingState[TEnvState, TEnvObs, TEnvAction, TTrunkOut], dict[Any, Any]]:
         """Train from the given `training_state`, returning an updated `training_state` and metrics."""
 
         total_steps_per_iter = self.hyperparameters.n_envs * self.hyperparameters.rollout_length
 
-        def train_iteration(training_state: TrainingState[TEnvState, TEnvObs], rngs: nnx.Rngs) \
-                -> tuple[TrainingState[TEnvState, TEnvObs], dict[Any, Any]]:
-            env_states = training_state.env_states
-            steps = training_state.steps
-            actor = training_state.actor
-
-            networks = training_state.networks
-            optimizer = training_state.optimizer
-            
+        def train_iteration(training_state: TrainingState[TEnvState, TEnvObs, TEnvAction, TTrunkOut], rngs: nnx.Rngs) \
+                -> tuple[TrainingState[TEnvState, TEnvObs, TEnvAction, TTrunkOut], dict[Any, Any]]:
             ## sample transitions from environment ##
-            actor.eval()
-            actor.deterministic = False
+            set_algo_phase(training_state.networks, AlgoPhase.ROLLOUT)
 
-            (unreset_obs, timesteps), env_states, final_infos = rollout(
+            actor = self.make_actor(training_state.networks, squash_continuous=False)
+
+            (unreset_obs, timesteps), training_state.env_states, final_infos = rollout(
                 rngs, SquashContinuousActionsToBoundsWrapper(self.env), actor,
                 self.hyperparameters.rollout_length, self.hyperparameters.n_envs,
-                env_states,
+                training_state.env_states,
 
                 take_func = lambda timesteps, rngs: (
                     self.env.get_obs(
@@ -180,7 +197,7 @@ class A2C(Generic[TEnvState, TEnvObs]):
                 )
             )
 
-            steps += total_steps_per_iter
+            training_state.steps += total_steps_per_iter
 
             if not self.hyperparameters.bootstrap_truncated: # treat truncation as termination 
                 timesteps.terminated = jnp.logical_or(timesteps.truncated, timesteps.terminated)
@@ -189,25 +206,25 @@ class A2C(Generic[TEnvState, TEnvObs]):
                 # last timesteps should be considered truncated, so bootstrapping is used
 
             # update optimizer schedules using env steps (rather than default grad steps)
-            lr = try_call(self.hyperparameters.learning_rate, steps)
-            optimizer.opt_state.hyperparams['learning_rate'].value = lr
+            lr = try_call(self.hyperparameters.learning_rate, training_state.steps)
+            training_state.optimizer.opt_state.hyperparams['learning_rate'].value = lr
 
             ## update networks ##
-            networks.train()
+            set_algo_phase(training_state.networks, AlgoPhase.OPTIMIZE)
 
-            discount = try_call(self.hyperparameters.discount_rate, steps)
-            gae_lambda = try_call(self.hyperparameters.gae_lambda, steps)
+            discount = try_call(self.hyperparameters.discount_rate, training_state.steps)
+            gae_lambda = try_call(self.hyperparameters.gae_lambda, training_state.steps)
 
-            vf_coef = try_call(self.hyperparameters.vf_coef, steps)
-            ent_coef = try_call(self.hyperparameters.ent_coef, steps)
-            ent_weight_continuous = try_call(self.hyperparameters.ent_weight_continuous, steps)
+            vf_coef = try_call(self.hyperparameters.vf_coef, training_state.steps)
+            ent_coef = try_call(self.hyperparameters.ent_coef, training_state.steps)
+            ent_weight_continuous = try_call(self.hyperparameters.ent_weight_continuous, training_state.steps)
 
-            def loss_func(networks: Networks[TEnvObs, TEnvAction], rngs: nnx.Rngs):
-                values = optionally_pass(networks.value_func, rngs=rngs)(timesteps.obs)
+            def loss_func(networks: Networks[TEnvObs, TEnvAction, TTrunkOut], rngs: nnx.Rngs):
+                action_distribution, values = optionally_pass(networks, rngs=rngs)(timesteps.obs)
                 const_values = jax.lax.stop_gradient(values)
 
                 if self.hyperparameters.bootstrap_truncated:
-                    next_values = optionally_pass(networks.value_func, rngs=rngs)(
+                    _, next_values = optionally_pass(networks, rngs=rngs)(
                         jax.tree.map(lambda x: x[1:], unreset_obs))
                 else:
                     next_values = const_values[1:]
@@ -217,7 +234,7 @@ class A2C(Generic[TEnvState, TEnvObs]):
                     final_infos[AutoResetWrapper.UNRESET_STATE_INFO_KEY]
                 )
 
-                final_values = optionally_pass(networks.value_func, rngs=rngs)(final_obs)
+                _, final_values = optionally_pass(networks, rngs=rngs)(final_obs)
                 next_values = jnp.append(next_values, final_values[None, ...], axis=0)
 
                 next_values = jax.lax.stop_gradient(next_values)
@@ -246,8 +263,6 @@ class A2C(Generic[TEnvState, TEnvObs]):
                 if self.hyperparameters.normalize_advantages:
                     advantages = (advantages - jnp.mean(advantages)) / (jnp.std(advantages) + 1e-8)
 
-                action_distribution = optionally_pass(networks.policy, rngs=rngs)(timesteps.obs)
-
                 log_probabilities = self.env.action_space.log_probability(
                     timesteps.action, action_distribution, continuous_squashed=False, log_stds=True)
                 policy_loss = - jnp.mean(log_probabilities * advantages)
@@ -267,34 +282,23 @@ class A2C(Generic[TEnvState, TEnvObs]):
                 comb_loss = policy_loss + vf_coef*value_loss - ent_coef*mean_entropy
 
                 metrics = { 'loss': comb_loss, 'policy_loss': policy_loss, 'value_loss': value_loss, 
-                    'entropy': mean_entropy}
+                    'entropy': mean_entropy }
 
                 return comb_loss, metrics
 
             loss_grad_func = nnx.value_and_grad(loss_func, has_aux=True)
-            (comb_loss, metrics), grads = loss_grad_func(networks, rngs)
-            optimizer.update(grads) 
+            (comb_loss, metrics), grads = loss_grad_func(training_state.networks, rngs)
+            training_state.optimizer.update(grads) 
 
-            return TrainingState(
-                steps=steps,
-                env_states=env_states,
-                actor=actor,
+            return training_state, jax.tree.map(lambda x: jnp.mean(x), metrics)
 
-                networks=networks,
-                optimizer=optimizer,
-            ), jax.tree.map(lambda x: jnp.mean(x), metrics)
-        
-        training_state.actor.eval()
-        training_state.actor.deterministic = False
-
-        squash_continuous = training_state.actor.squash_continuous
-        training_state.actor.squash_continuous = False
-
-        training_state.networks.train()
+        # phases must match phases at the end of train_iteration
+        set_algo_phase(training_state.networks, AlgoPhase.OPTIMIZE)
 
         iterations = math.ceil(steps / total_steps_per_iter)
         training_state, metrics = nnx.scan(train_iteration)(training_state, rngs.fork(split=iterations))
 
-        training_state.actor.squash_continuous = squash_continuous
+        # set into eval mode for the user
+        set_algo_phase(training_state.networks, AlgoPhase.EVAL)
 
         return training_state, jax.tree.map(lambda x: jnp.mean(x), metrics)

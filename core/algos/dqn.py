@@ -1,8 +1,6 @@
-from typing import TypeVar, Generic, Any, Sequence, Self
+from typing import TypeVar, Generic, Any, Sequence, Self, Callable
 
 import math
-
-import numpy as np
 
 import jax.numpy as jnp
 import jax
@@ -24,7 +22,7 @@ from core.envs.utils import rollout, Actor, RandomActor
 
 @dataclass(frozen=True)
 class Hyperparameters:
-    n_envs: int = 32
+    n_envs: int = 256
 
     discount_rate: Scheduleable[float] = 0.99
     learning_rate: Scheduleable[float] = 2.5e-4
@@ -48,15 +46,16 @@ class Hyperparameters:
 
 TEnvState = TypeVar("TEnvState")
 TEnvObs = TypeVar("TEnvObs")
+TTrunkOut = TypeVar("TTrunkOut")
 
-class Networks(nnx.Module, Generic[TEnvObs]):
-    def __init__(self, obs_trunk, qs_head) -> None:
+class Networks(nnx.Module, Generic[TEnvObs, TTrunkOut]):
+    def __init__(self, obs_trunk: Callable[[TEnvObs], TTrunkOut], qs_head: Callable[[TTrunkOut], jax.Array]) -> None:
         self.obs_trunk = obs_trunk
         self.qs_head = qs_head
 
-    def __call__(self, obs: TEnvObs, rngs: nnx.Rngs | None = None):
+    def __call__(self, obs: TEnvObs, rngs: nnx.Rngs | None = None) -> jax.Array:
         trunk_out = optionally_pass(self.obs_trunk, rngs=rngs)(obs)
-        return self.qs_head(trunk_out)
+        return optionally_pass(self.qs_head, rngs=rngs)(trunk_out)
 
     @classmethod
     def make_default(cls, rngs: nnx.Rngs, observation_space: Space[TEnvObs], action_space: Space[ArrayLike]) -> Self:
@@ -71,7 +70,7 @@ class Networks(nnx.Module, Generic[TEnvObs]):
         normalize_observations: bool = True, 
         obs_running_mean_var: RunningMeanVar[TEnvObs] | None = None, 
         obs_clip_threshold: float | None = None
-    ) -> nnx.Sequential:
+    ) -> Callable[[TEnvObs], TTrunkOut]:
         layers = []
 
         if normalize_observations:
@@ -86,7 +85,7 @@ class Networks(nnx.Module, Generic[TEnvObs]):
     def make_default_qs_head(
         rngs: nnx.Rngs, input_dim: int, action_space: Space[ArrayLike],
         hidden_dims: Sequence[int] = (128, 128), do_layer_norm: bool = True, activation_func=nnx.relu
-    ) -> nnx.Module:
+    ) -> Callable[[TTrunkOut], jax.Array]:
         return MLP(
             rngs, (input_dim, *hidden_dims, int(action_space.high + 1)), 
             do_layer_norm=do_layer_norm, activation_func=activation_func
@@ -101,14 +100,14 @@ class Transition(Generic[TEnvObs]):
     terminated: ArrayLike
 
 @dataclass
-class TrainingState(Generic[TEnvState, TEnvObs]):
+class TrainingState(Generic[TEnvState, TEnvObs, TTrunkOut]):
     steps: ArrayLike
     env_states: TEnvState
 
-    opt_networks: Networks
+    networks: Networks[TEnvObs, TTrunkOut]
     optimizer: nnx.Optimizer
 
-    target_networks: Networks
+    target_networks: Networks[TEnvObs, TTrunkOut]
     replay_buffer_state: ReplayBufferState[Transition[TEnvObs]]
 
 class DQN(Generic[TEnvState, TEnvObs]):
@@ -141,8 +140,11 @@ class DQN(Generic[TEnvState, TEnvObs]):
         self.replay_buffer = ReplayBuffer[Transition[TEnvObs]](
             self.transition_shapes_dtypes, self.hyperparameters.replay_buffer_size)
 
-    def make_actor(self, networks: Networks | None = None, epsilon: ArrayLike = jnp.array(0.0), 
-            rngs: nnx.Rngs | None = None) -> GreedyQActor:
+    def make_actor(self, 
+        networks: Networks[TEnvObs, TTrunkOut] | None = None, 
+        epsilon: ArrayLike = jnp.array(0.0), 
+        rngs: nnx.Rngs | None = None
+    ) -> GreedyQActor[TEnvObs]:
         """`rngs` is only necessary if `networks` is not provided."""
 
         if networks is None: 
@@ -156,7 +158,7 @@ class DQN(Generic[TEnvState, TEnvObs]):
 
     def rollout_transitions(self,
         rngs: nnx.Rngs, 
-        actor: Actor, 
+        actor: Actor[TEnvObs, ArrayLike], 
         iter: int,
         initial_env_states: TEnvState | None = None,
     ) -> tuple[Transition[TEnvObs], TEnvState]:
@@ -203,10 +205,10 @@ class DQN(Generic[TEnvState, TEnvObs]):
 
     def init_training_state(self,
         rngs: nnx.Rngs,
-        networks: Networks | None = None,
+        networks: Networks[TEnvObs, TTrunkOut] | None = None,
         replay_buffer_state: ReplayBufferState[Transition[TEnvObs]] | None = None,
         prefill_steps: int = 10_000,
-    ) -> TrainingState[TEnvState, TEnvObs]:
+    ) -> TrainingState[TEnvState, TEnvObs, TTrunkOut]:
         if networks is None: 
             networks = Networks.make_default(rngs, self.env.observation_space, self.env.action_space)
 
@@ -235,27 +237,27 @@ class DQN(Generic[TEnvState, TEnvObs]):
             steps = jnp.array(0, dtype=jnp.int32),
             env_states = env_states,
 
-            opt_networks = networks,
+            networks = networks,
             optimizer = optimizer,
 
             target_networks = target_networks,
             replay_buffer_state = replay_buffer_state,
         )
     
-    def train(self, rngs: nnx.Rngs, training_state: TrainingState[TEnvState, TEnvObs], steps: int) \
-            -> tuple[TrainingState[TEnvState, TEnvObs], dict[Any, Any]]:
+    def train(self, rngs: nnx.Rngs, training_state: TrainingState[TEnvState, TEnvObs, TTrunkOut], steps: int) \
+            -> tuple[TrainingState[TEnvState, TEnvObs, TTrunkOut], dict[Any, Any]]:
         """Train from the given `training_state`, returning an updated `training_state` and metrics."""
 
         steps_per_env_per_iter = math.ceil(self.hyperparameters.train_freq / self.hyperparameters.n_envs)
         total_steps_per_iter = steps_per_env_per_iter * self.hyperparameters.n_envs
         learn_steps_per_iter = math.ceil(self.hyperparameters.n_envs / self.hyperparameters.train_freq)
 
-        def train_iteration(training_state: TrainingState[TEnvState, TEnvObs], rngs: nnx.Rngs) \
-                -> tuple[TrainingState[TEnvState, TEnvObs], dict[Any, Any]]:
+        def train_iteration(training_state: TrainingState[TEnvState, TEnvObs, TTrunkOut], rngs: nnx.Rngs) \
+                -> tuple[TrainingState[TEnvState, TEnvObs, TTrunkOut], dict[Any, Any]]:
             ## sample transitions from environment ##
-            set_algo_phase(training_state.opt_networks, AlgoPhase.ROLLOUT)
+            set_algo_phase(training_state.networks, AlgoPhase.ROLLOUT)
 
-            actor = self.make_actor(training_state.opt_networks, 
+            actor = self.make_actor(training_state.networks, 
                 try_call(self.hyperparameters.epsilon, training_state.steps))
             transitions, training_state.env_states = self.rollout_transitions(rngs, 
                 actor, steps_per_env_per_iter, training_state.env_states)
@@ -268,11 +270,11 @@ class DQN(Generic[TEnvState, TEnvObs]):
                 = try_call(self.hyperparameters.learning_rate, training_state.steps)
 
             ## update q functions ##
-            set_algo_phase(training_state.opt_networks, AlgoPhase.OPTIMIZE)
+            set_algo_phase(training_state.networks, AlgoPhase.OPTIMIZE)
 
             def learn_step(carry: tuple[Networks, Networks, nnx.Optimizer], rngs: nnx.Rngs) \
                     -> tuple[tuple[Networks, Networks, nnx.Optimizer], dict[Any, Any]]:
-                opt_networks, target_networks, optimizer = carry
+                networks, target_networks, optimizer = carry
 
                 sampled_transitions = self.replay_buffer.sample(rngs.transitions(), 
                     training_state.replay_buffer_state, self.hyperparameters.batch_size)
@@ -285,8 +287,8 @@ class DQN(Generic[TEnvState, TEnvObs]):
                 target_qs = sampled_transitions.reward \
                     + try_call(self.hyperparameters.discount_rate, training_state.steps)*max_next_qs
 
-                def loss_func(opt_networks: nnx.Module, rngs: nnx.Rngs):
-                    pred_qs_all_actions = optionally_pass(opt_networks, rngs=rngs)(sampled_transitions.obs)
+                def loss_func(networks: nnx.Module, rngs: nnx.Rngs):
+                    pred_qs_all_actions = optionally_pass(networks, rngs=rngs)(sampled_transitions.obs)
                         # q-net returns a q-value for every action
                     pred_qs = pred_qs_all_actions[jnp.arange(self.hyperparameters.batch_size), sampled_transitions.action]
                         # take only the q-value corresponding to the chosen action
@@ -295,19 +297,19 @@ class DQN(Generic[TEnvState, TEnvObs]):
                     return jnp.mean(jnp.power(target_qs - pred_qs, 2))
 
                 loss_grad_func = nnx.value_and_grad(loss_func)
-                loss, grads = loss_grad_func(opt_networks, rngs)
+                loss, grads = loss_grad_func(networks, rngs)
                 optimizer.update(grads) 
 
                 # update target network if using polyak averaging
                 if self.hyperparameters.polyak_tau is not None:
                     tau = try_call(self.hyperparameters.polyak_tau, training_state.steps)
                     nnx.update(target_networks, optax.incremental_update(
-                        nnx.state(opt_networks), nnx.state(target_networks), tau))
+                        nnx.state(networks), nnx.state(target_networks), tau))
 
                 return carry, { 'q_loss': loss }
 
             _, metrics = nnx.scan(learn_step)(
-                (training_state.opt_networks, training_state.target_networks, training_state.optimizer), 
+                (training_state.networks, training_state.target_networks, training_state.optimizer), 
                 rngs.fork(split=learn_steps_per_iter)
             )
 
@@ -317,7 +319,7 @@ class DQN(Generic[TEnvState, TEnvObs]):
                 nnx.update(training_state.target_networks, jax.lax.cond(update_target, 
                     lambda opt_state, target_state: opt_state, 
                     lambda opt_state, target_state: target_state,
-                    nnx.state(training_state.opt_networks), nnx.state(training_state.target_networks)
+                    nnx.state(training_state.networks), nnx.state(training_state.target_networks)
                 ))
 
             return training_state, jax.tree.map(lambda x: jnp.mean(x), metrics)
@@ -328,12 +330,12 @@ class DQN(Generic[TEnvState, TEnvObs]):
 
         # phases must match phases at the end of train_iteration
         set_algo_phase(training_state.target_networks, AlgoPhase.EVAL)
-        set_algo_phase(training_state.opt_networks, AlgoPhase.OPTIMIZE)
+        set_algo_phase(training_state.networks, AlgoPhase.OPTIMIZE)
 
         iterations = math.ceil(steps / total_steps_per_iter)
         training_state, metrics = nnx.scan(train_iteration)(training_state, rngs.fork(split=iterations))
 
         # set into eval mode for the user
-        set_algo_phase(training_state.opt_networks, AlgoPhase.EVAL)
+        set_algo_phase(training_state.networks, AlgoPhase.EVAL)
 
         return training_state, jax.tree.map(lambda x: jnp.mean(x), metrics)
