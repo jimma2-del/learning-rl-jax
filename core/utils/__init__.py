@@ -1,3 +1,3 @@
-from .replay_buffer import ReplayBuffer, ReplayBufferState
+from .replay_buffer import ReplayBuffer
 from .linearly_interpolated_table import LinearlyInterpolatedTable
 from .running_mean_var import RunningMeanVar

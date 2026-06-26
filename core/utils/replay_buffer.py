@@ -1,9 +1,7 @@
 from chex import dataclass
 import chex
 from jax.typing import ArrayLike
-from typing import Any, Generic, TypeVar
-
-import functools
+from typing import Any, Generic, TypeVar, Self, Sequence
 
 import jax
 from jax import flatten_util
@@ -14,67 +12,60 @@ from core.utils.batch_utils import get_tree_batch_dims
 TReplayBufferItem = TypeVar("TReplayBufferItem")
 
 @dataclass(frozen=True)
-class ReplayBufferState(Generic[TReplayBufferItem]):
+class ReplayBuffer(Generic[TReplayBufferItem]):
     data: TReplayBufferItem
     insert_i: ArrayLike
     filled_len: ArrayLike
 
-class ReplayBuffer(Generic[TReplayBufferItem]):
-    def __init__(self, item_shapes_dtypes, capacity: int = 10000) -> None:
+    @classmethod
+    def init(cls, item_shapes_dtypes: TReplayBufferItem, capacity: int = 10000) -> Self:
         """item_shapes_dtypes: A PyTree of jax.ShapeDtypeStruct leaves, eg. from jax.eval_shape()."""
-        self.item_shapes_dtypes = item_shapes_dtypes
-        self.capacity = capacity
-
-    #@functools.partial(jax.jit, static_argnames=('self'))
-    def init(self) -> ReplayBufferState[TReplayBufferItem]:
 
         data = jax.tree.map(
-            lambda shape_dtype: jnp.empty((self.capacity, *shape_dtype.shape), dtype=shape_dtype.dtype),
-            self.item_shapes_dtypes
+            lambda shape_dtype: jnp.empty((capacity, *shape_dtype.shape), dtype=shape_dtype.dtype),
+            item_shapes_dtypes
         )
 
-        return ReplayBufferState(
+        return cls(
             data = data,
             insert_i = jnp.array(0, dtype=jnp.int32),
             filled_len = jnp.array(0, dtype=jnp.int32)
         )
 
-    #@functools.partial(jax.jit, static_argnames=('self'))
-    def insert(self, state: ReplayBufferState[TReplayBufferItem], items: TReplayBufferItem) \
-        -> ReplayBufferState[TReplayBufferItem]:
-        '''samples: farther back means newer'''
-        
+    def insert(self, items: TReplayBufferItem) -> Self:
+        """`items`: Farther back means newer."""
+        shapes_dtypes = jax.eval_shape(lambda: jax.tree.map(lambda x: x[0], self.data))
+        capacity = get_tree_batch_dims(shapes_dtypes, self.data)[0]
+            
         # flatten/add batch axis if number of batch axes is not 1
         items = jax.tree.map(
             lambda shape_dtype, items_leaf: items_leaf.reshape((-1, *shape_dtype.shape)),
-            self.item_shapes_dtypes, items
+            shapes_dtypes, items
         )
 
-        insert_n = get_tree_batch_dims(self.item_shapes_dtypes, items)[0]
+        insert_n = get_tree_batch_dims(shapes_dtypes, items)[0]
 
-        if insert_n > self.capacity:
-            return ReplayBufferState(
-                data = jax.tree.map(lambda x: x[insert_n - self.capacity : ], items),
-                insert_i = 0,
-                filled_len = self.capacity
+        if insert_n > capacity:
+            return ReplayBuffer(
+                data = jax.tree.map(lambda x: x[insert_n - capacity : ], items),
+                insert_i = jnp.array(0),
+                filled_len = jnp.array(capacity)
             )
 
-        insert_indices = (state.insert_i + jnp.arange(insert_n)) % self.capacity
+        insert_indices = (self.insert_i + jnp.arange(insert_n)) % capacity
 
         data = jax.tree.map(lambda data_leaf, items_leaf: data_leaf.at[insert_indices].set(items_leaf), 
-            state.data, items)
+            self.data, items)
 
-        return ReplayBufferState(
+        return ReplayBuffer(
             data = data,
             insert_i = insert_indices[-1] + 1,
-            filled_len = jnp.clip(state.filled_len + insert_n, max=self.capacity)
+            filled_len = jnp.minimum(self.filled_len + insert_n, capacity)
         )
 
-    #@functools.partial(jax.jit, static_argnames=('self', 'num_samples'))
-    def sample(self, key: chex.PRNGKey, state: ReplayBufferState[TReplayBufferItem], num_samples: int) \
-        -> TReplayBufferItem:
-        indices = jax.random.randint(key, (num_samples, ), minval=0, maxval=state.filled_len)
-        return jax.tree.map(lambda x: x[indices], state.data)
+    def sample(self, key: chex.PRNGKey, batch_dims: Sequence[int]) -> TReplayBufferItem:
+        indices = jax.random.randint(key, batch_dims, minval=0, maxval=self.filled_len)
+        return jax.tree.map(lambda x: x[indices], self.data)
 
 if __name__ == "__main__":
     @dataclass(frozen=True)
@@ -82,14 +73,13 @@ if __name__ == "__main__":
         a: ArrayLike
         b: ArrayLike
 
-    buffer = ReplayBuffer[Sample](jax.eval_shape(lambda: Sample(a=1, b=2)), 8)
-    buffer_state = buffer.init()
-    buffer_state = buffer.insert(buffer_state, Sample(a=jnp.array((1,2,3)), b=jnp.array((11,12,13))))
-    buffer_state = buffer.insert(buffer_state, Sample(a=jnp.array((100,200,300)), b=jnp.array((1100,1200,1300))))
-    print(buffer_state.data)
+    buffer = ReplayBuffer.init(jax.eval_shape(lambda: Sample(a=1, b=2)), 8)
+    buffer = buffer.insert(Sample(a=jnp.array((1,2,3)), b=jnp.array((11,12,13))))
+    buffer = buffer.insert(Sample(a=jnp.array((100,200,300)), b=jnp.array((1100,1200,1300))))
+    print(buffer.data)
 
     key = jax.random.key(100)
 
     #print(jax.random.randint(key, (10, ), minval=0, maxval=5))
 
-    print(buffer.sample(key, buffer_state, 20))
+    print(buffer.sample(key, (20,)))

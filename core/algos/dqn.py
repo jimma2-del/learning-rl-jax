@@ -10,7 +10,7 @@ from chex import dataclass
 from flax import nnx
 import optax
 
-from core.utils import ReplayBuffer, ReplayBufferState, RunningMeanVar
+from core.utils import ReplayBuffer, RunningMeanVar
 from core.utils.func_utils import try_call, optionally_pass
 from core.utils.nnx_modules import MLP, RunningMeanVarNorm
 
@@ -108,7 +108,7 @@ class TrainingState(Generic[TEnvState, TEnvObs, TTrunkOut]):
     optimizer: nnx.Optimizer
 
     target_networks: Networks[TEnvObs, TTrunkOut]
-    replay_buffer_state: ReplayBufferState[Transition[TEnvObs]]
+    replay_buffer: ReplayBuffer[Transition[TEnvObs]]
 
 class DQN(Generic[TEnvState, TEnvObs]):
     """Implementation of DQN."""
@@ -128,7 +128,7 @@ class DQN(Generic[TEnvState, TEnvObs]):
         self.env = env
         self.hyperparameters = hyperparameters
 
-        # make replay buffer
+        # make replay buffer data shape
         self.transition_shapes_dtypes = Transition(
             obs = self.env.observation_space.shapes_dtypes,
             action = self.env.action_space.shapes_dtypes,
@@ -136,9 +136,6 @@ class DQN(Generic[TEnvState, TEnvObs]):
             next_obs = self.env.observation_space.shapes_dtypes,
             terminated = jax.ShapeDtypeStruct(shape=(), dtype=jnp.bool)
         )
-
-        self.replay_buffer = ReplayBuffer[Transition[TEnvObs]](
-            self.transition_shapes_dtypes, self.hyperparameters.replay_buffer_size)
 
     def make_actor(self, 
         networks: Networks[TEnvObs, TTrunkOut] | None = None, 
@@ -206,7 +203,7 @@ class DQN(Generic[TEnvState, TEnvObs]):
     def init_training_state(self,
         rngs: nnx.Rngs,
         networks: Networks[TEnvObs, TTrunkOut] | None = None,
-        replay_buffer_state: ReplayBufferState[Transition[TEnvObs]] | None = None,
+        replay_buffer: ReplayBuffer[Transition[TEnvObs]] | None = None,
         prefill_steps: int = 10_000,
     ) -> TrainingState[TEnvState, TEnvObs, TTrunkOut]:
         if networks is None: 
@@ -222,8 +219,9 @@ class DQN(Generic[TEnvState, TEnvObs]):
             nnx.update(target_networks, optax.incremental_update(
                 nnx.state(target_networks), nnx.state(target_networks), 0.5))
 
-        if replay_buffer_state is None:
-            replay_buffer_state = self.replay_buffer.init()
+        if replay_buffer is None:
+            replay_buffer = ReplayBuffer.init(
+                self.transition_shapes_dtypes, self.hyperparameters.replay_buffer_size)
 
         # prefill replay buffer
         transitions, env_states = nnx.jit(self.rollout_transitions, static_argnames=('iter', 'actor'))(rngs,
@@ -231,7 +229,7 @@ class DQN(Generic[TEnvState, TEnvObs]):
             math.ceil(prefill_steps / self.hyperparameters.n_envs),
         )
 
-        replay_buffer_state = self.replay_buffer.insert(replay_buffer_state, transitions)
+        replay_buffer = replay_buffer.insert(transitions)
 
         return TrainingState(
             steps = jnp.array(0, dtype=jnp.int32),
@@ -241,7 +239,7 @@ class DQN(Generic[TEnvState, TEnvObs]):
             optimizer = optimizer,
 
             target_networks = target_networks,
-            replay_buffer_state = replay_buffer_state,
+            replay_buffer = replay_buffer,
         )
     
     def train(self, rngs: nnx.Rngs, training_state: TrainingState[TEnvState, TEnvObs, TTrunkOut], steps: int) \
@@ -263,7 +261,7 @@ class DQN(Generic[TEnvState, TEnvObs]):
                 actor, steps_per_env_per_iter, training_state.env_states)
             training_state.steps += total_steps_per_iter
 
-            training_state.replay_buffer_state = self.replay_buffer.insert(training_state.replay_buffer_state, transitions)
+            training_state.replay_buffer = training_state.replay_buffer.insert(transitions)
 
             # update optimizer schedules using env steps (rather than default grad steps)
             training_state.optimizer.opt_state.hyperparams['learning_rate'].value \
@@ -276,8 +274,8 @@ class DQN(Generic[TEnvState, TEnvObs]):
                     -> tuple[tuple[Networks, Networks, nnx.Optimizer], dict[Any, Any]]:
                 networks, target_networks, optimizer = carry
 
-                sampled_transitions = self.replay_buffer.sample(rngs.transitions(), 
-                    training_state.replay_buffer_state, self.hyperparameters.batch_size)
+                sampled_transitions = training_state.replay_buffer.sample(
+                    rngs.transitions(), (self.hyperparameters.batch_size,))
 
                 next_qs = optionally_pass(target_networks, rngs=rngs)(sampled_transitions.next_obs)
                 max_next_qs = jnp.max(next_qs, axis=-1)

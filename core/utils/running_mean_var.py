@@ -8,7 +8,7 @@ from core.utils.batch_utils import flatten_tree_batch_axes
 
 TInput = TypeVar('TInput')
 
-@chex.dataclass
+@chex.dataclass(frozen=True)
 class RunningMeanVar(Generic[TInput]):
     mean: TInput
     var: TInput
