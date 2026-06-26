@@ -13,7 +13,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from .base import Environment, Space
-from core.utils.batch_utils import get_tree_vmap_dim, dummy_vmap
+from core.utils.batch_utils import get_tree_vmap_dim, dummy_vmap, split_key_from_batch
 
 TEnvState = TypeVar("TEnvState")
 TEnvObs = TypeVar("TEnvObs")
@@ -516,3 +516,32 @@ class EpisodeStepCountWrapper(
     def render(self, state: EpisodeStepCountState[TEnvState], action: ArrayLike) -> TRenderFrame:
         return super().render(state.state, action)
 
+class RandomTruncationWrapper(
+    Generic[TEnvState, TEnvObs, TEnvAction, TRenderFrame],
+    Wrapper[EpisodeStepCountState[TEnvState], TEnvObs, TEnvAction, TRenderFrame]
+):
+    """Randomly truncates episodes to break synchronization between elements in a batch.
+
+    This is necessary for envs with fixed episode lengths, where all states are reset at the same time.
+        Staggering states prevents cyclical nonstationarity due to synced episode phases.
+        See https://arxiv.org/abs/2511.21011 for details regarding this issue. 
+            This wrapper takes a different approach to solve the same issue.
+    """
+
+    def __init__(self,
+        env: Environment[TEnvState, TEnvObs, TEnvAction, TRenderFrame],
+        truncate_probability: float = 0.001
+    ) -> None:
+        super().__init__(env)
+        self.truncate_probability = truncate_probability
+
+    def step(self, key: chex.PRNGKey, state: TEnvState, action: TEnvAction) \
+            -> tuple[TEnvState, jax.Array, jax.Array, jax.Array, dict[Any, Any]]:
+        truncate_key, step_keys = split_key_from_batch(key)
+        
+        next_state, reward, terminated, truncated, info = super().step(step_keys, state, action)
+
+        random = jax.random.uniform(truncate_key, shape=truncated.shape)
+        truncated = jnp.logical_or(truncated, random < self.truncate_probability)
+
+        return next_state, reward, terminated, truncated, info

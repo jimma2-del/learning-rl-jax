@@ -131,6 +131,18 @@ def split_key_if_batched(key: chex.PRNGKey, batch_num: int | None = None) -> che
     If `batch_num` is None, does nothing, returning `key` unaltered."""
     return key if batch_num is None else jax.random.split(key, batch_num)
 
+def split_key_from_batch(keys: chex.PRNGKey) -> chex.PRNGKey:
+    """Splits a single new key from `keys` using an arbitrary element, replacing the used key in `keys`.
+    If `keys` has shape (), this function is equivalent to `jax.random.split(keys)`.
+    Returns: single key, keys with the same shape as `keys`."""
+
+    if jnp.isscalar(keys): return jax.random.split(keys)
+
+    indices = (0,) * len(keys.shape)
+    key1, key2 = jax.random.split(keys[indices])
+    
+    return key1, keys.at[indices].set(key2)
+
 def dummy_vmap(f: Callable) -> Callable:
     """Mimics the behavior of `jax.vmap`, but does not actually apply vmap transformation; instead, 
         for inputs, simply takes the first element in the batch axis,

@@ -69,7 +69,7 @@ def evaluate_episodes(rngs: nnx.Rngs,
 
     Do NOT wrap the environment with `AutoResetWrapper` before passing in.
 
-    It is recommended to pass a batched environment (eg. wrapped with `VmapWrapper` for increased speed.
+    It is recommended to pass a batched environment (eg. wrapped with `VmapWrapper`) for increased speed.
         Must specify `n_envs` (number of parallel environments) if passed environment is batched.
         If `n_envs` is specified, the environment must be batched BEFORE passing in.
         `actor` should also accept a batched input of `obs`, but only a single `rngs`. 
@@ -229,10 +229,10 @@ def rollout(rngs: nnx.Rngs,
         Places the original, unresetted state into `info[UNRESET_STATE_INFO_KEY]` (useful eg. for truncation)
         This will be the same as the returned new_state if not terminated and not truncated.
 
-    If using a batched environment, wrap with `VmapWrapper` BEFORE passing in. Additionally:
-        `n_envs` MUST be specified. `n_envs=None` indicates no batching.
-        `actor` should also accept a batched input of `obs`, but only a single `rngs`. 
-            Apply `nnx.split_rngs(splits=n_envs)(nnx.vmap(actor))` before passing in if not already batched.
+    If using batched env states, ensure both `env` and `actor` can handle batches BEFORE passing in.
+        Eg. wrap environment with `VmapWrapper`, wrap actor with `nnx.split_rngs(splits=n_envs)(nnx.vmap(actor))`.
+            Actor should take batched env states, but a SINGLE, unbatched nnx.Rngs.
+        Additionally, `n_envs` MUST be specified. `n_envs=None` indicates no batching.
 
     If `initial_env_state` is given but `initial_env_info` is not given,
         the first info will be a dummy value.
@@ -278,6 +278,43 @@ def rollout(rngs: nnx.Rngs,
         (actor, initial_env_state, initial_env_info), rngs.fork(split=iters))
 
     return take_values, env_states, infos
+
+def stagger_env_states(rngs: nnx.Rngs,
+    env: Environment[TEnvState, TEnvObs, TEnvAction, TRenderFrame],
+    n_envs: int,
+    stagger_step_size: int = 32,
+    initial_env_states: TEnvState | None = None
+) -> tuple[TTakeObj, TEnvState, dict[Any, Any]]:
+    """Staggers environment states by stepping for different numbers of steps.
+        Envs will be staggered by `jnp.arange(n_envs) * stagger_step_size` steps respectively.
+    
+    This is necessary for envs with fixed episode lengths, where all states are reset at the same time.
+        Staggering states prevents cyclical nonstationarity due to synced episode phases.
+        See https://arxiv.org/abs/2511.21011 for more details. 
+            We deviate from this paper as we find that dividing into groups is unnecessary.
+
+    `env` must be able to handle batched states. Eg. wrap with `VmapWrapper` BEFORE passing in.
+    """
+
+    if initial_env_states is None:
+        initial_env_states, _= env.reset(jax.random.split(rngs.env(), n_envs))
+
+    needed_steps = jnp.arange(n_envs) * stagger_step_size
+
+    def step_envs(carry: tuple[TEnvState, jax.Array], rngs: nnx.Rngs) -> TEnvState:
+        states, steps = carry
+
+        actions = env.action_space.sample(rngs.actions(), batch_dims=(n_envs,))
+        new_states, _, _, _, _ = env.step(jax.random.split(rngs.env(), n_envs), states, actions)
+        steps = steps + 1
+
+        next_states = jax.tree.map(lambda cur, new: jnp.where(steps > needed_steps, cur, new), states, new_states)
+        return next_states, steps
+
+    carry = initial_env_states, jnp.array(0, dtype=jnp.int32)
+    states, _ = nnx.scan(step_envs, out_axes=nnx.Carry)(carry, rngs.fork(split=(n_envs-1)*stagger_step_size))
+
+    return states
 
 def visualize_pygame(rngs: nnx.Rngs, 
     env: Environment[TEnvState, TEnvObs, TEnvAction, TRenderFrame], 
