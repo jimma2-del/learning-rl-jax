@@ -13,7 +13,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from .base import Environment, Space
-from core.utils.batch_utils import get_tree_vmap_dim, dummy_vmap, split_key_from_batch
+from core.utils.batch_utils import get_tree_vmap_dim, dummy_vmap, split_key_from_batch, split_batched_keys
 
 TEnvState = TypeVar("TEnvState")
 TEnvObs = TypeVar("TEnvObs")
@@ -335,8 +335,7 @@ class AutoResetWrapper(
 
     def step(self, key: chex.PRNGKey, state: TEnvState, action: TEnvAction) \
             -> tuple[TEnvState, jax.Array, jax.Array, jax.Array, dict[Any, Any]]:
-        if jnp.isscalar(key): step_key, reset_key = jax.random.split(key)
-        else: step_key, reset_key = jax.vmap(jax.random.split)(key).T
+        step_key, reset_key = split_batched_keys(key)
 
         next_state, reward, terminated, truncated, info = super().step(step_key, state, action)
         info[self.UNRESET_STATE_INFO_KEY] = next_state

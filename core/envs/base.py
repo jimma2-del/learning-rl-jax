@@ -222,7 +222,7 @@ class Space(Generic[TSpaceElement]):
 
         return jax.tree.map(map_func, x, self.low, self.high, self.shapes_dtypes)
 
-    def sample_distribution(self, key: chex.PRNGKey, distribution: TSpaceElement, batch_dims: Sequence[int] = (),
+    def sample_distribution(self, key: chex.PRNGKey, distribution: TSpaceElement, batch_dims: int | Sequence[int] = (),
             squash_continuous=True, deterministic=False, log_stds=False) -> TSpaceElement:
         """Samples a batch of elements of shape `batch_dims` from the space, according to the given distribution.
         
@@ -250,6 +250,7 @@ class Space(Generic[TSpaceElement]):
 
         `log_stds`: If True, treats stds as log stds: uses exp(feature[1]) as the standard deviation.
         """
+        if isinstance(batch_dims, int): batch_dims = (batch_dims,)
 
         keys = jax.random.split(key, num=self.treedef.num_leaves)
         keys_tree = jax.tree.unflatten(self.treedef, keys)
@@ -383,7 +384,7 @@ class Space(Generic[TSpaceElement]):
                 "`monte_carlo_key` must be provided for monte carlo estimation."
 
             # NOTE: unnecessary sample and log_p computations will be optimized out by the compiler
-            samples = self.sample_distribution(monte_carlo_key, distribution, batch_dims=(monte_carlo_n_samples,),
+            samples = self.sample_distribution(monte_carlo_key, distribution, batch_dims=monte_carlo_n_samples,
                 squash_continuous=False, log_stds=log_stds)
 
             log_ps = self.log_probabilities(samples, distribution, 

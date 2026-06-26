@@ -117,7 +117,7 @@ if __name__ == "__main__":
 
     for i in range(100):
         key, subkey1, subkey2, = jax.random.split(key, 3)
-        coords = jax.random.uniform(subkey1, (2,), minval=jnp.array((-10,-10)), maxval=jnp.array((11,20)))
+        coords = jax.random.uniform(subkey1, 2, minval=jnp.array((-10,-10)), maxval=jnp.array((11,20)))
         set_val = jax.random.uniform(subkey2, (), minval=-10, maxval=10)
 
         table_state = table.set(table_state, coords, set_val)

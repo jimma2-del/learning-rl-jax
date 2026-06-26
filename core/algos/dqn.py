@@ -275,7 +275,7 @@ class DQN(Generic[TEnvState, TEnvObs]):
                 networks, target_networks, optimizer = carry
 
                 sampled_transitions = training_state.replay_buffer.sample(
-                    rngs.transitions(), (self.hyperparameters.batch_size,))
+                    rngs.transitions(), self.hyperparameters.batch_size)
 
                 next_qs = optionally_pass(target_networks, rngs=rngs)(sampled_transitions.next_obs)
                 max_next_qs = jnp.max(next_qs, axis=-1)

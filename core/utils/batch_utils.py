@@ -126,10 +126,12 @@ def get_tree_vmap_dim(tree) -> int:
 
     return dim
 
-def split_key_if_batched(key: chex.PRNGKey, batch_num: int | None = None) -> chex.PRNGKey:
-    """Splits key into an array of length `batch_num`.
-    If `batch_num` is None, does nothing, returning `key` unaltered."""
-    return key if batch_num is None else jax.random.split(key, batch_num)
+def split_batched_keys(keys: chex.PRNGKey, num: int | Sequence[int] = 2) -> chex.PRNGKey:
+    """Same as `jax.random.split`, but allows extra leading batch dims in `keys`.
+        Split operation will be vmapped across batch dims."""
+    if isinstance(num, int): num = (num,)
+    split_keys = jax.vmap(jax.random.split, in_axes=(0, None))(keys.flatten(), num)
+    return split_keys.reshape(num + keys.shape)
 
 def split_key_from_batch(keys: chex.PRNGKey) -> chex.PRNGKey:
     """Splits a single new key from `keys` using an arbitrary element, replacing the used key in `keys`.

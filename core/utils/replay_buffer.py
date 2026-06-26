@@ -63,7 +63,7 @@ class ReplayBuffer(Generic[TReplayBufferItem]):
             filled_len = jnp.minimum(self.filled_len + insert_n, capacity)
         )
 
-    def sample(self, key: chex.PRNGKey, batch_dims: Sequence[int]) -> TReplayBufferItem:
+    def sample(self, key: chex.PRNGKey, batch_dims: int | Sequence[int]) -> TReplayBufferItem:
         indices = jax.random.randint(key, batch_dims, minval=0, maxval=self.filled_len)
         return jax.tree.map(lambda x: x[indices], self.data)
 

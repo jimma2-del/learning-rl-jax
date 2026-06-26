@@ -1,6 +1,6 @@
 import math
 
-from typing import Any, Generic, Callable, Protocol, TypeAlias, ParamSpec
+from typing import Any, Generic, Callable, Protocol, TypeAlias, ParamSpec, Sequence
 from typing_extensions import TypeVar
 
 from functools import wraps
@@ -14,7 +14,7 @@ import jax.numpy as jnp
 
 from flax import nnx
 
-from core.utils.batch_utils import split_key_if_batched, get_tree_batch_dims
+from core.utils.batch_utils import get_tree_batch_dims
 from core.utils.func_utils import optionally_pass
 
 from core.envs.base import Environment, Space
@@ -57,6 +57,91 @@ class RandomActor(Generic[TEnvObs, TEnvAction]):
             else get_tree_batch_dims(self.observation_space.shapes_dtypes, obs)
         return self.action_space.sample(rngs.actions(), batch_dims=batch_dims), {}
 
+@chex.dataclass
+class Timestep(Generic[TEnvState, TEnvObs, TEnvAction]):
+    state: TEnvState
+    obs: TEnvObs
+    action: TEnvAction
+    action_info: dict[Any, Any]
+    reward: ArrayLike
+    info: dict[Any, Any]
+    terminated: bool
+    truncated: bool
+
+TTakeObj = TypeVar('TTakeObj', default=Timestep[TEnvState, TEnvObs, TEnvAction])
+
+class TakeFuncWithRngs(Generic[TEnvState, TEnvObs, TEnvAction, TTakeObj], Protocol):
+    def __call__(self, timestep: Timestep[TEnvState, TEnvObs, TEnvAction], rngs: nnx.Rngs) -> TTakeObj: ...
+class TakeFuncWithoutRngs(Generic[TEnvState, TEnvObs, TEnvAction, TTakeObj], Protocol):
+    def __call__(self, timestep: Timestep[TEnvState, TEnvObs, TEnvAction]) -> TTakeObj: ...
+TakeFunc: TypeAlias = TakeFuncWithoutRngs[TEnvState, TEnvObs, TEnvAction, TTakeObj] \
+    | TakeFuncWithRngs[TEnvState, TEnvObs, TEnvAction, TTakeObj]
+
+def rollout(rngs: nnx.Rngs,
+    env: Environment[TEnvState, TEnvObs, TEnvAction, TRenderFrame],
+    actor: Actor[TEnvObs, TEnvAction],
+    iters: int,
+    env_batch_dims: int | Sequence[int] = (),
+    initial_env_state: TEnvState | None = None,
+    initial_env_info: dict[Any, Any] | None = None,
+    take_func: TakeFunc[TEnvState, TEnvObs, TEnvAction, TTakeObj] | None = None,
+) -> tuple[TTakeObj, TEnvState, dict[Any, Any]]:
+    """Runs the environment for `iters` steps, returning collected timesteps or user-defined take objs.
+
+    Automatically resets environments that finish.
+        Places the original, unresetted state into `info[UNRESET_STATE_INFO_KEY]` (useful eg. for truncation)
+        This will be the same as the returned new_state if not terminated and not truncated.
+
+    If using batched env states, ensure both `env` and `actor` can handle batches BEFORE passing in.
+        Eg. wrap environment with `VmapWrapper`, wrap actor with `nnx.split_rngs(splits=n_envs)(nnx.vmap(actor))`.
+            Actor should take batched env states, but a SINGLE, unbatched nnx.Rngs.
+        Additionally, `env_batch_dims` MUST be specified. `env_batch_dims=()` (default) indicates no batching.
+
+    If `initial_env_state` is given but `initial_env_info` is not given,
+        the first info will be a dummy value.
+
+    `take_func`: Optional function to specify which values to take from Timestep.
+        A full `Timestep` object is returned by default.
+        If the environment is batched, `take_func` should also handle batched timesteps.
+
+    Returns: timesteps, or user defined take objs for each timestep; final states; final infos.
+        If the environment is batched, timesteps/take objs will have 
+            the following extra leading axes: `shape = (iters, *env_batch_dims, ...)`
+    """
+
+    if not isinstance(env, AutoResetWrapper):
+        env = AutoResetWrapper(env)
+
+    if initial_env_state is None:
+        initial_env_state, initial_env_info = env.reset(jax.random.split(rngs.env(), env_batch_dims))
+
+    if initial_env_info is None:
+        _, initial_env_info = env.reset(jax.random.split(jax.random.key(0), env_batch_dims)) # dummy value
+
+    if take_func is None:
+        take_func = lambda x: x
+
+    actor = nnx.Sequential(actor)
+
+    def batched_env_step(carry: tuple[TEnvState, dict[Any,Any]], rngs: nnx.Rngs) -> tuple[TEnvState, TTakeObj]:
+        actor, states, infos = carry
+
+        obs = env.get_obs(jax.random.split(rngs.env(), env_batch_dims), states)
+        actions, action_infos = optionally_pass(actor, rngs=rngs)(obs)
+
+        new_states, rewards, terminateds, truncateds, new_infos = env.step(
+            jax.random.split(rngs.env(), env_batch_dims), states, actions)
+
+        return (actor, new_states, new_infos), optionally_pass(take_func, rngs=rngs)(Timestep(
+            state=states, obs=obs, action=actions, reward=rewards, 
+            info=infos, terminated=terminateds, truncated=truncateds, action_info=action_infos)
+        )
+
+    (actor, env_states, infos), take_values = nnx.scan(batched_env_step)(
+        (actor, initial_env_state, initial_env_info), rngs.fork(split=iters))
+
+    return take_values, env_states, infos
+
 def evaluate_episodes(rngs: nnx.Rngs, 
     env: Environment[TEnvState, TEnvObs, TEnvAction, TRenderFrame], 
     actor: Actor[TEnvObs, TEnvAction], 
@@ -81,6 +166,7 @@ def evaluate_episodes(rngs: nnx.Rngs,
     if not isinstance(env, AutoResetWrapper):
         env = AutoResetWrapper(env)
 
+    keys_shape = () if n_envs is None else (n_envs,)
     actor = nnx.Sequential(actor)
 
     eps_per_env = math.ceil(episodes / (n_envs if n_envs is not None else 1))
@@ -89,10 +175,10 @@ def evaluate_episodes(rngs: nnx.Rngs,
         actor, eps_done, rngs, env_state, cur_return, eps_returns, cur_len, eps_lens = carry
 
         # step env
-        obs = env.get_obs(split_key_if_batched(rngs.env(), n_envs), env_state)
+        obs = env.get_obs(jax.random.split(rngs.env(), keys_shape), env_state)
         action, action_info = optionally_pass(actor, rngs=rngs)(obs)
         env_state, reward, terminated, truncated, info = env.step(
-            split_key_if_batched(rngs.env(), n_envs), env_state, action)
+            jax.random.split(rngs.env(), keys_shape), env_state, action)
 
         if eps_steps_limit is not None:
             truncated = jnp.logical_or(truncated, cur_len >= eps_steps_limit)
@@ -114,7 +200,7 @@ def evaluate_episodes(rngs: nnx.Rngs,
 
         return actor, eps_done, rngs, env_state, cur_return, eps_returns, cur_len, eps_lens
 
-    env_state, info = env.reset(split_key_if_batched(rngs.env(), n_envs))
+    env_state, info = env.reset(jax.random.split(rngs.env(), keys_shape))
 
     actor, eps_done, rngs, env_state, cur_return, eps_returns, cur_len, eps_lens = nnx.while_loop(
         lambda input: jnp.any(input[1] < eps_per_env), 
@@ -132,26 +218,6 @@ def evaluate_episodes(rngs: nnx.Rngs,
     )
 
     return eps_returns.flatten(), eps_lens.flatten()
-
-@chex.dataclass
-class Timestep(Generic[TEnvState, TEnvObs, TEnvAction]):
-    state: TEnvState
-    obs: TEnvObs
-    action: TEnvAction
-    action_info: dict[Any, Any]
-    reward: ArrayLike
-    info: dict[Any, Any]
-    terminated: bool
-    truncated: bool
-
-TTakeObj = TypeVar('TTakeObj', default=Timestep[TEnvState, TEnvObs, TEnvAction])
-
-class TakeFuncWithRngs(Generic[TEnvState, TEnvObs, TEnvAction, TTakeObj], Protocol):
-    def __call__(self, timestep: Timestep[TEnvState, TEnvObs, TEnvAction], rngs: nnx.Rngs) -> TTakeObj: ...
-class TakeFuncWithoutRngs(Generic[TEnvState, TEnvObs, TEnvAction, TTakeObj], Protocol):
-    def __call__(self, timestep: Timestep[TEnvState, TEnvObs, TEnvAction]) -> TTakeObj: ...
-TakeFunc: TypeAlias = TakeFuncWithoutRngs[TEnvState, TEnvObs, TEnvAction, TTakeObj] \
-    | TakeFuncWithRngs[TEnvState, TEnvObs, TEnvAction, TTakeObj]
 
 def rollout_episode(rngs: nnx.Rngs, 
     env: Environment[TEnvState, TEnvObs, TEnvAction, TRenderFrame], 
@@ -213,71 +279,6 @@ def rollout_episode(rngs: nnx.Rngs,
                 comb_take_vals, take_vals)
     
     return comb_take_vals, state, info
-
-def rollout(rngs: nnx.Rngs,
-    env: Environment[TEnvState, TEnvObs, TEnvAction, TRenderFrame],
-    actor: Actor[TEnvObs, TEnvAction],
-    iters: int,
-    n_envs: int | None = 32,
-    initial_env_state: TEnvState | None = None,
-    initial_env_info: dict[Any, Any] | None = None,
-    take_func: TakeFunc[TEnvState, TEnvObs, TEnvAction, TTakeObj] | None = None,
-) -> tuple[TTakeObj, TEnvState, dict[Any, Any]]:
-    """Runs the environment for `iters` steps, returning collected timesteps or user-defined take objs.
-
-    Automatically resets environments that finish.
-        Places the original, unresetted state into `info[UNRESET_STATE_INFO_KEY]` (useful eg. for truncation)
-        This will be the same as the returned new_state if not terminated and not truncated.
-
-    If using batched env states, ensure both `env` and `actor` can handle batches BEFORE passing in.
-        Eg. wrap environment with `VmapWrapper`, wrap actor with `nnx.split_rngs(splits=n_envs)(nnx.vmap(actor))`.
-            Actor should take batched env states, but a SINGLE, unbatched nnx.Rngs.
-        Additionally, `n_envs` MUST be specified. `n_envs=None` indicates no batching.
-
-    If `initial_env_state` is given but `initial_env_info` is not given,
-        the first info will be a dummy value.
-
-    `take_func`: Optional function to specify which values to take from Timestep.
-        A full `Timestep` object is returned by default.
-        If the environment is batched, `take_func` should also handle batched timesteps.
-
-    Returns: timesteps, or user defined take objs for each timestep; final states; final infos.
-        If the environment is batched, timesteps/take objs will have 
-            the following two extra leading axes: `shape = (iters, n_envs, ...)`
-    """
-
-    if not isinstance(env, AutoResetWrapper):
-        env = AutoResetWrapper(env)
-
-    if initial_env_state is None:
-        initial_env_state, initial_env_info = env.reset(split_key_if_batched(rngs.env(), n_envs))
-
-    if initial_env_info is None:
-        _, initial_env_info = env.reset(split_key_if_batched(jax.random.key(0), n_envs)) # dummy value
-
-    if take_func is None:
-        take_func = lambda x: x
-
-    actor = nnx.Sequential(actor)
-
-    def batched_env_step(carry: tuple[TEnvState, dict[Any,Any]], rngs: nnx.Rngs) -> tuple[TEnvState, TTakeObj]:
-        actor, states, infos = carry
-
-        obs = env.get_obs(split_key_if_batched(rngs.env(), n_envs), states)
-        actions, action_infos = optionally_pass(actor, rngs=rngs)(obs)
-
-        new_states, rewards, terminateds, truncateds, new_infos = env.step(
-            split_key_if_batched(rngs.env(), n_envs), states, actions)
-
-        return (actor, new_states, new_infos), optionally_pass(take_func, rngs=rngs)(Timestep(
-            state=states, obs=obs, action=actions, reward=rewards, 
-            info=infos, terminated=terminateds, truncated=truncateds, action_info=action_infos)
-        )
-
-    (actor, env_states, infos), take_values = nnx.scan(batched_env_step)(
-        (actor, initial_env_state, initial_env_info), rngs.fork(split=iters))
-
-    return take_values, env_states, infos
 
 def stagger_env_states(rngs: nnx.Rngs,
     env: Environment[TEnvState, TEnvObs, TEnvAction, TRenderFrame],
