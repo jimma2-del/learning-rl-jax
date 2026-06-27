@@ -13,7 +13,7 @@ from core.envs.wrappers import EpisodeStepCountWrapper
 
 NUM_EPISODES = 1
 ENV_NAME = "snake"
-STEPS_LIMIT = 600
+MAX_STEPS = 600
 
 rngs = nnx.Rngs(0, params=1, env=5, actions=3, transitions=4)
 
@@ -27,7 +27,7 @@ def actor(obs, rngs):
 comb_states = []
 
 for _ in range(NUM_EPISODES):
-    timesteps, state, info = rollout_episode(rngs, EpisodeStepCountWrapper(env, STEPS_LIMIT), actor)
+    timesteps, state, info = rollout_episode(rngs, EpisodeStepCountWrapper(env, MAX_STEPS), actor)
     eps_return = sum(timesteps.reward)
     steps = len(timesteps.reward)
 

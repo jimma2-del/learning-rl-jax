@@ -17,13 +17,13 @@ from brax.io import html
 from optax import schedules
 from core.algos import a2c
 
-NUM_EPISODES = 1
 ENV_NAME = "halfcheetah"
-STEPS_LIMIT = 1000
+MAX_STEPS = 1000
+N_ENVS = 2048#256
 
 rngs = nnx.Rngs(0, params=1, env=5, actions=3)
 
-brax_env = create(ENV_NAME, auto_reset=False, batch_size=None, episode_length=STEPS_LIMIT)
+brax_env = create(ENV_NAME, auto_reset=False, batch_size=None, episode_length=MAX_STEPS)
 
 env = BraxWrapper(brax_env)
 
@@ -33,14 +33,13 @@ env = PrecomputedResetsPoolWrapper(env, resets_pool_states_infos)
 
 ### TRAIN ###
 
-STEPS = 10_000_000#1_000_000
-LOG_INTERVAL_STEPS = 1_000_000#100_000
+STEPS = 10_000_000
+
+EVAL_EPS = 256
+EVAL_INTERVAL = 1_000_000
+N_LOGS_PER_EVAL = 4
 
 MAX_STEPS = 500
-
-EVAL_EPS = 2048#256
-N_ENVS = 2048#256
-EVAL_N_ENVS = 2048#256
 
 hyperparameters = a2c.Hyperparameters(
     learning_rate = 2.5e-4,#schedules.linear_schedule(4e-4, 1e-4, STEPS),
@@ -58,18 +57,25 @@ train = nnx.jit(algo.train, static_argnames=('steps',))
 def evaluate(rngs, actor):
     return evaluate_episodes(
         rngs, VmapWrapper(env), actor, 
-        EVAL_EPS, EVAL_N_ENVS
+        EVAL_EPS, EVAL_EPS
     )
 
 while training_state.steps < STEPS:
     start_time = time.perf_counter()
-
-    training_state, metrics = train(rngs, training_state, LOG_INTERVAL_STEPS)
-
+    training_state, metrics = train(rngs, training_state, EVAL_INTERVAL)
     elasped_time = time.perf_counter() - start_time
-    sps = LOG_INTERVAL_STEPS / elasped_time
-    print(f"Completed steps={training_state.steps}; sps={sps:,.1f}")
-    print("Metrics: " + " ".join([ f"{key}={val}" for key, val in metrics.items() ]))
+
+    print()
+
+    avg_metrics = jax.tree.map(lambda x: list(map(jnp.mean, jnp.array_split(x, N_LOGS_PER_EVAL))), metrics)
+    steps = avg_metrics.pop('steps')
+    for i in range(N_LOGS_PER_EVAL):
+        print(f"Step {steps[i]:.0f}: " + " ".join([ f"{key}={val[i]:.5g}" for key, val in avg_metrics.items() ]))
+
+    print()
+
+    sps = EVAL_INTERVAL / elasped_time
+    print(f"COMPLETED steps={training_state.steps}; sps={sps:,.1f}")
 
     # eval
     actor = algo.make_actor(training_state.networks, deterministic_sampling=True)
@@ -78,7 +84,7 @@ while training_state.steps < STEPS:
     print(f"Episode Return: mean={jnp.mean(returns)} std={jnp.std(returns, ddof=1)}")
     print(f"Episode Length: mean={jnp.mean(lengths)} std={jnp.std(lengths, ddof=1)}")
 
-    print()
+print()
 
 # test save
 # import orbax.checkpoint as ocp
@@ -95,6 +101,8 @@ rngs = nnx.Rngs(0, params=1, env=5, actions=3)
 VISUALIZE_METHOD = "html"
 
 if VISUALIZE_METHOD == 'html':
+    NUM_EPISODES = 1
+
     states = []
 
     for _ in range(NUM_EPISODES):

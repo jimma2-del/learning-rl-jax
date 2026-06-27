@@ -98,7 +98,9 @@ class ObsRangeNormalizeWrapper(
 
     Ignores features with both sides unbounded (-inf, inf), keeping the values unaltered.
         NOTE: Keep in mind when using this wrapper that unbounded observation features
-        are very common; this wrapper may not be suitable for many environments.
+            are very common; this wrapper may not be suitable for many environments.
+        Try the :class:`core.utils.nnx_modules.RunningMeanVarNorm` network layer instead
+            (included by default in all network-based algorithms).
 
     NOTE: May convert discrete (np.integer) data types to continuous (np.floating).
     """

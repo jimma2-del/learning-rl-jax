@@ -228,7 +228,7 @@ class TabularQLearning(Generic[TEnvState, TEnvObs]):
 
             # loss is only used as a metric
             loss = jnp.mean(jnp.power(target_qs - pred_qs, 2))
-            metrics = { 'q_loss': loss }
+            metrics = { 'q_loss': loss, 'steps': training_state.steps }
 
             return training_state, jax.tree.map(lambda x: jnp.mean(x), metrics)
 
@@ -241,4 +241,4 @@ class TabularQLearning(Generic[TEnvState, TEnvObs]):
         # set into eval mode for the user
         set_algo_phase(training_state.q_func, AlgoPhase.EVAL)
 
-        return training_state, jax.tree.map(lambda x: jnp.mean(x), metrics)
+        return training_state, metrics

@@ -447,6 +447,8 @@ class PPO(Generic[TEnvState, TEnvObs]):
             if target_kl is not None: # if early stopping, track number of epochs done before stopping
                 metrics['n_epochs_done'] = epoch_i
 
+            metrics['steps'] = training_state.steps
+
             return training_state, metrics
 
         # phases must match phases at the end of train_iteration
@@ -458,4 +460,4 @@ class PPO(Generic[TEnvState, TEnvObs]):
         # set into eval mode for the user
         set_algo_phase(training_state.networks, AlgoPhase.EVAL)
 
-        return training_state, jax.tree.map(lambda x: jnp.mean(x), metrics)
+        return training_state, metrics

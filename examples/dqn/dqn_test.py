@@ -14,7 +14,7 @@ from core.envs.gymnax import GymnaxWrapper
 
 from core.envs.flappy_bird import FlappyBirdEnv, State as FlappyBirdState
 
-from core.envs.wrappers import ObsRangeNormalizeWrapper, EpisodeStepCountWrapper, VmapWrapper
+from core.envs.wrappers import EpisodeStepCountWrapper, VmapWrapper
 
 from core.envs.utils import rollout_episode, visualize_pygame, evaluate_episodes
 
@@ -36,18 +36,18 @@ env = GymnaxWrapper(gymnax_env)
 # DT = 0.1
 # env = FlappyBirdEnv(DT)
 
-# #env = ObsRangeNormalizeWrapper(env)
-
 ### TRAIN ###
 
 STEPS = 1_000_000
-LOG_INTERVAL_STEPS = 100_000
-EVAL_EPS = 32
+
+EVAL_EPS = 256
+EVAL_INTERVAL = 100_000
+N_LOGS_PER_EVAL = 4
 
 hyperparameters = dqn.Hyperparameters(
     learning_rate = 2.5e-4,
     train_freq = 4,
-    n_envs = 32,
+    n_envs = 256,
     epsilon = schedules.linear_schedule(1, 0.05, 0.1*STEPS),
     replay_buffer_size = 100_000,
 
@@ -64,18 +64,25 @@ train = nnx.jit(algo.train, static_argnames=('steps',))
 def evaluate(rngs, actor):
     return evaluate_episodes(
         rngs, VmapWrapper(env), actor, 
-        EVAL_EPS, hyperparameters.n_envs
+        EVAL_EPS, EVAL_EPS
     )
 
 while training_state.steps < STEPS:
     start_time = time.perf_counter()
-
-    training_state, metrics = train(rngs, training_state, LOG_INTERVAL_STEPS)
-
+    training_state, metrics = train(rngs, training_state, EVAL_INTERVAL)
     elasped_time = time.perf_counter() - start_time
-    sps = LOG_INTERVAL_STEPS / elasped_time
-    print(f"Completed steps={training_state.steps}; sps={sps:,.1f}")
-    print("Metrics: " + " ".join([ f"{key}={val}" for key, val in metrics.items() ]))
+
+    print()
+
+    avg_metrics = jax.tree.map(lambda x: list(map(jnp.mean, jnp.array_split(x, N_LOGS_PER_EVAL))), metrics)
+    steps = avg_metrics.pop('steps')
+    for i in range(N_LOGS_PER_EVAL):
+        print(f"Step {steps[i]:.0f}: " + " ".join([ f"{key}={val[i]:.5g}" for key, val in avg_metrics.items() ]))
+
+    print()
+
+    sps = EVAL_INTERVAL / elasped_time
+    print(f"COMPLETED steps={training_state.steps}; sps={sps:,.1f}")
 
     #eval
     actor = algo.make_actor(training_state.networks, epsilon=0)
@@ -84,7 +91,7 @@ while training_state.steps < STEPS:
     print(f"Episode Return: mean={jnp.mean(returns)} std={jnp.std(returns, ddof=1)}")
     print(f"Episode Length: mean={jnp.mean(lengths)} std={jnp.std(lengths, ddof=1)}")
 
-    print()
+print()
 
 # test save
 # import orbax.checkpoint as ocp
@@ -104,13 +111,18 @@ from gymnax.visualize.vis_gym import render_acrobot
 
 rngs = nnx.Rngs(0, params=1, env=5, actions=3, transitions=4)
 
-MAX_STEPS = 500
-
 EVAL_EPS = 256
 returns, lengths = nnx.jit(evaluate_episodes, static_argnums=(1, 3, 4))(
-    rngs, VmapWrapper(env), actor, EVAL_EPS, hyperparameters.n_envs)
+    rngs, VmapWrapper(env), actor, EVAL_EPS, EVAL_EPS)
+
+print("Episode Returns:")
 print(returns)
+print()
+
+print("Episode Lengths:")
 print(lengths)
+print()
+
 print(f"Episode Return: mean={jnp.mean(returns)} std={jnp.std(returns, ddof=1)}")
 print(f"Episode Length: mean={jnp.mean(lengths)} std={jnp.std(lengths, ddof=1)}")
 
@@ -118,6 +130,7 @@ VISUALIZE_METHOD = "gif"
 rngs = nnx.Rngs(0, params=1, env=5, actions=3, transitions=4)
 
 if VISUALIZE_METHOD == 'gif':
+    MAX_STEPS = 500
     NUM_EPISODES = 1
 
     comb_states = []
@@ -138,6 +151,8 @@ if VISUALIZE_METHOD == 'gif':
     #vis.animate(save_fname=None, view=True)
 
 elif VISUALIZE_METHOD == 'pygame':
+    MAX_STEPS = 500
+
     # Acrobot
     FPS = 10
 

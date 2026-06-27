@@ -14,7 +14,7 @@ import mediapy
 
 NUM_EPISODES = 1
 ENV_NAME = "CheetahRun"
-STEPS_LIMIT = 1000
+MAX_STEPS = 1000
 
 rngs = nnx.Rngs(0, params=1, env=5, actions=3)
 
@@ -45,7 +45,7 @@ if VISUALIZE_METHOD == 'video':
 
     for _ in range(NUM_EPISODES):
         timesteps, state, info = rollout_episode(rngs, 
-            JitWrapper(EpisodeStepCountWrapper(env, STEPS_LIMIT)), actor,
+            JitWrapper(EpisodeStepCountWrapper(env, MAX_STEPS)), actor,
 
             # remove unnecessary warp `_impl` property, which takes up a lot of memory
             take_func = lambda ts: ts.replace(state=ts.state.replace(

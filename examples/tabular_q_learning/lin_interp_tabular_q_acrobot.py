@@ -25,32 +25,17 @@ gymnax_env_params = gymnax_env.default_params
 
 env = GymnaxWrapper(gymnax_env)
 
-# add wrapper for custom rewards and observations
+# wrapper to compress obs by converting (sin, cos) -> angle
 
 class AcrobotWrapper(Wrapper):
-    def step(self, key, state, action):
-        step_key, obs_key = jax.random.split(key)
-
-        state, reward, terminated, truncated, info = super().step(step_key, state, action)
-
-        ## Reward Shaping
-        # obs = super().get_obs(obs_key, state)
-
-        # height = (-obs[0] - (obs[0] * obs[2] - obs[1] * obs[3])) / 2 # [-1, 0.5]
-        # h_d = ((obs[1] * (1 + obs[2]) + obs[0] * obs[3]) * obs[4] 
-        #     + (obs[1] * obs[2] + obs[0] * obs[3]) * obs[5]) / 2
-
-        # reward = reward + (height - 1)/2 + jnp.abs(h_d)/5
-
-        return state, reward, terminated, False, info
-
     def get_obs(self, key, state):
         obs = super().get_obs(key, state)
 
         return jnp.array((
             jnp.atan2(obs[1], obs[0]), 
             jnp.atan2(obs[3], obs[2]), 
-            obs[4], obs[5]
+            obs[4], 
+            obs[5]
         ), dtype=jnp.float32)
         
     @property
@@ -96,8 +81,10 @@ res  = ( 0.2,  0.4, 0.25, 0.25)
 rngs = nnx.Rngs(0, params=1, env=2, actions=3, transitions=4)
 
 STEPS = 70_000_000
-LOG_INTERVAL_STEPS = 7_000_000
+
 EVAL_EPS = 256
+EVAL_INTERVAL = 7_000_000
+N_LOGS_PER_EVAL = 7
 
 hyperparameters = tabular_q_learning.Hyperparameters(
     discount_rate = 0.98,
@@ -117,27 +104,34 @@ training_state = algo.init_training_state(rngs, q_func)
 def evaluate(rngs, actor):
     return evaluate_episodes(
         rngs, VmapWrapper(env), actor, 
-        EVAL_EPS, hyperparameters.n_envs
+        EVAL_EPS, EVAL_EPS
     )
 
 while training_state.steps < STEPS:
     start_time = time.perf_counter()
-
-    training_state, metrics = train(rngs, training_state, LOG_INTERVAL_STEPS)
-
+    training_state, metrics = train(rngs, training_state, EVAL_INTERVAL)
     elasped_time = time.perf_counter() - start_time
-    sps = LOG_INTERVAL_STEPS / elasped_time
-    print(f"Completed steps={training_state.steps}; sps={sps:,.1f}")
-    print("Metrics: " + " ".join([ f"{key}={val}" for key, val in metrics.items() ]))
+
+    print()
+
+    avg_metrics = jax.tree.map(lambda x: list(map(jnp.mean, jnp.array_split(x, N_LOGS_PER_EVAL))), metrics)
+    steps = avg_metrics.pop('steps')
+    for i in range(N_LOGS_PER_EVAL):
+        print(f"Step {steps[i]:.0f}: " + " ".join([ f"{key}={val[i]:.5g}" for key, val in avg_metrics.items() ]))
+
+    print()
+
+    sps = EVAL_INTERVAL / elasped_time
+    print(f"COMPLETED steps={training_state.steps}; sps={sps:,.1f}")
 
     # eval
-    actor = algo.make_actor(training_state.q_func)
+    actor = algo.make_actor(training_state.q_func, epsilon=0)
     returns, lengths = evaluate(rngs, actor)
 
     print(f"Episode Return: mean={jnp.mean(returns)} std={jnp.std(returns, ddof=1)}")
     print(f"Episode Length: mean={jnp.mean(lengths)} std={jnp.std(lengths, ddof=1)}")
 
-    print()
+print()
 
 ### ENJOY ###
 

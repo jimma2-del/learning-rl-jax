@@ -12,8 +12,8 @@ from optax import schedules
 from mujoco_playground import registry
 from core.envs.mujoco_playground import MuJoCoPlaygroundWrapper
 
-from core.envs.wrappers import ObsRangeNormalizeWrapper, EpisodeStepCountWrapper, \
-    JitWrapper, VmapWrapper, PrecomputedResetsPoolWrapper, ClipActionsToBoundsWrapper
+from core.envs.wrappers import EpisodeStepCountWrapper, JitWrapper, VmapWrapper, \
+    PrecomputedResetsPoolWrapper, ClipActionsToBoundsWrapper
 
 from core.envs.utils import rollout_episode, visualize_pygame, evaluate_episodes
 
@@ -21,7 +21,8 @@ from core.algos import ppo
 
 #jax.config.update("jax_log_compiles", True)
 
-ENV_NAME = "CartpoleSwingup"
+ENV_NAME = "CartpoleSwingup"#"WalkerRun"
+MAX_STEPS = 1000#500#100#500
 N_ENVS = 2048
 CAMERA = None#'side' # None
 
@@ -43,14 +44,11 @@ env = PrecomputedResetsPoolWrapper(env, resets_pool_states_infos)
 #env = ClipActionsToBoundsWrapper(env)
 
 ### TRAIN ###
-
 STEPS = 30_000_000 #1_000_000
-LOG_INTERVAL_STEPS = 1_000_000 #100_000
 
-MAX_STEPS = 1000
-
-EVAL_EPS = 256#2048 # 
-EVAL_N_ENVS = 256#2048
+EVAL_EPS = 256
+EVAL_INTERVAL = 3_000_000#10_000_000
+N_LOGS_PER_EVAL = 3
 
 hyperparameters = ppo.Hyperparameters(
     learning_rate = 2.5e-4,
@@ -81,18 +79,25 @@ train = nnx.jit(algo.train, static_argnames=('steps',))
 def evaluate(rngs, actor):
     return evaluate_episodes(
         rngs, EpisodeStepCountWrapper(VmapWrapper(env), max_eps_len=MAX_STEPS), actor, 
-        EVAL_EPS, EVAL_N_ENVS
+        EVAL_EPS, EVAL_EPS
     )
 
 while training_state.steps < STEPS:
     start_time = time.perf_counter()
-
-    training_state, metrics = train(rngs, training_state, LOG_INTERVAL_STEPS)
-
+    training_state, metrics = train(rngs, training_state, EVAL_INTERVAL)
     elasped_time = time.perf_counter() - start_time
-    sps = LOG_INTERVAL_STEPS / elasped_time
-    print(f"Completed steps={training_state.steps}; sps={sps:,.1f}")
-    print("Metrics: " + " ".join([ f"{key}={val:.5g}" for key, val in metrics.items() ]))
+
+    print()
+
+    avg_metrics = jax.tree.map(lambda x: list(map(jnp.mean, jnp.array_split(x, N_LOGS_PER_EVAL))), metrics)
+    steps = avg_metrics.pop('steps')
+    for i in range(N_LOGS_PER_EVAL):
+        print(f"Step {steps[i]:.0f}: " + " ".join([ f"{key}={val[i]:.5g}" for key, val in avg_metrics.items() ]))
+
+    print()
+
+    sps = EVAL_INTERVAL / elasped_time
+    print(f"COMPLETED steps={training_state.steps}; sps={sps:,.1f}")
 
     # eval
     actor = algo.make_actor(training_state.networks, deterministic_sampling=True)
@@ -101,7 +106,7 @@ while training_state.steps < STEPS:
     print(f"Episode Return: mean={jnp.mean(returns)} std={jnp.std(returns, ddof=1)}")
     print(f"Episode Length: mean={jnp.mean(lengths)} std={jnp.std(lengths, ddof=1)}")
 
-    print()
+print()
 
 # test save
 import orbax.checkpoint as ocp
@@ -119,9 +124,16 @@ rngs = nnx.Rngs(0, params=1, env=5, actions=3)
 
 EVAL_EPS = 256
 returns, lengths = nnx.jit(evaluate_episodes, static_argnums=(1, 3, 4))(
-    rngs, EpisodeStepCountWrapper(VmapWrapper(env), max_eps_len=MAX_STEPS), actor, EVAL_EPS, EVAL_N_ENVS)
+    rngs, EpisodeStepCountWrapper(VmapWrapper(env), max_eps_len=MAX_STEPS), actor, EVAL_EPS, EVAL_EPS)
+
+print("Episode Returns:")
 print(returns)
+print()
+
+print("Episode Lengths:")
 print(lengths)
+print()
+
 print(f"Episode Return: mean={jnp.mean(returns)} std={jnp.std(returns, ddof=1)}")
 print(f"Episode Length: mean={jnp.mean(lengths)} std={jnp.std(lengths, ddof=1)}")
 

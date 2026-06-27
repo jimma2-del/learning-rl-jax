@@ -358,6 +358,9 @@ class DQN(Generic[TEnvState, TEnvObs]):
                 rngs.fork(split=learn_steps_per_iter)
             )
 
+            metrics = jax.tree.map(lambda x: jnp.mean(x), metrics)
+            metrics['steps'] = training_state.steps
+
             # update target if enough steps have passed (not using polyak averaging)
             if self.hyperparameters.polyak_tau is None:
                 update_target = training_state.steps % self.hyperparameters.target_update_interval < total_steps_per_iter
@@ -367,7 +370,7 @@ class DQN(Generic[TEnvState, TEnvObs]):
                     nnx.state(training_state.networks), nnx.state(training_state.target_networks)
                 ))
 
-            return training_state, jax.tree.map(lambda x: jnp.mean(x), metrics)
+            return training_state, metrics
 
         if self.hyperparameters.polyak_tau is not None: # convert datatypes to floats
             nnx.update(training_state.target_networks, optax.incremental_update(
@@ -383,4 +386,4 @@ class DQN(Generic[TEnvState, TEnvObs]):
         # set into eval mode for the user
         set_algo_phase(training_state.networks, AlgoPhase.EVAL)
 
-        return training_state, jax.tree.map(lambda x: jnp.mean(x), metrics)
+        return training_state, metrics

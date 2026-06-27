@@ -339,7 +339,10 @@ class A2C(Generic[TEnvState, TEnvObs]):
             (comb_loss, metrics), grads = loss_grad_func(training_state.networks, rngs)
             training_state.optimizer.update(grads) 
 
-            return training_state, jax.tree.map(lambda x: jnp.mean(x), metrics)
+            metrics = jax.tree.map(lambda x: jnp.mean(x), metrics)
+            metrics['steps'] = training_state.steps
+
+            return training_state, metrics
 
         # phases must match phases at the end of train_iteration
         set_algo_phase(training_state.networks, AlgoPhase.OPTIMIZE)
@@ -350,4 +353,4 @@ class A2C(Generic[TEnvState, TEnvObs]):
         # set into eval mode for the user
         set_algo_phase(training_state.networks, AlgoPhase.EVAL)
 
-        return training_state, jax.tree.map(lambda x: jnp.mean(x), metrics)
+        return training_state, metrics

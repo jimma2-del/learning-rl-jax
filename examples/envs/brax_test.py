@@ -14,11 +14,11 @@ from brax.io import html
 
 NUM_EPISODES = 1
 ENV_NAME = "ant"
-STEPS_LIMIT = 1000
+MAX_STEPS = 1000
 
 rngs = nnx.Rngs(0, params=1, env=5, actions=3)
 
-brax_env = create(ENV_NAME, auto_reset=False, batch_size=None, episode_length=STEPS_LIMIT)
+brax_env = create(ENV_NAME, auto_reset=False, batch_size=None, episode_length=MAX_STEPS)
 
 env = BraxWrapper(brax_env)
 

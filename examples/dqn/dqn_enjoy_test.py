@@ -13,7 +13,7 @@ from core.envs.gymnax import GymnaxWrapper
 
 from core.envs.flappy_bird import FlappyBirdEnv, State as FlappyBirdState
 
-from core.envs.wrappers import ObsRangeNormalizeWrapper, EpisodeStepCountWrapper, VmapWrapper
+from core.envs.wrappers import EpisodeStepCountWrapper, VmapWrapper
 
 from core.envs.utils import rollout_episode, visualize_pygame, evaluate_episodes
 
@@ -30,8 +30,6 @@ env = GymnaxWrapper(gymnax_env)
 
 # DT = 0.1
 # env = FlappyBirdEnv(DT)
-
-#env = ObsRangeNormalizeWrapper(env)
 
 algo = dqn.DQN(VmapWrapper(env))
 
@@ -58,13 +56,18 @@ rngs = nnx.Rngs(0, params=1, env=5, actions=3, transitions=4)
 
 N_ENVS = 32
 
-MAX_STEPS = 500
-
 EVAL_EPS = 256
 returns, lengths = nnx.jit(evaluate_episodes, static_argnums=(1, 3, 4))(
     rngs, VmapWrapper(env), actor, EVAL_EPS, n_envs=N_ENVS)
+
+print("Episode Returns:")
 print(returns)
+print()
+
+print("Episode Lengths:")
 print(lengths)
+print()
+
 print(f"Episode Return: mean={jnp.mean(returns)} std={jnp.std(returns, ddof=1)}")
 print(f"Episode Length: mean={jnp.mean(lengths)} std={jnp.std(lengths, ddof=1)}")
 
@@ -72,6 +75,7 @@ VISUALIZE_METHOD = 'pygame'
 rngs = nnx.Rngs(0, params=1, env=5, actions=3, transitions=4)
 
 if VISUALIZE_METHOD == 'gif':
+    MAX_STEPS = 500
     NUM_EPISODES = 1
 
     comb_states = []
@@ -92,6 +96,8 @@ if VISUALIZE_METHOD == 'gif':
     #vis.animate(save_fname=None, view=True)
 
 elif VISUALIZE_METHOD == 'pygame':
+    MAX_STEPS = 500
+
     # Acrobot
     FPS = 10
 
