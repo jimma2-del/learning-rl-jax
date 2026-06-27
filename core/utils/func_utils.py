@@ -1,11 +1,12 @@
-from typing import Callable, TypeVar, Any
+from typing import Callable, TypeVar, Any, ParamSpec
 
 import inspect
 import functools
 
+P = ParamSpec('P')
 TReturn = TypeVar('TReturn')
 
-def try_call(possibly_callable: Callable[..., TReturn] | TReturn, *args: Any, **kwargs: Any) -> TReturn:
+def try_call(possibly_callable: Callable[P, TReturn] | TReturn, *args: P.args, **kwargs: P.kwargs) -> TReturn:
     if callable(possibly_callable): return possibly_callable(*args, **kwargs)
     return possibly_callable
 
@@ -52,3 +53,28 @@ def optionally_pass(func: Callable[..., TReturn], *opt_args: Any, **opt_kwargs: 
         return func(*final_pos_args, **{**opt_kwargs, **kwargs})
 
     return func_with_opt_args
+
+def override_signature(*args: P.args, **kwargs: P.kwargs) \
+        -> Callable[[Callable[..., TReturn]], Callable[P, TReturn]]:
+    """Factory for a decorator which overrides the function's signature to match `*args` and `**kwargs`.
+        Overrides the `__annotations__` and `__signature__` fields.
+
+    Values of `*args` and `**kwargs` can be either types, or values from which the type will be inferred.
+
+    Positional parameters in the new signature will be named `arg0`, `arg1`, ...
+    """
+
+    def decorator(func: Callable[..., TReturn]) -> Callable[P, TReturn]:
+        args_spec = { f'arg{i}': val if isinstance(val, type) else type(val) for i, val in enumerate(args) }
+        kwargs_spec = { key: val if isinstance(val, type) else type(val) for key, val in kwargs.items() }
+        func.__annotations__ = args_spec | kwargs_spec
+
+        params = [ inspect.Parameter(key, inspect.Parameter.POSITIONAL_ONLY, annotation=type_hint)
+            for key, type_hint in args_spec.items() ]
+        params += [ inspect.Parameter(key, inspect.Parameter.KEYWORD_ONLY, annotation=type_hint)
+            for key, type_hint in kwargs_spec.items() ]
+
+        func.__signature__ = inspect.Signature(params)
+        return func
+
+    return decorator

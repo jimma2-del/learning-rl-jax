@@ -1,16 +1,18 @@
-from typing import TypeVar, Generic, Any, Sequence, Self, Callable
+from typing import TypeVar, Generic, Any, Sequence, Self, Callable, Mapping
 
 import math
 
 import jax.numpy as jnp
 import jax
 from jax.typing import ArrayLike
+
 from chex import dataclass
+from dataclasses import field
 
 from flax import nnx
 import optax
 
-from core.utils.func_utils import try_call, optionally_pass
+from core.utils.func_utils import try_call, optionally_pass, override_signature
 from core.utils import RunningMeanVar
 from core.utils.nnx_modules import MLP, RunningMeanVarNorm, ActionDistributionHead
 
@@ -25,7 +27,11 @@ class Hyperparameters:
     n_envs: int = 256
 
     discount_rate: Scheduleable[float] = 0.99
+
     learning_rate: Scheduleable[float] = 2.5e-4
+    max_grad_norm: Scheduleable[float] | None = 0.5
+    optimizer_params: Mapping[str, Scheduleable[float]] = field(
+        default_factory=lambda: { 'weight_decay': 0.0 })
     
     rollout_length: int = 5 # steps per env per update (batch size is rollout_length * n_envs)
     gae_lambda: Scheduleable[float] = 0.95
@@ -135,6 +141,36 @@ class A2C(Generic[TEnvState, TEnvObs]):
         self.env = env
         self.hyperparameters = hyperparameters
 
+    def make_default_optax_optimizer(self) -> optax.GradientTransformationExtraArgs:
+        optimizer_params = self.resolve_optimizer_params(0)
+
+        @optax.inject_hyperparams
+        @override_signature(**optimizer_params)
+        def make_optimizer(**kwargs):
+            transforms = []
+
+            if 'max_grad_norm' in kwargs:
+                transforms.append(optax.clip_by_global_norm(kwargs['max_grad_norm']))
+                del kwargs['max_grad_norm']
+
+            transforms.append(optax.adamw(**kwargs))
+
+            return optax.chain(*transforms)
+
+        return make_optimizer(**optimizer_params)
+
+    def resolve_optimizer_params(self, steps: int = 0):
+        optimizer_params: dict = jax.tree.map(lambda x: try_call(x, steps), 
+            self.hyperparameters.optimizer_params)
+
+        if 'max_grad_norm' not in optimizer_params and self.hyperparameters.max_grad_norm is not None:
+            optimizer_params['max_grad_norm'] = try_call(self.hyperparameters.max_grad_norm, steps)
+
+        if 'learning_rate' not in optimizer_params:
+            optimizer_params['learning_rate'] = try_call(self.hyperparameters.learning_rate, steps)
+
+        return optimizer_params
+
     def make_actor(self, 
         networks: Networks[TEnvObs, TEnvAction, TTrunkOut] | None = None, 
         deterministic_sampling: bool = False, squash_continuous: bool = True,
@@ -152,13 +188,25 @@ class A2C(Generic[TEnvState, TEnvObs]):
             squash_continuous=squash_continuous
         )
 
-    def init_training_state(self, rngs: nnx.Rngs, networks: Networks[TEnvObs, TEnvAction, TTrunkOut] | None = None) \
-            -> TrainingState[TEnvState, TEnvObs, TEnvAction, TTrunkOut]:
+    def init_training_state(self, 
+        rngs: nnx.Rngs, 
+        networks: Networks[TEnvObs, TEnvAction, TTrunkOut] | None = None,
+        optax_optimizer: optax.GradientTransformationExtraArgs | None = None,
+    ) -> TrainingState[TEnvState, TEnvObs, TEnvAction, TTrunkOut]:
         if networks is None: 
             networks = Networks.make_default(rngs, self.env.observation_space, self.env.action_space)
 
-        optimizer = nnx.Optimizer(networks, optax.inject_hyperparams(optax.adamw)(
-            learning_rate=try_call(self.hyperparameters.learning_rate, 0)))
+        if optax_optimizer is None:
+            optax_optimizer = self.make_default_optax_optimizer()
+
+        optimizer = nnx.Optimizer(networks, optax_optimizer)
+
+        assert hasattr(optimizer.opt_state, 'hyperparams'), \
+            "`optax_optimizer` must be initialized using a `optax.inject_hyperparams()`-wrapped function."
+
+        handled_keys = set(optimizer.opt_state.hyperparams)
+        missing_keys = set(self.resolve_optimizer_params(0)) - handled_keys
+        assert not missing_keys, f"`optax_optimizer` missing hyperparams {missing_keys}; available: {handled_keys}."
 
         env_states, infos = self.env.reset(jax.random.split(rngs.env(), self.hyperparameters.n_envs))
 
@@ -206,8 +254,9 @@ class A2C(Generic[TEnvState, TEnvObs]):
                 # last timesteps should be considered truncated, so bootstrapping is used
 
             # update optimizer schedules using env steps (rather than default grad steps)
-            lr = try_call(self.hyperparameters.learning_rate, training_state.steps)
-            training_state.optimizer.opt_state.hyperparams['learning_rate'].value = lr
+            optimizer_params = self.resolve_optimizer_params(training_state.steps)
+            for key, new_val in optimizer_params.items():
+                training_state.optimizer.opt_state.hyperparams[key].value = new_val
 
             ## update networks ##
             set_algo_phase(training_state.networks, AlgoPhase.OPTIMIZE)

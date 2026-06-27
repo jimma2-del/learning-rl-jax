@@ -1,17 +1,19 @@
-from typing import TypeVar, Generic, Any, Sequence, Self, Callable
+from typing import TypeVar, Generic, Any, Sequence, Self, Callable, Mapping
 
 import math
 
 import jax.numpy as jnp
 import jax
 from jax.typing import ArrayLike
+
 from chex import dataclass
+from dataclasses import field
 
 from flax import nnx
 import optax
 
 from core.utils import ReplayBuffer, RunningMeanVar
-from core.utils.func_utils import try_call, optionally_pass
+from core.utils.func_utils import try_call, optionally_pass, override_signature
 from core.utils.nnx_modules import MLP, RunningMeanVarNorm
 
 from core.algos.base import Scheduleable, GreedyQActor, AlgoPhase, set_algo_phase
@@ -25,7 +27,11 @@ class Hyperparameters:
     n_envs: int = 256
 
     discount_rate: Scheduleable[float] = 0.99
+
     learning_rate: Scheduleable[float] = 2.5e-4
+    max_grad_norm: Scheduleable[float] | None = 10.0
+    optimizer_params: Mapping[str, Scheduleable[float]] = field(
+        default_factory=lambda: { 'weight_decay': 0.0 })
 
     batch_size: int = 32
 
@@ -137,6 +143,36 @@ class DQN(Generic[TEnvState, TEnvObs]):
             terminated = jax.ShapeDtypeStruct(shape=(), dtype=jnp.bool)
         )
 
+    def make_default_optax_optimizer(self) -> optax.GradientTransformationExtraArgs:
+        optimizer_params = self.resolve_optimizer_params(0)
+
+        @optax.inject_hyperparams
+        @override_signature(**optimizer_params)
+        def make_optimizer(**kwargs):
+            transforms = []
+
+            if 'max_grad_norm' in kwargs:
+                transforms.append(optax.clip_by_global_norm(kwargs['max_grad_norm']))
+                del kwargs['max_grad_norm']
+
+            transforms.append(optax.adamw(**kwargs))
+
+            return optax.chain(*transforms)
+
+        return make_optimizer(**optimizer_params)
+
+    def resolve_optimizer_params(self, steps: int = 0):
+        optimizer_params: dict = jax.tree.map(lambda x: try_call(x, steps), 
+            self.hyperparameters.optimizer_params)
+
+        if 'max_grad_norm' not in optimizer_params and self.hyperparameters.max_grad_norm is not None:
+            optimizer_params['max_grad_norm'] = try_call(self.hyperparameters.max_grad_norm, steps)
+
+        if 'learning_rate' not in optimizer_params:
+            optimizer_params['learning_rate'] = try_call(self.hyperparameters.learning_rate, steps)
+
+        return optimizer_params
+
     def make_actor(self, 
         networks: Networks[TEnvObs, TTrunkOut] | None = None, 
         epsilon: ArrayLike = jnp.array(0.0), 
@@ -151,6 +187,58 @@ class DQN(Generic[TEnvState, TEnvObs]):
             nnx.Sequential(networks.obs_trunk, networks.qs_head), 
             int(self.env.action_space.high + 1), 
             epsilon=epsilon
+        )
+
+    def init_training_state(self,
+        rngs: nnx.Rngs,
+        networks: Networks[TEnvObs, TTrunkOut] | None = None,
+        optax_optimizer: optax.GradientTransformationExtraArgs | None = None,
+        replay_buffer: ReplayBuffer[Transition[TEnvObs]] | None = None,
+        prefill_steps: int = 10_000,
+    ) -> TrainingState[TEnvState, TEnvObs, TTrunkOut]:
+        if networks is None: 
+            networks = Networks.make_default(rngs, self.env.observation_space, self.env.action_space)
+
+        if optax_optimizer is None:
+            optax_optimizer = self.make_default_optax_optimizer()
+
+        optimizer = nnx.Optimizer(networks, optax_optimizer)
+
+        assert hasattr(optimizer.opt_state, 'hyperparams'), \
+            "`optax_optimizer` must be initialized using a `optax.inject_hyperparams()`-wrapped function."
+
+        handled_keys = set(optimizer.opt_state.hyperparams)
+        missing_keys = set(self.resolve_optimizer_params(0)) - handled_keys
+        assert not missing_keys, f"`optax_optimizer` missing hyperparams {missing_keys}; available: {handled_keys}."
+
+        target_networks = nnx.clone(networks)
+        set_algo_phase(target_networks, AlgoPhase.EVAL)
+
+        if self.hyperparameters.polyak_tau is not None: # convert datatypes to floats
+            nnx.update(target_networks, optax.incremental_update(
+                nnx.state(target_networks), nnx.state(target_networks), 0.5))
+
+        if replay_buffer is None:
+            replay_buffer = ReplayBuffer.init(
+                self.transition_shapes_dtypes, self.hyperparameters.replay_buffer_size)
+
+        # prefill replay buffer
+        transitions, env_states = nnx.jit(self.rollout_transitions, static_argnames=('iter', 'actor'))(rngs,
+            RandomActor(self.env.action_space, self.env.observation_space),
+            math.ceil(prefill_steps / self.hyperparameters.n_envs),
+        )
+
+        replay_buffer = replay_buffer.insert(transitions)
+
+        return TrainingState(
+            steps = jnp.array(0, dtype=jnp.int32),
+            env_states = env_states,
+
+            networks = networks,
+            optimizer = optimizer,
+
+            target_networks = target_networks,
+            replay_buffer = replay_buffer,
         )
 
     def rollout_transitions(self,
@@ -199,48 +287,6 @@ class DQN(Generic[TEnvState, TEnvObs]):
             reward=timesteps.reward, next_obs=next_obs, terminated=timesteps.terminated)
 
         return transitions, env_states
-
-    def init_training_state(self,
-        rngs: nnx.Rngs,
-        networks: Networks[TEnvObs, TTrunkOut] | None = None,
-        replay_buffer: ReplayBuffer[Transition[TEnvObs]] | None = None,
-        prefill_steps: int = 10_000,
-    ) -> TrainingState[TEnvState, TEnvObs, TTrunkOut]:
-        if networks is None: 
-            networks = Networks.make_default(rngs, self.env.observation_space, self.env.action_space)
-
-        optimizer = nnx.Optimizer(networks, optax.inject_hyperparams(optax.adamw)(
-            learning_rate=try_call(self.hyperparameters.learning_rate, 0)))
-
-        target_networks = nnx.clone(networks)
-        set_algo_phase(target_networks, AlgoPhase.EVAL)
-
-        if self.hyperparameters.polyak_tau is not None: # convert datatypes to floats
-            nnx.update(target_networks, optax.incremental_update(
-                nnx.state(target_networks), nnx.state(target_networks), 0.5))
-
-        if replay_buffer is None:
-            replay_buffer = ReplayBuffer.init(
-                self.transition_shapes_dtypes, self.hyperparameters.replay_buffer_size)
-
-        # prefill replay buffer
-        transitions, env_states = nnx.jit(self.rollout_transitions, static_argnames=('iter', 'actor'))(rngs,
-            RandomActor(self.env.action_space, self.env.observation_space),
-            math.ceil(prefill_steps / self.hyperparameters.n_envs),
-        )
-
-        replay_buffer = replay_buffer.insert(transitions)
-
-        return TrainingState(
-            steps = jnp.array(0, dtype=jnp.int32),
-            env_states = env_states,
-
-            networks = networks,
-            optimizer = optimizer,
-
-            target_networks = target_networks,
-            replay_buffer = replay_buffer,
-        )
     
     def train(self, rngs: nnx.Rngs, training_state: TrainingState[TEnvState, TEnvObs, TTrunkOut], steps: int) \
             -> tuple[TrainingState[TEnvState, TEnvObs, TTrunkOut], dict[Any, Any]]:
@@ -264,8 +310,9 @@ class DQN(Generic[TEnvState, TEnvObs]):
             training_state.replay_buffer = training_state.replay_buffer.insert(transitions)
 
             # update optimizer schedules using env steps (rather than default grad steps)
-            training_state.optimizer.opt_state.hyperparams['learning_rate'].value \
-                = try_call(self.hyperparameters.learning_rate, training_state.steps)
+            optimizer_params = self.resolve_optimizer_params(training_state.steps)
+            for key, new_val in optimizer_params.items():
+                training_state.optimizer.opt_state.hyperparams[key].value = new_val
 
             ## update q functions ##
             set_algo_phase(training_state.networks, AlgoPhase.OPTIMIZE)

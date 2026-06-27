@@ -45,7 +45,7 @@ LOG_INTERVAL_STEPS = 100_000
 EVAL_EPS = 32
 
 hyperparameters = ppo.Hyperparameters(
-    learning_rate = 2.5e-4,#10e-4,
+    learning_rate = 2.5e-4,
     n_envs = 256,
     gae_lambda = 0.95,
 
