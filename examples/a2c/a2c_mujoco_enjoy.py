@@ -46,7 +46,7 @@ import orbax.checkpoint as ocp
 SAVE_PATH = path.abspath(f'examples/a2c/_tmp/{ENV_NAME}')
 
 # test load
-abstract_model = nnx.eval_shape(lambda: algo.make_actor(rngs=nnx.Rngs(0)))
+abstract_model = nnx.eval_shape(lambda: algo.make_actor(rngs=nnx.Rngs(0), deterministic_sampling=True))
 graphdef, abstract_state = nnx.split(abstract_model)
 checkpointer_load = ocp.StandardCheckpointer()
 state_restored = checkpointer_load.restore(SAVE_PATH, abstract_state)

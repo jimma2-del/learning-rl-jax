@@ -309,7 +309,10 @@ def stagger_env_states(rngs: nnx.Rngs,
         new_states, _, _, _, _ = env.step(jax.random.split(rngs.env(), n_envs), states, actions)
         steps = steps + 1
 
-        next_states = jax.tree.map(lambda cur, new: jnp.where(steps > needed_steps, cur, new), states, new_states)
+        next_states = jax.tree.map(lambda cur, new: 
+                jnp.where((steps > needed_steps)[(slice(None),) + (None,)*(cur.ndim - 1)], cur, new), 
+            states, new_states)
+
         return next_states, steps
 
     carry = initial_env_states, jnp.array(0, dtype=jnp.int32)

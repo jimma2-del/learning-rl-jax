@@ -13,9 +13,9 @@ from mujoco_playground import registry
 from core.envs.mujoco_playground import MuJoCoPlaygroundWrapper
 
 from core.envs.wrappers import EpisodeStepCountWrapper, JitWrapper, VmapWrapper, \
-    PrecomputedResetsPoolWrapper, ClipActionsToBoundsWrapper
+    PrecomputedResetsPoolWrapper, ClipActionsToBoundsWrapper, AutoResetWrapper
 
-from core.envs.utils import rollout_episode, visualize_pygame, evaluate_episodes
+from core.envs.utils import rollout_episode, visualize_pygame, evaluate_episodes, stagger_env_states
 
 from core.algos import ppo
 
@@ -24,7 +24,7 @@ from core.algos import ppo
 ENV_NAME = "WalkerRun"
 MAX_STEPS = 500
 N_ENVS = 2048
-CAMERA = None#'side' # None
+CAMERA = 'side' # None
 
 rngs = nnx.Rngs(0, params=1, env=2, actions=3)
 
@@ -44,11 +44,11 @@ env = PrecomputedResetsPoolWrapper(env, resets_pool_states_infos)
 #env = ClipActionsToBoundsWrapper(env)
 
 ### TRAIN ###
-STEPS = 30_000_000 #1_000_000
+STEPS = 100_000_000 #1_000_000
 
 EVAL_EPS = 256
-EVAL_INTERVAL = 1_000_000#10_000_000
-N_LOGS_PER_EVAL = 3
+EVAL_INTERVAL = 10_000_000
+N_LOGS_PER_EVAL = 10
 
 hyperparameters = ppo.Hyperparameters(
     learning_rate = 2.5e-4,
@@ -72,15 +72,20 @@ hyperparameters = ppo.Hyperparameters(
     bootstrap_truncated = True
 )
 
-algo = ppo.PPO(EpisodeStepCountWrapper(VmapWrapper(env), max_eps_len=MAX_STEPS), hyperparameters)
+wrapped_env = EpisodeStepCountWrapper(VmapWrapper(env), max_eps_len=MAX_STEPS)
+algo = ppo.PPO(wrapped_env, hyperparameters)
 
 training_state = algo.init_training_state(rngs)
 train = nnx.jit(algo.train, static_argnames=('steps',))
 
+jitted_stagger = nnx.jit(stagger_env_states, static_argnames=('env', 'n_envs', 'stagger_step_size'))
+training_state.env_states = jitted_stagger(rngs, AutoResetWrapper(wrapped_env), hyperparameters.n_envs, 
+    stagger_step_size=1, initial_env_states=training_state.env_states)
+
 @nnx.jit
 def evaluate(rngs, actor):
     return evaluate_episodes(
-        rngs, EpisodeStepCountWrapper(VmapWrapper(env), max_eps_len=MAX_STEPS), actor, 
+        rngs, wrapped_env, actor, 
         EVAL_EPS, EVAL_EPS
     )
 
@@ -126,7 +131,7 @@ rngs = nnx.Rngs(0, params=1, env=5, actions=3)
 
 EVAL_EPS = 256
 returns, lengths = nnx.jit(evaluate_episodes, static_argnums=(1, 3, 4))(
-    rngs, EpisodeStepCountWrapper(VmapWrapper(env), max_eps_len=MAX_STEPS), actor, EVAL_EPS, EVAL_EPS)
+    rngs, wrapped_env, actor, EVAL_EPS, EVAL_EPS)
 
 print("Episode Returns:")
 print(returns)

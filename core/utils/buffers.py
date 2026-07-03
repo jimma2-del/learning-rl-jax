@@ -180,24 +180,14 @@ class CircularBufferWithOptionalData(Generic[TBufferItem, TOptionalData]):
         removed = self.remove(insert_n, include_empty=True)
         opt_n_available = self.optional_data_buffer.length - removed.optional_data_buffer.filled_len
 
-        # scan to compact opt data, removing empty items; get # of actual items, get index pointers
+        # compact opt data, removing empty items; get # of actual items, get index pointers
         flat_opt_mask = jnp.ravel(has_optional_data_mask)
         flat_opt_data = jax.tree.map(lambda x, sd: jnp.reshape(x, (-1, *sd.shape)), 
             optional_data, self.optional_data_buffer.item_shapes_dtypes)
 
-        def compact_opt_iter(carry, xs):
-            compacted_opt_data, opt_filled_n = carry
-            cur_opt_mask, cur_opt_data = xs
-
-            compacted_opt_data = jax.tree.map(lambda all, new: all.at[opt_filled_n].set(new), 
-                compacted_opt_data, cur_opt_data)
-
-            return (compacted_opt_data, opt_filled_n + cur_opt_mask), opt_filled_n
-
-        (compacted_opt_data, n_opt), flat_opt_is = jax.lax.scan(compact_opt_iter,
-            (jax.tree.map(lambda x: jnp.empty_like(x), flat_opt_data), jnp.array(0)), 
-            (flat_opt_mask, flat_opt_data)
-        )
+        flat_opt_is = jnp.where(flat_opt_mask, jnp.cumsum(flat_opt_mask), len(flat_opt_mask))
+        compacted_opt_data = jax.tree.map(lambda x: jnp.zeros_like(x).at[flat_opt_is].set(x, mode='drop'),
+            flat_opt_data)
 
         # discard overflowing opt data, resolve opt_is into absolute indices, insert into main_buffer
         flat_opt_mask_discards_removed = jnp.logical_and(flat_opt_mask, flat_opt_is < opt_n_available)
@@ -209,7 +199,7 @@ class CircularBufferWithOptionalData(Generic[TBufferItem, TOptionalData]):
         main_buffer = self.main_buffer.insert((items, opt_mask_discards_removed, opt_is))
 
         # mask empty slots in compacted opt data with old opt data to allow insertion into opt data buffer
-        opt_insert_n = jnp.minimum(n_opt, opt_n_available)
+        opt_insert_n = jnp.minimum(jnp.sum(flat_opt_mask), opt_n_available)
         opt_set_is = jnp.arange(len(flat_opt_mask))
         old_data = self.optional_data_buffer.get(opt_set_is)
 

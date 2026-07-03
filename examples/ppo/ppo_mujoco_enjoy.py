@@ -20,11 +20,11 @@ from core.algos import ppo
 
 #jax.config.update("jax_log_compiles", True)
 
-ENV_NAME = "CartpoleSwingup"#"WalkerRun"
+ENV_NAME = "WalkerRun"
 MAX_STEPS = 500#100#1000
-CAMERA = None#'side'
+CAMERA = 'side'
 
-rngs = nnx.Rngs(0, params=1, env=2, actions=3)
+rngs = nnx.Rngs(14214148, env=12490184, actions=95821957)
 
 config = registry.get_default_config(ENV_NAME)
 config.impl = 'jax' # 'warp' backend currently does not work
@@ -46,7 +46,7 @@ import orbax.checkpoint as ocp
 SAVE_PATH = path.abspath(f'examples/ppo/_tmp/{ENV_NAME}')
 
 # test load
-abstract_model = nnx.eval_shape(lambda: algo.make_actor(rngs=nnx.Rngs(0)))
+abstract_model = nnx.eval_shape(lambda: algo.make_actor(rngs=nnx.Rngs(0), deterministic_sampling=True))
 graphdef, abstract_state = nnx.split(abstract_model)
 checkpointer_load = ocp.StandardCheckpointer()
 state_restored = checkpointer_load.restore(SAVE_PATH, abstract_state)
