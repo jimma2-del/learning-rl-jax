@@ -21,8 +21,8 @@ from core.algos import ppo
 
 #jax.config.update("jax_log_compiles", True)
 
-ENV_NAME = "CartpoleSwingup"#"WalkerRun"
-MAX_STEPS = 1000#500#100#500
+ENV_NAME = "WalkerRun"
+MAX_STEPS = 500
 N_ENVS = 2048
 CAMERA = None#'side' # None
 
@@ -47,7 +47,7 @@ env = PrecomputedResetsPoolWrapper(env, resets_pool_states_infos)
 STEPS = 30_000_000 #1_000_000
 
 EVAL_EPS = 256
-EVAL_INTERVAL = 3_000_000#10_000_000
+EVAL_INTERVAL = 1_000_000#10_000_000
 N_LOGS_PER_EVAL = 3
 
 hyperparameters = ppo.Hyperparameters(
@@ -67,7 +67,9 @@ hyperparameters = ppo.Hyperparameters(
     normalize_advantages = True,
 
     recompute_advantages = True,
-    target_kl = 0.02
+    target_kl = 0.02,
+
+    bootstrap_truncated = True
 )
 
 algo = ppo.PPO(EpisodeStepCountWrapper(VmapWrapper(env), max_eps_len=MAX_STEPS), hyperparameters)

@@ -12,7 +12,8 @@ from dataclasses import field
 from flax import nnx
 import optax
 
-from core.utils import ReplayBuffer, RunningMeanVar
+from core.utils import RunningMeanVar
+from core.utils.buffers import CircularBufferWithOptionalData
 from core.utils.func_utils import try_call, optionally_pass, override_signature
 from core.utils.nnx_modules import MLP, RunningMeanVarNorm
 
@@ -40,6 +41,9 @@ class Hyperparameters:
         # eg. optax.schedules.linear_schedule(1, 0.05, 0.1*steps)
 
     replay_buffer_size: int = 1_000_000
+    truncated_frac: float = 1.0 # fraction of timesteps expected to be truncated
+        # lowering this saves memory by allocating less space for truncated observations in the replay buffer
+        # however, truncated timesteps exceeding the specified limit will be treated as terminated
 
     train_freq: int = 4 # does around 1 gradient step per train_freq env steps
         # NOTE: if n_envs > train_freq, we take 1 step in each env, followed by multiple gradient steps
@@ -98,11 +102,10 @@ class Networks(nnx.Module, Generic[TEnvObs, TTrunkOut]):
         )
 
 @dataclass(frozen=True)
-class Transition(Generic[TEnvObs]):
+class ReplayTimestep(Generic[TEnvObs]):
     obs: TEnvObs
     action: ArrayLike
     reward: ArrayLike
-    next_obs: TEnvObs
     terminated: ArrayLike
 
 @dataclass
@@ -114,7 +117,7 @@ class TrainingState(Generic[TEnvState, TEnvObs, TTrunkOut]):
     optimizer: nnx.Optimizer
 
     target_networks: Networks[TEnvObs, TTrunkOut]
-    replay_buffer: ReplayBuffer[Transition[TEnvObs]]
+    replay_buffer: CircularBufferWithOptionalData[ReplayTimestep[TEnvObs], TEnvObs]
 
 class DQN(Generic[TEnvState, TEnvObs]):
     """Implementation of DQN."""
@@ -135,11 +138,10 @@ class DQN(Generic[TEnvState, TEnvObs]):
         self.hyperparameters = hyperparameters
 
         # make replay buffer data shape
-        self.transition_shapes_dtypes = Transition(
+        self.replay_timestep_shapes_dtypes = ReplayTimestep(
             obs = self.env.observation_space.shapes_dtypes,
             action = self.env.action_space.shapes_dtypes,
             reward = jax.ShapeDtypeStruct(shape=(), dtype=jnp.float32),
-            next_obs = self.env.observation_space.shapes_dtypes,
             terminated = jax.ShapeDtypeStruct(shape=(), dtype=jnp.bool)
         )
 
@@ -193,7 +195,7 @@ class DQN(Generic[TEnvState, TEnvObs]):
         rngs: nnx.Rngs,
         networks: Networks[TEnvObs, TTrunkOut] | None = None,
         optax_optimizer: optax.GradientTransformationExtraArgs | None = None,
-        replay_buffer: ReplayBuffer[Transition[TEnvObs]] | None = None,
+        replay_buffer: CircularBufferWithOptionalData[ReplayTimestep[TEnvObs], TEnvObs] | None = None,
         prefill_steps: int = 10_000,
     ) -> TrainingState[TEnvState, TEnvObs, TTrunkOut]:
         if networks is None: 
@@ -219,16 +221,22 @@ class DQN(Generic[TEnvState, TEnvObs]):
                 nnx.state(target_networks), nnx.state(target_networks), 0.5))
 
         if replay_buffer is None:
-            replay_buffer = ReplayBuffer.init(
-                self.transition_shapes_dtypes, self.hyperparameters.replay_buffer_size)
+            replay_buffer = CircularBufferWithOptionalData.init(
+                self.replay_timestep_shapes_dtypes, 
+                self.env.observation_space.shapes_dtypes,
+                int(self.hyperparameters.replay_buffer_size / self.hyperparameters.n_envs),
+                optional_data_frac = self.hyperparameters.truncated_frac,
+                batch_dims = self.hyperparameters.n_envs
+            )
 
         # prefill replay buffer
-        transitions, env_states = nnx.jit(self.rollout_transitions, static_argnames=('iter', 'actor'))(rngs,
+        jitted_rollout = nnx.jit(self.rollout, static_argnames=('iter', 'actor'))
+        timesteps, trunc, trunc_obs, env_states = jitted_rollout(rngs,
             RandomActor(self.env.action_space, self.env.observation_space),
             math.ceil(prefill_steps / self.hyperparameters.n_envs),
         )
 
-        replay_buffer = replay_buffer.insert(transitions)
+        replay_buffer = replay_buffer.insert(timesteps, trunc, trunc_obs)
 
         return TrainingState(
             steps = jnp.array(0, dtype=jnp.int32),
@@ -241,20 +249,18 @@ class DQN(Generic[TEnvState, TEnvObs]):
             replay_buffer = replay_buffer,
         )
 
-    def rollout_transitions(self,
+    def rollout(self,
         rngs: nnx.Rngs, 
         actor: Actor[TEnvObs, ArrayLike], 
         iter: int,
         initial_env_states: TEnvState | None = None,
-    ) -> tuple[Transition[TEnvObs], TEnvState]:
-        """Collect a rollout of `Transition`s.
+    ) -> tuple[ReplayTimestep[TEnvObs], jax.Array, TEnvObs, TEnvState]:
+        """Collect a rollout of `ReplayTimestep`, truncated, truncated obs.
 
         Runs `n_envs` environments in parallel for `iter` steps each,
             for a total of `iter * n_envs` transitions.
 
         Initializes initial environment states if none given.
-
-        Returns: transitions, final environment states
         """
 
         (unreset_obs, timesteps), env_states, final_infos = rollout(
@@ -280,13 +286,10 @@ class DQN(Generic[TEnvState, TEnvObs]):
                 jnp.concatenate((middles[1:], finals[None, ...]), axis=0),
             unreset_obs, final_obs)
 
-        timesteps = jax.tree.map(lambda x: x.reshape(-1, *x.shape[2:]), timesteps) # flatten to remove axis 0
-        next_obs = jax.tree.map(lambda x: x.reshape(-1, *x.shape[2:]), next_obs) # flatten to remove axis 0
+        replay_timesteps = ReplayTimestep(obs=timesteps.obs, action=timesteps.action, 
+            reward=timesteps.reward, terminated=timesteps.terminated)
 
-        transitions = Transition(obs=timesteps.obs, action=timesteps.action, 
-            reward=timesteps.reward, next_obs=next_obs, terminated=timesteps.terminated)
-
-        return transitions, env_states
+        return replay_timesteps, timesteps.truncated, next_obs, env_states
     
     def train(self, rngs: nnx.Rngs, training_state: TrainingState[TEnvState, TEnvObs, TTrunkOut], steps: int) \
             -> tuple[TrainingState[TEnvState, TEnvObs, TTrunkOut], dict[Any, Any]]:
@@ -303,11 +306,11 @@ class DQN(Generic[TEnvState, TEnvObs]):
 
             actor = self.make_actor(training_state.networks, 
                 try_call(self.hyperparameters.epsilon, training_state.steps))
-            transitions, training_state.env_states = self.rollout_transitions(rngs, 
+            timesteps, trunc, trunc_obs, training_state.env_states = self.rollout(rngs, 
                 actor, steps_per_env_per_iter, training_state.env_states)
             training_state.steps += total_steps_per_iter
 
-            training_state.replay_buffer = training_state.replay_buffer.insert(transitions)
+            training_state.replay_buffer = training_state.replay_buffer.insert(timesteps, trunc, trunc_obs)
 
             # update optimizer schedules using env steps (rather than default grad steps)
             optimizer_params = self.resolve_optimizer_params(training_state.steps)
@@ -321,21 +324,26 @@ class DQN(Generic[TEnvState, TEnvObs]):
                     -> tuple[tuple[Networks, Networks, nnx.Optimizer], dict[Any, Any]]:
                 networks, target_networks, optimizer = carry
 
-                sampled_transitions = training_state.replay_buffer.sample(
-                    rngs.transitions(), self.hyperparameters.batch_size)
+                samp_timesteps, samp_trunc, samp_trunc_obs = training_state.replay_buffer.sample(
+                    rngs.transitions(), seq_len=2, batch_dims=self.hyperparameters.batch_size)
 
-                next_qs = optionally_pass(target_networks, rngs=rngs)(sampled_transitions.next_obs)
+                first_timestep = jax.tree.map(lambda x: x[:, 0], samp_timesteps)
+                next_obs = jax.tree.map(lambda main, trunc, sd: 
+                        jnp.where(samp_trunc[(..., 0) + (None,)*len(sd.shape)], trunc[:, 0], main[:, 1]), 
+                    samp_timesteps.obs, samp_trunc_obs, self.env.observation_space.shapes_dtypes)
+
+                next_qs = optionally_pass(target_networks, rngs=rngs)(next_obs)
                 max_next_qs = jnp.max(next_qs, axis=-1)
                 # zero out q_val if terminated
-                max_next_qs = max_next_qs * jnp.logical_not(sampled_transitions.terminated)
+                max_next_qs = max_next_qs * jnp.logical_not(first_timestep.terminated)
 
-                target_qs = sampled_transitions.reward \
+                target_qs = first_timestep.reward \
                     + try_call(self.hyperparameters.discount_rate, training_state.steps)*max_next_qs
 
                 def loss_func(networks: nnx.Module, rngs: nnx.Rngs):
-                    pred_qs_all_actions = optionally_pass(networks, rngs=rngs)(sampled_transitions.obs)
+                    pred_qs_all_actions = optionally_pass(networks, rngs=rngs)(first_timestep.obs)
                         # q-net returns a q-value for every action
-                    pred_qs = pred_qs_all_actions[jnp.arange(self.hyperparameters.batch_size), sampled_transitions.action]
+                    pred_qs = pred_qs_all_actions[jnp.arange(self.hyperparameters.batch_size), first_timestep.action]
                         # take only the q-value corresponding to the chosen action
 
                     # simple MSE loss

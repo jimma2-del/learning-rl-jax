@@ -13,7 +13,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from .base import Environment, Space
-from core.utils.batch_utils import get_tree_vmap_dim, dummy_vmap, split_key_from_batch, split_batched_keys
+from core.utils.batch_utils import get_vmap_axis_size, dummy_vmap, split_key_from_batch, split_batched_keys
 
 TEnvState = TypeVar("TEnvState")
 TEnvObs = TypeVar("TEnvObs")
@@ -372,7 +372,7 @@ class PrecomputedResetsPoolWrapper(
         self.resets_pool_state_infos = resets_pool_state_infos
 
     def reset(self, key: chex.PRNGKey) -> tuple[TEnvState, dict[Any, Any]]:
-        resets_pool_size = get_tree_vmap_dim(self.resets_pool_state_infos)
+        resets_pool_size = get_vmap_axis_size(self.resets_pool_state_infos)
 
         get_reset_is = lambda key: jax.random.randint(key, (), minval=0, maxval=resets_pool_size)
         if not jnp.isscalar(key): get_reset_is = jax.vmap(get_reset_is) # if env vmapped

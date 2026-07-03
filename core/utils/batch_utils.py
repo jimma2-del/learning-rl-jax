@@ -111,20 +111,12 @@ def flatten_tree_batch_axes(unbatched_shapes_dtypes: TInput, x: TInput) -> TInpu
     """Flattens leading batch axes into a singular batch axis. Adds a batch axis if none exist."""
     return jax.tree.map(lambda x, s_dt: flatten_batch_axes(s_dt.shape, x), x, unbatched_shapes_dtypes)
 
-def get_tree_vmap_dim(tree) -> int:
-    """Finds the length of the leading axis of the PyTree leaves, ensuring that these lengths are all equal.
-    This dimension would be the batch dimension if passed into a vmap'ed function.
-    """
-    
-    leaves = jax.tree.leaves(tree)
-    assert leaves, "`tree` cannot be empty"
-    dim = leaves[0].shape[0] # all leaves must be arrays to be usable in vmap
+def get_vmap_axis_size(*args, in_axes: int | None | Sequence[Any] = 0, **kwargs) -> int:
+    """Finds what the axis size of the arguments would be if passed into `jax.vmap`."""
 
-    # assert all([ leaf.shape[0] == leaves[0].shape[0] for leaf in leaves ] ), \
-    #     "Leaf batch dimensions are not the same."
-        # NOT TRUE for mjx warp backend
-
-    return dim
+    f = jax.vmap(lambda *args, **kwargs: (args, kwargs), in_axes=in_axes, out_axes=0)
+    out = jax.eval_shape(f, *args, **kwargs)
+    return jax.tree.leaves(out)[0].shape[0]
 
 def split_batched_keys(keys: chex.PRNGKey, num: int | Sequence[int] = 2) -> chex.PRNGKey:
     """Same as `jax.random.split`, but allows extra leading batch dims in `keys`.
