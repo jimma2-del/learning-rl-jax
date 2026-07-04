@@ -21,9 +21,21 @@ def compacting_mask(items: TInput, mask: jax.Array) -> tuple[TInput, jax.Array]:
     flat_mask = jnp.ravel(mask)
     flat_items = jax.tree.map(lambda x: jnp.reshape(x, (-1, *x.shape[mask.ndim:])), items)
 
-    flat_indices = jnp.where(flat_mask, jnp.cumsum(flat_mask), len(flat_mask))
+    flat_indices = jnp.where(flat_mask, jnp.cumsum(flat_mask) - 1, len(flat_mask))
     compacted = jax.tree.map(lambda x: jnp.zeros_like(x).at[flat_indices].set(x, mode='drop'), flat_items)
     
     indices = jax.tree.map(lambda x: jnp.reshape(x, mask.shape), flat_indices) 
 
     return compacted, indices
+
+if __name__ == "__main__":
+    items = jnp.stack((jnp.arange(0, 4), jnp.arange(4, 8)))
+    mask = jnp.ones_like(items)
+
+    print(items)
+
+    comp, comp_is = compacting_mask(items, mask)
+    print(comp)
+    print(comp_is)
+
+    print(comp[comp_is])

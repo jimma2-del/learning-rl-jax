@@ -22,11 +22,11 @@ from core.algos import dqn
 
 #jax.config.update("jax_log_compiles", True)
 
-rngs = nnx.Rngs(0, params=1, env=2, actions=3, transitions=4)
+rngs = nnx.Rngs(0, params=1, env=2, actions=3, optimize_samples=4)
 
 # Gymnax
 
-gymnax_env = Acrobot()#MinBreakout()#CartPole()
+gymnax_env = CartPole()#MinBreakout()#CartPole()
 gymnax_env_params = gymnax_env.default_params
 
 env = GymnaxWrapper(gymnax_env)
@@ -46,18 +46,22 @@ N_LOGS_PER_EVAL = 4
 
 hyperparameters = dqn.Hyperparameters(
     learning_rate = 2.5e-4,
-    train_freq = 4,
-    n_envs = 256,
+    n_envs = 8,#32,
     epsilon = schedules.linear_schedule(1, 0.05, 0.1*STEPS),
 
-    replay_buffer_size = 100_000,
-    truncated_frac = 0.0,
+    # train_freq = 32,
+    # batch_size = 256,
 
-    #target_update_interval = 1000
-    polyak_tau = 0.005
+    replay_buffer_size = 100_000,
+    truncated_frac = 1.0,#1/50,
+
+    target_update_interval = 5000,
+    #polyak_tau = 0.005,
+
+    double_dqn = False
 )
 
-algo = dqn.DQN(VmapWrapper(env), hyperparameters)
+algo = dqn.DQN(EpisodeStepCountWrapper(VmapWrapper(env), 500), hyperparameters)
 
 training_state = algo.init_training_state(rngs)
 train = nnx.jit(algo.train, static_argnames=('steps',))
@@ -111,7 +115,7 @@ print()
 from gymnax.visualize import Visualizer
 from gymnax.visualize.vis_gym import render_acrobot
 
-rngs = nnx.Rngs(0, params=1, env=5, actions=3, transitions=4)
+rngs = nnx.Rngs(0, env=5, actions=3)
 
 EVAL_EPS = 256
 returns, lengths = nnx.jit(evaluate_episodes, static_argnums=(1, 3, 4))(
@@ -129,7 +133,7 @@ print(f"Episode Return: mean={jnp.mean(returns)} std={jnp.std(returns, ddof=1)}"
 print(f"Episode Length: mean={jnp.mean(lengths)} std={jnp.std(lengths, ddof=1)}")
 
 VISUALIZE_METHOD = "gif"
-rngs = nnx.Rngs(0, params=1, env=5, actions=3, transitions=4)
+rngs = nnx.Rngs(0, env=5, actions=3)
 
 if VISUALIZE_METHOD == 'gif':
     MAX_STEPS = 500

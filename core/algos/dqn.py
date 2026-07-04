@@ -54,6 +54,8 @@ class Hyperparameters:
     polyak_tau: Scheduleable[float] | None = None # if not None, OVERRIDES `target_update_interval``
         # target is updated after EVERY gradient step if not None
 
+    double_dqn: bool = False
+
 TEnvState = TypeVar("TEnvState")
 TEnvObs = TypeVar("TEnvObs")
 TTrunkOut = TypeVar("TTrunkOut")
@@ -108,6 +110,8 @@ class ReplayTimestep(Generic[TEnvObs]):
     reward: ArrayLike
     terminated: ArrayLike
 
+    next_obs: TEnvObs
+
 @dataclass
 class TrainingState(Generic[TEnvState, TEnvObs, TTrunkOut]):
     steps: ArrayLike
@@ -142,7 +146,9 @@ class DQN(Generic[TEnvState, TEnvObs]):
             obs = self.env.observation_space.shapes_dtypes,
             action = self.env.action_space.shapes_dtypes,
             reward = jax.ShapeDtypeStruct(shape=(), dtype=jnp.float32),
-            terminated = jax.ShapeDtypeStruct(shape=(), dtype=jnp.bool)
+            terminated = jax.ShapeDtypeStruct(shape=(), dtype=jnp.bool),
+
+            next_obs = self.env.observation_space.shapes_dtypes,
         )
 
     def make_default_optax_optimizer(self) -> optax.GradientTransformationExtraArgs:
@@ -287,7 +293,7 @@ class DQN(Generic[TEnvState, TEnvObs]):
             unreset_obs, final_obs)
 
         replay_timesteps = ReplayTimestep(obs=timesteps.obs, action=timesteps.action, 
-            reward=timesteps.reward, terminated=timesteps.terminated)
+            reward=timesteps.reward, terminated=timesteps.terminated, next_obs = next_obs)
 
         return replay_timesteps, timesteps.truncated, next_obs, env_states
     
@@ -325,26 +331,41 @@ class DQN(Generic[TEnvState, TEnvObs]):
                 networks, target_networks, optimizer = carry
 
                 samp_timesteps, samp_trunc, samp_trunc_obs = training_state.replay_buffer.sample(
-                    rngs.transitions(), seq_len=2, batch_dims=self.hyperparameters.batch_size)
+                    rngs.optimize_samples(), seq_len=2, batch_dims=self.hyperparameters.batch_size)
 
                 first_timestep = jax.tree.map(lambda x: x[:, 0], samp_timesteps)
                 next_obs = jax.tree.map(lambda main, trunc, sd: 
-                        jnp.where(samp_trunc[(..., 0) + (None,)*len(sd.shape)], trunc[:, 0], main[:, 1]), 
+                        jnp.where(samp_trunc[(slice(None), 0) + (None,)*len(sd.shape)], trunc[:, 0], main[:, 1]), 
                     samp_timesteps.obs, samp_trunc_obs, self.env.observation_space.shapes_dtypes)
 
+                # seq_equal = jnp.all(samp_timesteps.obs[:,1] == samp_timesteps.next_obs[:,0], axis=-1)
+                # done = jnp.logical_or(samp_trunc[:,0], samp_timesteps.terminated[:,0])
+                # jax.debug.print("{x}", x=jnp.all(jnp.logical_or(done, seq_equal)))
+
+                jax.debug.print("{x}", x=jnp.all(jnp.logical_or(
+                    samp_timesteps.terminated[:,0], jnp.all(next_obs == samp_timesteps.next_obs[:,0], axis=-1))))
+
                 next_qs = optionally_pass(target_networks, rngs=rngs)(next_obs)
-                max_next_qs = jnp.max(next_qs, axis=-1)
+
+                if self.hyperparameters.double_dqn:
+                    policy_net_next_act = jnp.argmax(optionally_pass(networks, rngs=rngs)(next_obs), axis=-1)
+                    chosen_next_q = next_qs[jnp.arange(self.hyperparameters.batch_size), policy_net_next_act]
+                else:
+                    chosen_next_q = jnp.max(next_qs, axis=-1)
+
                 # zero out q_val if terminated
-                max_next_qs = max_next_qs * jnp.logical_not(first_timestep.terminated)
+                chosen_next_q = chosen_next_q * jnp.logical_not(first_timestep.terminated)
 
                 target_qs = first_timestep.reward \
-                    + try_call(self.hyperparameters.discount_rate, training_state.steps)*max_next_qs
+                    + try_call(self.hyperparameters.discount_rate, training_state.steps)*chosen_next_q
 
                 def loss_func(networks: nnx.Module, rngs: nnx.Rngs):
                     pred_qs_all_actions = optionally_pass(networks, rngs=rngs)(first_timestep.obs)
                         # q-net returns a q-value for every action
                     pred_qs = pred_qs_all_actions[jnp.arange(self.hyperparameters.batch_size), first_timestep.action]
                         # take only the q-value corresponding to the chosen action
+
+                    # jax.debug.print("{x}", x=jnp.max(jnp.power(target_qs - pred_qs, 2)))
 
                     # simple MSE loss
                     return jnp.mean(jnp.power(target_qs - pred_qs, 2))

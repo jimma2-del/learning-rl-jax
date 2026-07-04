@@ -10,6 +10,7 @@ import chex
 import flax.struct
 
 from core.utils.batch_utils import get_tree_batch_dims, get_vmap_axis_size
+from core.utils.misc import compacting_mask
 
 TBufferItem = TypeVar("TBufferItem")
 
@@ -146,7 +147,7 @@ class CircularBufferWithOptionalData(Generic[TBufferItem, TOptionalData]):
             optional_data_capacity = math.ceil(math.prod(batch_dims) * main_length * optional_data_frac)
         
         if optional_data_capacity == 0: 
-            optional_data_capacity += 1
+            optional_data_capacity = 1
 
         item_shapes_dtypes = (
             main_shapes_dtypes, 
@@ -178,27 +179,24 @@ class CircularBufferWithOptionalData(Generic[TBufferItem, TOptionalData]):
         removed = self.remove(len(has_optional_data_mask), include_empty=True)
         opt_n_available = self.optional_data_buffer.length - removed.optional_data_buffer.filled_len
 
-        # compact opt data, removing empty items; get # of actual items, get index pointers
-        flat_opt_mask = jnp.ravel(has_optional_data_mask)
-        flat_opt_data = jax.tree.map(lambda x, sd: jnp.reshape(x, (-1, *sd.shape)), 
-            optional_data, self.optional_data_buffer.item_shapes_dtypes)
-
-        flat_opt_is = jnp.where(flat_opt_mask, jnp.cumsum(flat_opt_mask), len(flat_opt_mask))
-        compacted_opt_data = jax.tree.map(lambda x: jnp.zeros_like(x).at[flat_opt_is].set(x, mode='drop'),
-            flat_opt_data)
+        # compact opt data, removing empty items; get index pointers
+        compacted_opt_data, opt_is = compacting_mask(optional_data, has_optional_data_mask)
 
         # discard overflowing opt data, resolve opt_is into absolute indices, insert into main_buffer
-        flat_opt_mask_discards_removed = jnp.logical_and(flat_opt_mask, flat_opt_is < opt_n_available)
-        flat_opt_is = self.optional_data_buffer.index(flat_opt_is, include_empty=True)
-        
-        opt_mask_discards_removed, opt_is = jax.tree.map(lambda x: jnp.reshape(x, (-1, *self.main_buffer.batch_dims)),
-            (flat_opt_mask_discards_removed, flat_opt_is)) 
+        opt_mask_discards_removed = jnp.logical_and(has_optional_data_mask, opt_is < opt_n_available)
+        opt_is = self.optional_data_buffer.index(opt_is, include_empty=True)
 
         main_buffer = self.main_buffer.insert((items, opt_mask_discards_removed, opt_is))
 
         # mask empty slots in compacted opt data with old opt data to allow insertion into opt data buffer
+        if has_optional_data_mask.size > self.optional_data_buffer.length:
+            compacted_opt_data_len = self.optional_data_buffer.length
+            compacted_opt_data = jax.tree.map(lambda x: x[:compacted_opt_data_len], compacted_opt_data)
+        else:
+            compacted_opt_data_len = has_optional_data_mask.size
+
         opt_insert_n = jnp.minimum(jnp.sum(has_optional_data_mask), opt_n_available)
-        opt_set_is = jnp.arange(has_optional_data_mask.size)
+        opt_set_is = jnp.arange(compacted_opt_data_len)
         old_data = self.optional_data_buffer.get(opt_set_is)
 
         compacted_opt_data = jax.tree.map(lambda new, old, sd: 

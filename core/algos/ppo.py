@@ -304,7 +304,7 @@ class PPO(Generic[TEnvState, TEnvObs]):
             clip_epsilon = try_call(self.hyperparameters.clip_epsilon, training_state.steps)
             target_kl = try_call(self.hyperparameters.target_kl, training_state.steps)
 
-            def train_epoch(carry):
+            def epoch(carry):
                 _, rngs, epoch_i, networks, optimizer, adv, target_vals, aggr_metrics = carry
 
                 def compute_gae(rngs, networks):
@@ -362,7 +362,7 @@ class PPO(Generic[TEnvState, TEnvObs]):
                 train_samples = (timesteps.obs, timesteps.action, timesteps.action_info['log_p'], adv, target_vals)
                 train_samples = jax.tree.map(lambda x: jnp.reshape(x, (-1, *x.shape[2:])), train_samples)
 
-                shuffled_is = jax.random.permutation(rngs.learn(), len(train_samples[0]))
+                shuffled_is = jax.random.permutation(rngs.optimize_samples(), len(train_samples[0]))
                 minibatches = jax.tree.map(lambda x: 
                     jnp.reshape(x[shuffled_is], (self.hyperparameters.n_minibatches, -1, *x.shape[1:])), train_samples)
 
@@ -441,7 +441,7 @@ class PPO(Generic[TEnvState, TEnvObs]):
 
             _, rngs, epoch_i, _, _, _, _, metrics = nnx.while_loop(
                 lambda carry: carry[0], # use first item in carry as the done flag
-                train_epoch,
+                epoch,
                 (
                     jnp.array(True), 
                     rngs, 

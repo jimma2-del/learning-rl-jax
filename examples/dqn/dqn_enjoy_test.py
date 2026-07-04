@@ -52,7 +52,7 @@ actor = nnx.merge(graphdef, state_restored)
 from gymnax.visualize import Visualizer
 from gymnax.visualize.vis_gym import render_acrobot
 
-rngs = nnx.Rngs(0, params=1, env=5, actions=3, transitions=4)
+rngs = nnx.Rngs(0, env=5, actions=3)
 
 N_ENVS = 32
 
@@ -72,7 +72,7 @@ print(f"Episode Return: mean={jnp.mean(returns)} std={jnp.std(returns, ddof=1)}"
 print(f"Episode Length: mean={jnp.mean(lengths)} std={jnp.std(lengths, ddof=1)}")
 
 VISUALIZE_METHOD = 'pygame'
-rngs = nnx.Rngs(0, params=1, env=5, actions=3, transitions=4)
+rngs = nnx.Rngs(0, env=5, actions=3)
 
 if VISUALIZE_METHOD == 'gif':
     MAX_STEPS = 500

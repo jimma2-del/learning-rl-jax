@@ -21,7 +21,7 @@ from core.algos import dqn
 
 #jax.config.update("jax_log_compiles", True)
 
-rngs = nnx.Rngs(0, params=1, env=2, actions=3, transitions=4)
+rngs = nnx.Rngs(0, params=1, env=2, actions=3, optimize_samples=4)
 
 jumanji_env = Snake()#Game2048()#Snake()
 env = JumanjiWrapper(jumanji_env,
@@ -106,7 +106,7 @@ ENV_NAME = "snake_test"#"game_2048"
 #MAX_STEPS = 300#600 
 ANIMATE_LIMIT = 300
 
-rngs = nnx.Rngs(0, params=1, env=2, actions=3, transitions=4)
+rngs = nnx.Rngs(0, env=5, actions=3)
 
 comb_states = []
 
