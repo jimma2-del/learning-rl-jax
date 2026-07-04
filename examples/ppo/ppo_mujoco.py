@@ -69,7 +69,7 @@ hyperparameters = ppo.Hyperparameters(
     recompute_advantages = True,
     target_kl = 0.02,
 
-    bootstrap_truncated = True
+    truncated_frac = 1.0 / MAX_STEPS
 )
 
 wrapped_env = EpisodeStepCountWrapper(VmapWrapper(env), max_eps_len=MAX_STEPS)

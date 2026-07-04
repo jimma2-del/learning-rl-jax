@@ -13,6 +13,7 @@ from flax import nnx
 import optax
 
 from core.utils.func_utils import try_call, optionally_pass, override_signature
+from core.utils.misc import compacting_mask
 from core.utils import RunningMeanVar
 from core.utils.nnx_modules import MLP, RunningMeanVarNorm, ActionDistributionHead, stateful_func
 
@@ -52,15 +53,15 @@ class Hyperparameters:
 
     normalize_advantages: bool = True
 
-    bootstrap_truncated: bool = False # if False, truncation is treated the same as termination.
-        # if True, the value function is run an extra time for every environment sample
-        # to compute next values; this is slightly slower.
-
     recompute_advantages: bool = False # if True, recomputes GAEs before every epoch.
         # see https://arxiv.org/pdf/2006.05990 (Appendix B.1)
 
     target_kl: Scheduleable[float] | None = None # if not None, stops further training epochs 
         # if the average approx_kl of the previous epoch exceeds this threshold
+
+    truncated_frac: float = 1.0 # fraction of timesteps expected to be truncated
+        # lowering increases performance, calling the critic on fewer extra observations
+        # however, truncated timesteps exceeding the specified limit will be treated as terminated
     
 TEnvState = TypeVar("TEnvState")
 TEnvObs = TypeVar("TEnvObs")
@@ -238,6 +239,7 @@ class PPO(Generic[TEnvState, TEnvObs]):
         """Train from the given `training_state`, returning an updated `training_state` and metrics."""
 
         total_steps_per_iter = self.hyperparameters.n_envs * self.hyperparameters.rollout_length
+        n_truncated = math.ceil(total_steps_per_iter * self.hyperparameters.truncated_frac)
 
         def train_iteration(training_state: TrainingState[TEnvState, TEnvObs, TEnvAction, TTrunkOut], rngs: nnx.Rngs) \
                 -> tuple[TrainingState[TEnvState, TEnvObs, TEnvAction, TTrunkOut], dict[Any, Any]]:
@@ -273,11 +275,16 @@ class PPO(Generic[TEnvState, TEnvObs]):
 
             training_state.steps += total_steps_per_iter
 
-            if not self.hyperparameters.bootstrap_truncated: # treat truncation as termination 
-                timesteps.terminated = jnp.logical_or(timesteps.truncated, timesteps.terminated)
+            comp_unreset_obs, comp_unreset_is = compacting_mask(
+                jax.tree.map(lambda x: x[1:], unreset_obs), timesteps.truncated[:-1])
 
+            # treat truncation as termination if exceeding truncated_frac limit
+            override_truncation = jnp.logical_and(timesteps.truncated[:-1], comp_unreset_is >= n_truncated)
+            timesteps.terminated = timesteps.terminated.at[:-1].set(
+                jnp.logical_or(override_truncation, timesteps.terminated[:-1]))
+
+            # last timesteps should be considered truncated, so bootstrapping is used
             timesteps.truncated = timesteps.truncated.at[-1].set(True)
-                # last timesteps should be considered truncated, so bootstrapping is used
 
             # update optimizer schedules using env steps (rather than default grad steps)
             optimizer_params = self.resolve_optimizer_params(training_state.steps)
@@ -309,11 +316,14 @@ class PPO(Generic[TEnvState, TEnvObs]):
                             lambda _: values,
                             networks)
 
-                    if self.hyperparameters.bootstrap_truncated:
-                        _, next_values = optionally_pass(networks, rngs=rngs)(
-                            jax.tree.map(lambda x: x[1:], unreset_obs))
-                    else:
+                    if n_truncated == 0:
                         next_values = values[1:]
+                    else:
+                        _, unreset_values = optionally_pass(networks, rngs=rngs)(
+                            jax.tree.map(lambda x: x[:n_truncated], comp_unreset_obs))
+
+                        next_values = jnp.where(timesteps.truncated[:-1], 
+                            unreset_values[comp_unreset_is], values[1:])
 
                     final_obs = self.env.get_obs(
                         jax.random.split(rngs.env(), self.hyperparameters.n_envs),

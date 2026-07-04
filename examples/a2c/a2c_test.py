@@ -48,7 +48,8 @@ hyperparameters = a2c.Hyperparameters(
     learning_rate = 2.5e-4,#10e-4,
     n_envs = 256,
     rollout_length = 5,
-    ent_coef = 0#0.001
+    ent_coef = 0.01,
+    truncated_frac = 0.0,
 )
 
 algo = a2c.A2C(VmapWrapper(env), hyperparameters)

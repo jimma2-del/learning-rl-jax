@@ -51,7 +51,8 @@ hyperparameters = a2c.Hyperparameters(
     learning_rate = 2.5e-4,#schedules.linear_schedule(4e-4, 1e-4, STEPS),
     n_envs = N_ENVS,
     rollout_length = 5,
-    ent_coef = 0.01#0.001#schedules.linear_schedule(0.0015, 0.0001, STEPS)
+    ent_coef = 0.01,#0.001#schedules.linear_schedule(0.0015, 0.0001, STEPS)
+    truncated_frac = 1.0 / MAX_STEPS,
 )
 
 algo = a2c.A2C(EpisodeStepCountWrapper(VmapWrapper(env), max_eps_len=MAX_STEPS), hyperparameters)

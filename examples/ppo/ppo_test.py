@@ -59,8 +59,10 @@ hyperparameters = ppo.Hyperparameters(
 
     normalize_advantages = True,
 
-    #recompute_advantages = True,
-    target_kl = 0.02
+    recompute_advantages = True,
+    target_kl = 0.02,
+
+    truncated_frac = 0.0
 )
 
 algo = ppo.PPO(VmapWrapper(env), hyperparameters)

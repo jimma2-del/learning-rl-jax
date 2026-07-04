@@ -46,6 +46,7 @@ hyperparameters = a2c.Hyperparameters(
     n_envs = N_ENVS,
     rollout_length = 5,
     ent_coef = 0.01,#schedules.linear_schedule(0.0015, 0.0001, STEPS)
+    truncated_frac = 1.0 / MAX_STEPS,
 )
 
 algo = a2c.A2C(VmapWrapper(env), hyperparameters)

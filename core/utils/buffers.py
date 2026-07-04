@@ -174,10 +174,8 @@ class CircularBufferWithOptionalData(Generic[TBufferItem, TOptionalData]):
         if len(get_tree_batch_dims(main_shapes_dtypes, items)) < len(self.main_buffer.batch_dims) + 1: 
             items, has_optional_data_mask, optional_data = jax.tree.map(lambda x: x[None, ...], 
                 (items, has_optional_data_mask, optional_data)) # single item -> add batch axis
-        
-        insert_n = get_vmap_axis_size(items)
 
-        removed = self.remove(insert_n, include_empty=True)
+        removed = self.remove(len(has_optional_data_mask), include_empty=True)
         opt_n_available = self.optional_data_buffer.length - removed.optional_data_buffer.filled_len
 
         # compact opt data, removing empty items; get # of actual items, get index pointers
@@ -199,8 +197,8 @@ class CircularBufferWithOptionalData(Generic[TBufferItem, TOptionalData]):
         main_buffer = self.main_buffer.insert((items, opt_mask_discards_removed, opt_is))
 
         # mask empty slots in compacted opt data with old opt data to allow insertion into opt data buffer
-        opt_insert_n = jnp.minimum(jnp.sum(flat_opt_mask), opt_n_available)
-        opt_set_is = jnp.arange(len(flat_opt_mask))
+        opt_insert_n = jnp.minimum(jnp.sum(has_optional_data_mask), opt_n_available)
+        opt_set_is = jnp.arange(has_optional_data_mask.size)
         old_data = self.optional_data_buffer.get(opt_set_is)
 
         compacted_opt_data = jax.tree.map(lambda new, old, sd: 
