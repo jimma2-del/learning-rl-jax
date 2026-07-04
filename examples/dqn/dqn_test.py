@@ -46,22 +46,22 @@ N_LOGS_PER_EVAL = 4
 
 hyperparameters = dqn.Hyperparameters(
     learning_rate = 2.5e-4,
-    n_envs = 8,#32,
+    n_envs = 32,
     epsilon = schedules.linear_schedule(1, 0.05, 0.1*STEPS),
 
-    # train_freq = 32,
-    # batch_size = 256,
+    train_freq = 32,
+    batch_size = 256,
 
     replay_buffer_size = 100_000,
-    truncated_frac = 1.0,#1/50,
+    truncated_frac = 0.0,
 
-    target_update_interval = 5000,
-    #polyak_tau = 0.005,
+    #target_update_interval = 5000,
+    polyak_tau = 0.005,
 
-    double_dqn = False
+    double_dqn = True
 )
 
-algo = dqn.DQN(EpisodeStepCountWrapper(VmapWrapper(env), 500), hyperparameters)
+algo = dqn.DQN(VmapWrapper(env), hyperparameters)
 
 training_state = algo.init_training_state(rngs)
 train = nnx.jit(algo.train, static_argnames=('steps',))

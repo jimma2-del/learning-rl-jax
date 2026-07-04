@@ -110,8 +110,6 @@ class ReplayTimestep(Generic[TEnvObs]):
     reward: ArrayLike
     terminated: ArrayLike
 
-    next_obs: TEnvObs
-
 @dataclass
 class TrainingState(Generic[TEnvState, TEnvObs, TTrunkOut]):
     steps: ArrayLike
@@ -147,8 +145,6 @@ class DQN(Generic[TEnvState, TEnvObs]):
             action = self.env.action_space.shapes_dtypes,
             reward = jax.ShapeDtypeStruct(shape=(), dtype=jnp.float32),
             terminated = jax.ShapeDtypeStruct(shape=(), dtype=jnp.bool),
-
-            next_obs = self.env.observation_space.shapes_dtypes,
         )
 
     def make_default_optax_optimizer(self) -> optax.GradientTransformationExtraArgs:
@@ -293,7 +289,7 @@ class DQN(Generic[TEnvState, TEnvObs]):
             unreset_obs, final_obs)
 
         replay_timesteps = ReplayTimestep(obs=timesteps.obs, action=timesteps.action, 
-            reward=timesteps.reward, terminated=timesteps.terminated, next_obs = next_obs)
+            reward=timesteps.reward, terminated=timesteps.terminated)
 
         return replay_timesteps, timesteps.truncated, next_obs, env_states
     
@@ -338,13 +334,6 @@ class DQN(Generic[TEnvState, TEnvObs]):
                         jnp.where(samp_trunc[(slice(None), 0) + (None,)*len(sd.shape)], trunc[:, 0], main[:, 1]), 
                     samp_timesteps.obs, samp_trunc_obs, self.env.observation_space.shapes_dtypes)
 
-                # seq_equal = jnp.all(samp_timesteps.obs[:,1] == samp_timesteps.next_obs[:,0], axis=-1)
-                # done = jnp.logical_or(samp_trunc[:,0], samp_timesteps.terminated[:,0])
-                # jax.debug.print("{x}", x=jnp.all(jnp.logical_or(done, seq_equal)))
-
-                jax.debug.print("{x}", x=jnp.all(jnp.logical_or(
-                    samp_timesteps.terminated[:,0], jnp.all(next_obs == samp_timesteps.next_obs[:,0], axis=-1))))
-
                 next_qs = optionally_pass(target_networks, rngs=rngs)(next_obs)
 
                 if self.hyperparameters.double_dqn:
@@ -364,8 +353,6 @@ class DQN(Generic[TEnvState, TEnvObs]):
                         # q-net returns a q-value for every action
                     pred_qs = pred_qs_all_actions[jnp.arange(self.hyperparameters.batch_size), first_timestep.action]
                         # take only the q-value corresponding to the chosen action
-
-                    # jax.debug.print("{x}", x=jnp.max(jnp.power(target_qs - pred_qs, 2)))
 
                     # simple MSE loss
                     return jnp.mean(jnp.power(target_qs - pred_qs, 2))
