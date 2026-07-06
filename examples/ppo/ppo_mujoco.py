@@ -21,15 +21,18 @@ from core.algos import ppo
 
 #jax.config.update("jax_log_compiles", True)
 
-ENV_NAME = "WalkerRun"
+ENV_NAME = "WalkerRun"#"SpotFlatTerrainJoystick"
 MAX_STEPS = 500
 N_ENVS = 2048
-CAMERA = 'side' # None
+CAMERA = 'side'#'track'#'side' # None
 
-rngs = nnx.Rngs(0, params=1, env=2, actions=3)
+rngs = nnx.Rngs(0, params=1, env=2, actions=3, optimize_samples=4)
 
 config = registry.get_default_config(ENV_NAME)
-config.impl = 'jax' # 'warp' backend currently does not work
+
+config.impl = 'warp'#'jax' # compatibility with 'warp' backend is experimental
+#config.naconmax = 50_000
+
 config.ctrl_dt = 0.05
 config.sim_dt = 0.005
 
@@ -51,6 +54,8 @@ EVAL_INTERVAL = 10_000_000
 N_LOGS_PER_EVAL = 10
 
 hyperparameters = ppo.Hyperparameters(
+    discount_rate = 0.97,
+
     learning_rate = 2.5e-4,
     n_envs = N_ENVS,
     gae_lambda = 0.95,
@@ -69,13 +74,20 @@ hyperparameters = ppo.Hyperparameters(
     recompute_advantages = True,
     target_kl = 0.02,
 
-    truncated_frac = 1.0 / MAX_STEPS
+    truncated_frac = 1.1 / MAX_STEPS
 )
 
 wrapped_env = EpisodeStepCountWrapper(VmapWrapper(env), max_eps_len=MAX_STEPS)
 algo = ppo.PPO(wrapped_env, hyperparameters)
 
-training_state = algo.init_training_state(rngs)
+obs_trunk = ppo.Networks.make_default_obs_trunk(env.observation_space)
+policy_head = ppo.Networks.make_default_policy_head(rngs, env.observation_space.flattened_dim, env.action_space,
+    hidden_dims=(512, 256, 128), activation_func=nnx.swish)
+value_head = ppo.Networks.make_default_value_head(rngs, env.observation_space.flattened_dim,
+    hidden_dims=(512, 256, 128), activation_func=nnx.swish)
+networks = ppo.Networks(obs_trunk=obs_trunk, policy_head=policy_head, value_head=value_head)
+
+training_state = algo.init_training_state(rngs, networks=networks)
 train = nnx.jit(algo.train, static_argnames=('steps',))
 
 jitted_stagger = nnx.jit(stagger_env_states, static_argnames=('env', 'n_envs', 'stagger_step_size'))

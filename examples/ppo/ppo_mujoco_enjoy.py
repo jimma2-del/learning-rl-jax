@@ -24,10 +24,13 @@ ENV_NAME = "WalkerRun"
 MAX_STEPS = 500#100#1000
 CAMERA = 'side'
 
-rngs = nnx.Rngs(14214148, env=12490184, actions=95821957)
+rngs = nnx.Rngs(1, env=2, actions=3)
 
 config = registry.get_default_config(ENV_NAME)
-config.impl = 'jax' # 'warp' backend currently does not work
+
+config.impl = 'jax' # compatibility with 'warp' backend is experimental
+#config.naconmax = 50_000
+
 config.ctrl_dt = 0.05
 # config.sim_dt = 0.005
 
@@ -46,7 +49,22 @@ import orbax.checkpoint as ocp
 SAVE_PATH = path.abspath(f'examples/ppo/_tmp/{ENV_NAME}')
 
 # test load
-abstract_model = nnx.eval_shape(lambda: algo.make_actor(rngs=nnx.Rngs(0), deterministic_sampling=True))
+#abstract_model = nnx.eval_shape(lambda: algo.make_actor(rngs=nnx.Rngs(0), deterministic_sampling=True))
+
+def make_actor():
+    rngs = nnx.Rngs(0)
+
+    obs_trunk = ppo.Networks.make_default_obs_trunk(env.observation_space)
+    policy_head = ppo.Networks.make_default_policy_head(rngs, env.observation_space.flattened_dim, env.action_space,
+        hidden_dims=(512, 256, 128), activation_func=nnx.swish)
+    value_head = ppo.Networks.make_default_value_head(rngs, env.observation_space.flattened_dim,
+        hidden_dims=(512, 256, 128), activation_func=nnx.swish)
+    networks = ppo.Networks(obs_trunk=obs_trunk, policy_head=policy_head, value_head=value_head)
+
+    return algo.make_actor(networks=networks, deterministic_sampling=True)
+
+abstract_model = nnx.eval_shape(make_actor)
+
 graphdef, abstract_state = nnx.split(abstract_model)
 checkpointer_load = ocp.StandardCheckpointer()
 state_restored = checkpointer_load.restore(SAVE_PATH, abstract_state)

@@ -28,7 +28,10 @@ CAMERA = None#'side' # None
 rngs = nnx.Rngs(0, params=100, env=200, actions=300)
 
 config = registry.get_default_config(ENV_NAME)
-config.impl = 'jax' # 'warp' backend currently does not work
+
+config.impl = 'jax' # compatibility with 'warp' backend is experimental
+#config.naconmax = 50_000
+
 config.ctrl_dt = 0.05
 config.sim_dt = 0.005
 

@@ -58,7 +58,7 @@ hyperparameters = dqn.Hyperparameters(
     #target_update_interval = 5000,
     polyak_tau = 0.005,
 
-    double_dqn = True
+    #double_dqn = True
 )
 
 algo = dqn.DQN(VmapWrapper(env), hyperparameters)

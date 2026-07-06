@@ -344,10 +344,14 @@ class AutoResetWrapper(
 
         done = jnp.logical_or(terminated, truncated)
 
+        def where_done(reset, next):
+            # ignore fields with custom vmapping rules
+            if not hasattr(next, 'shape') or next.shape[:len(done.shape)] != done.shape: return next 
+                
+            return jnp.where(done[(slice(None),) + (None,)*(next.ndim - 1)], reset, next)
+
         new_state = jax.lax.cond(done.any(), # cond to avoid computing resets when no envs done
-            lambda: jax.tree.map(lambda reset, next: 
-                    jnp.where(done[(slice(None),) + (None,)*(next.ndim - 1)], reset, next), 
-                self.env.reset(reset_key)[0], next_state), 
+            lambda: jax.tree.map(where_done, self.env.reset(reset_key)[0], next_state), 
             lambda: next_state
         )
 
@@ -373,12 +377,12 @@ class PrecomputedResetsPoolWrapper(
 
     def reset(self, key: chex.PRNGKey) -> tuple[TEnvState, dict[Any, Any]]:
         resets_pool_size = get_vmap_axis_size(self.resets_pool_state_infos)
+        reset_is = jax.random.randint(key, key.shape, minval=0, maxval=resets_pool_size)
 
-        get_reset_is = lambda key: jax.random.randint(key, (), minval=0, maxval=resets_pool_size)
-        if not jnp.isscalar(key): get_reset_is = jax.vmap(get_reset_is) # if env vmapped
-
-        reset_is = get_reset_is(key)
-        return jax.tree.map(lambda x: x[reset_is], self.resets_pool_state_infos)
+        return jax.tree.map(
+            lambda x: x[reset_is] if hasattr(x, 'shape') and x.shape[0] == resets_pool_size else x, 
+            self.resets_pool_state_infos
+        )
 
 class SquashContinuousActionsToBoundsWrapper(
     Generic[TEnvState, TEnvObs, TEnvAction, TRenderFrame],
