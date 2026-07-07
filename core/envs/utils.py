@@ -16,6 +16,7 @@ from flax import nnx
 
 from core.utils.batch_utils import get_tree_batch_dims
 from core.utils.func_utils import optionally_pass
+from core.utils.nnx_modules import Pipe
 
 from core.envs.base import Environment, Space
 from core.envs.wrappers import AutoResetWrapper
@@ -121,7 +122,7 @@ def rollout(rngs: nnx.Rngs,
     if take_func is None:
         take_func = lambda x: x
 
-    actor = nnx.Sequential(actor)
+    actor = Pipe(actor)
 
     def batched_env_step(carry: tuple[TEnvState, dict[Any,Any]], rngs: nnx.Rngs) -> tuple[TEnvState, TTakeObj]:
         actor, states, infos = carry
@@ -167,7 +168,7 @@ def evaluate_episodes(rngs: nnx.Rngs,
         env = AutoResetWrapper(env)
 
     keys_shape = () if n_envs is None else (n_envs,)
-    actor = nnx.Sequential(actor)
+    actor = Pipe(actor)
 
     eps_per_env = math.ceil(episodes / (n_envs if n_envs is not None else 1))
 
@@ -239,7 +240,7 @@ def rollout_episode(rngs: nnx.Rngs,
     if take_func is None:
         take_func = lambda x: x
 
-    actor = nnx.Sequential(actor)
+    actor = Pipe(actor)
 
     @nnx.jit
     @nnx.scan
@@ -311,7 +312,7 @@ def stagger_env_states(rngs: nnx.Rngs,
 
         def where_done(cur, new):
             # ignore fields with custom vmapping rules
-            if not hasattr(new, 'shape') or new.shape[0] != needed_steps.shape[0]: return new 
+            if not hasattr(new, 'shape') or new.shape[0] != needed_steps.shape[0]: return new.copy()
                 
             return jnp.where((steps > needed_steps)[(slice(None),) + (None,)*(cur.ndim - 1)], cur, new)
 

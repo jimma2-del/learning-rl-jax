@@ -346,7 +346,7 @@ class AutoResetWrapper(
 
         def where_done(reset, next):
             # ignore fields with custom vmapping rules
-            if not hasattr(next, 'shape') or next.shape[:len(done.shape)] != done.shape: return next 
+            if not hasattr(next, 'shape') or next.shape[:len(done.shape)] != done.shape: return next.copy()
                 
             return jnp.where(done[(slice(None),) + (None,)*(next.ndim - 1)], reset, next)
 
@@ -357,6 +357,7 @@ class AutoResetWrapper(
 
         return new_state, reward, terminated, truncated, info
 
+@jax.tree_util.register_pytree_node_class
 class PrecomputedResetsPoolWrapper(
     Generic[TEnvState, TEnvObs, TEnvAction, TRenderFrame],
     Wrapper[TEnvState, TEnvObs, TEnvAction, TRenderFrame]
@@ -368,6 +369,10 @@ class PrecomputedResetsPoolWrapper(
     NOTE: If vectorizing the environment, apply BEFORE this wrapper:
         eg. do `PrecomputedResetsPoolWrapper(VmapWrapper(env))`; 
             do NOT do `VmapWrapper(PrecomputedResetsPoolWrapper(env))`.
+
+    NOTE: Marking the environment as static when passing into a JITed function can lead to long 
+        compilation times as the pool of precomputed reset states will be treated as a closed-over constant.
+        Instead, the environment can be left dynamic as this wrapper is a registered PyTree node.
     """
 
     def __init__(self, env: Environment[TEnvState, TEnvObs, TEnvAction, TRenderFrame], 
@@ -380,9 +385,16 @@ class PrecomputedResetsPoolWrapper(
         reset_is = jax.random.randint(key, key.shape, minval=0, maxval=resets_pool_size)
 
         return jax.tree.map(
-            lambda x: x[reset_is] if hasattr(x, 'shape') and x.shape[0] == resets_pool_size else x, 
+            lambda x: x[reset_is] if hasattr(x, 'shape') and x.shape[0] == resets_pool_size else x.copy(), 
             self.resets_pool_state_infos
         )
+
+    def tree_flatten(self):
+        return (self.resets_pool_state_infos, ), self.env
+
+    @classmethod
+    def tree_unflatten(cls, aux_data, children):
+        return cls(aux_data, children[0])
 
 class SquashContinuousActionsToBoundsWrapper(
     Generic[TEnvState, TEnvObs, TEnvAction, TRenderFrame],

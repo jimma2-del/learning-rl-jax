@@ -15,7 +15,7 @@ import optax
 from core.utils import RunningMeanVar
 from core.utils.buffers import CircularBufferWithOptionalData
 from core.utils.func_utils import try_call, optionally_pass, override_signature
-from core.utils.nnx_modules import MLP, RunningMeanVarNorm
+from core.utils.nnx_modules import MLP, RunningMeanVarNorm, Pipe
 
 from core.algos.base import Scheduleable, GreedyQActor, AlgoPhase, set_algo_phase
 
@@ -91,7 +91,7 @@ class Networks(nnx.Module, Generic[TEnvObs, TTrunkOut]):
 
         layers.append(observation_space.flatten)
 
-        return nnx.Sequential(*layers)
+        return Pipe(*layers)
 
     @staticmethod
     def make_default_qs_head(
@@ -188,7 +188,7 @@ class DQN(Generic[TEnvState, TEnvObs]):
             networks = Networks.make_default(rngs, self.env.observation_space, self.env.action_space)
 
         return GreedyQActor(
-            nnx.Sequential(networks.obs_trunk, networks.qs_head), 
+            Pipe(networks.obs_trunk, networks.qs_head), 
             int(self.env.action_space.high + 1), 
             epsilon=epsilon
         )

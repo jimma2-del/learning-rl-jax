@@ -1,3 +1,5 @@
+from typing import Mapping
+
 import time
 from os import path
 
@@ -19,44 +21,48 @@ from core.envs.utils import rollout_episode, visualize_pygame, evaluate_episodes
 
 from core.algos import ppo
 
+from core.utils.nnx_modules import MLP, RunningMeanVarNorm, ActionDistributionHead, Pipe
+from core.utils.batch_utils import flatten_batched_tree, get_tree_flattened_dim
+
 #jax.config.update("jax_log_compiles", True)
 
-ENV_NAME = "WalkerRun"#"SpotFlatTerrainJoystick"
-MAX_STEPS = 500
+ENV_NAME = "G1JoystickRoughTerrain"
+MAX_STEPS = 1000
 N_ENVS = 2048
-CAMERA = 'side'#'track'#'side' # None
+CAMERA = 'track'#'side' # None
 
 rngs = nnx.Rngs(0, params=1, env=2, actions=3, optimize_samples=4)
 
 config = registry.get_default_config(ENV_NAME)
 
-config.impl = 'warp'#'jax' # compatibility with 'warp' backend is experimental
+config.impl = 'warp' #'jax' # compatibility with 'warp' backend is experimental
 #config.naconmax = 50_000
+#config.njmax = 32 # for SpotFlatTerrainJoystick
 
-config.ctrl_dt = 0.05
-config.sim_dt = 0.005
+# config.ctrl_dt = 0.05
+# config.sim_dt = 0.005
 
 mjx_env = registry.load(ENV_NAME, config)
 
 env = MuJoCoPlaygroundWrapper(mjx_env, {'camera': CAMERA})
 
-RESETS_POOL_SIZE = 32768
+RESETS_POOL_SIZE = 2048 - 1#32768 - 1 # subtract one to avoid being the same as nacomax
 resets_pool_states_infos = jax.vmap(env.reset)(jax.random.split(rngs.env(), RESETS_POOL_SIZE))
 env = PrecomputedResetsPoolWrapper(env, resets_pool_states_infos)
 
 #env = ClipActionsToBoundsWrapper(env)
 
 ### TRAIN ###
-STEPS = 100_000_000 #1_000_000
+STEPS = 200_000_000 #1_000_000
 
 EVAL_EPS = 256
-EVAL_INTERVAL = 10_000_000
+EVAL_INTERVAL = 100_000
 N_LOGS_PER_EVAL = 10
 
 hyperparameters = ppo.Hyperparameters(
     discount_rate = 0.97,
 
-    learning_rate = 2.5e-4,
+    learning_rate = schedules.cosine_decay_schedule(3e-4, STEPS), #2.5e-4,
     n_envs = N_ENVS,
     gae_lambda = 0.95,
 
@@ -80,19 +86,40 @@ hyperparameters = ppo.Hyperparameters(
 wrapped_env = EpisodeStepCountWrapper(VmapWrapper(env), max_eps_len=MAX_STEPS)
 algo = ppo.PPO(wrapped_env, hyperparameters)
 
-obs_trunk = ppo.Networks.make_default_obs_trunk(env.observation_space)
-policy_head = ppo.Networks.make_default_policy_head(rngs, env.observation_space.flattened_dim, env.action_space,
-    hidden_dims=(512, 256, 128), activation_func=nnx.swish)
-value_head = ppo.Networks.make_default_value_head(rngs, env.observation_space.flattened_dim,
-    hidden_dims=(512, 256, 128), activation_func=nnx.swish)
+# custom networks are needed to allow for asymmetric actor-critic
+    # policy net only gets sensor data (partial observation); critic gets full (privileged) state
+obs_trunk = RunningMeanVarNorm(env.observation_space.shapes_dtypes)
+
+try_enter = lambda x, key: x[key] if isinstance(x, Mapping) and key in x else x
+
+policy_obs_sdt = try_enter(env.observation_space.shapes_dtypes, 'state')
+policy_head = ActionDistributionHead(env.action_space)
+policy_head = Pipe(
+    lambda x: try_enter(x, 'state'),
+    lambda x: flatten_batched_tree(policy_obs_sdt, x),
+    MLP(rngs, (get_tree_flattened_dim(policy_obs_sdt), 512, 256, 128, policy_head.input_dim), 
+        activation_func=nnx.swish), 
+    policy_head
+)
+
+value_func_obs_sdt = try_enter(env.observation_space.shapes_dtypes, 'privileged_state')
+value_head = Pipe(
+    lambda x: try_enter(x, 'privileged_state'),
+    lambda x: flatten_batched_tree(value_func_obs_sdt, x),
+    MLP(rngs, (get_tree_flattened_dim(value_func_obs_sdt), 512, 256, 128, 1), 
+        activation_func=nnx.swish),
+    lambda x: jnp.squeeze(x, axis=-1)
+)
+
 networks = ppo.Networks(obs_trunk=obs_trunk, policy_head=policy_head, value_head=value_head)
 
 training_state = algo.init_training_state(rngs, networks=networks)
-train = nnx.jit(algo.train, static_argnames=('steps',))
+train = nnx.jit(algo.train, static_argnames=('steps',), donate_argnames=('training_state'))
 
-jitted_stagger = nnx.jit(stagger_env_states, static_argnames=('env', 'n_envs', 'stagger_step_size'))
-training_state.env_states = jitted_stagger(rngs, AutoResetWrapper(wrapped_env), hyperparameters.n_envs, 
-    stagger_step_size=1, initial_env_states=training_state.env_states)
+# jitted_stagger = nnx.jit(stagger_env_states, 
+#     static_argnames=('env', 'n_envs', 'stagger_step_size'), donate_argnames=('initial_env_states'))
+# training_state.env_states = jitted_stagger(rngs, AutoResetWrapper(wrapped_env), hyperparameters.n_envs, 
+#     stagger_step_size=1, initial_env_states=training_state.env_states)
 
 @nnx.jit
 def evaluate(rngs, actor):

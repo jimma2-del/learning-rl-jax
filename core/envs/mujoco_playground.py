@@ -35,7 +35,8 @@ class MuJoCoPlaygroundWrapper(Environment[MjxState, jax.Array, jax.Array, np.nda
         self.mjx_env = mjx_env
         self.render_settings = render_settings
 
-        obs_max = jax.tree.map(lambda leaf: np.full(leaf, np.inf), mjx_env.observation_size)
+        obs_shapes_dtypes = jax.eval_shape(mjx_env.reset, jax.random.key(0)).obs
+        obs_max = jax.tree.map(lambda leaf: np.full(leaf.shape, np.inf), obs_shapes_dtypes)
         obs_min = jax.tree.map(lambda leaf: -leaf, obs_max)
         self._observation_space = Space(obs_min, obs_max)
 

@@ -15,7 +15,7 @@ import optax
 from core.utils.func_utils import try_call, optionally_pass, override_signature
 from core.utils.misc import compacting_mask
 from core.utils import RunningMeanVar
-from core.utils.nnx_modules import MLP, RunningMeanVarNorm, ActionDistributionHead
+from core.utils.nnx_modules import MLP, RunningMeanVarNorm, ActionDistributionHead, Pipe
 
 from core.algos.base import Scheduleable, StochasticPolicyActor, Policy, ValueFunc, set_algo_phase, AlgoPhase
 
@@ -94,7 +94,7 @@ class Networks(nnx.Module, Generic[TEnvObs, TEnvAction, TTrunkOut]):
 
         layers.append(observation_space.flatten)
 
-        return nnx.Sequential(*layers)
+        return Pipe(*layers)
 
     @staticmethod
     def make_default_policy_head(
@@ -108,14 +108,14 @@ class Networks(nnx.Module, Generic[TEnvObs, TEnvAction, TTrunkOut]):
             do_layer_norm=do_layer_norm, activation_func=activation_func
         )
 
-        return nnx.Sequential(mlp, head)
+        return Pipe(mlp, head)
 
     @staticmethod
     def make_default_value_head(
         rngs: nnx.Rngs, input_dim: int,
         hidden_dims: Sequence[int] = (128, 128), do_layer_norm: bool = True, activation_func=nnx.relu
     ) -> Callable[[TTrunkOut], jax.Array]:
-        return nnx.Sequential(
+        return Pipe(
             MLP(
                 rngs, (input_dim, *hidden_dims, 1), 
                 do_layer_norm=do_layer_norm, activation_func=activation_func
@@ -183,7 +183,7 @@ class A2C(Generic[TEnvState, TEnvObs]):
             networks = Networks.make_default(rngs, self.env.observation_space, self.env.action_space)
 
         return StochasticPolicyActor(
-            nnx.Sequential(networks.obs_trunk, networks.policy_head), 
+            Pipe(networks.obs_trunk, networks.policy_head), 
             self.env.action_space,
             deterministic_sampling=deterministic_sampling,
             squash_continuous=squash_continuous

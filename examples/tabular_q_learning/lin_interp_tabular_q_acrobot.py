@@ -94,7 +94,7 @@ hyperparameters = tabular_q_learning.Hyperparameters(
 )
 
 algo = tabular_q_learning.TabularQLearning(VmapWrapper(env), hyperparameters)
-train = nnx.jit(algo.train, static_argnames=('steps',))
+train = nnx.jit(algo.train, static_argnames=('steps',), donate_argnames=('training_state'))
 
 q_func = tabular_q_learning.LinInterpTabularQFunc(
     int(env.action_space.high + 1), Space(np.array(low), np.array(high)), np.array(res))

@@ -15,7 +15,7 @@ import optax
 from core.utils.func_utils import try_call, optionally_pass, override_signature
 from core.utils.misc import compacting_mask
 from core.utils import RunningMeanVar
-from core.utils.nnx_modules import MLP, RunningMeanVarNorm, ActionDistributionHead, stateful_func
+from core.utils.nnx_modules import MLP, RunningMeanVarNorm, ActionDistributionHead, stateful_func, Pipe
 
 from core.algos.base import Scheduleable, StochasticPolicyActor, Policy, ValueFunc, set_algo_phase, AlgoPhase
 
@@ -106,7 +106,7 @@ class Networks(nnx.Module, Generic[TEnvObs, TEnvAction, TTrunkOut]):
 
         layers.append(observation_space.flatten)
 
-        return nnx.Sequential(*layers)
+        return Pipe(*layers)
 
     @staticmethod
     def make_default_policy_head(
@@ -120,14 +120,14 @@ class Networks(nnx.Module, Generic[TEnvObs, TEnvAction, TTrunkOut]):
             do_layer_norm=do_layer_norm, activation_func=activation_func
         )
 
-        return nnx.Sequential(mlp, head)    
+        return Pipe(mlp, head)    
 
     @staticmethod
     def make_default_value_head(
         rngs: nnx.Rngs, input_dim: int,
         hidden_dims: Sequence[int] = (128, 128), do_layer_norm: bool = True, activation_func=nnx.relu
     ) -> Callable[[TTrunkOut], jax.Array]:
-        return nnx.Sequential(
+        return Pipe(
             MLP(
                 rngs, (input_dim, *hidden_dims, 1), 
                 do_layer_norm=do_layer_norm, activation_func=activation_func
@@ -198,7 +198,7 @@ class PPO(Generic[TEnvState, TEnvObs]):
             networks = Networks.make_default(rngs, self.env.observation_space, self.env.action_space)
 
         return StochasticPolicyActor(
-            nnx.Sequential(networks.obs_trunk, networks.policy_head), 
+            Pipe(networks.obs_trunk, networks.policy_head), 
             self.env.action_space,
             deterministic_sampling=deterministic_sampling,
             squash_continuous=squash_continuous
@@ -362,7 +362,7 @@ class PPO(Generic[TEnvState, TEnvObs]):
                 train_samples = (timesteps.obs, timesteps.action, timesteps.action_info['log_p'], adv, target_vals)
                 train_samples = jax.tree.map(lambda x: jnp.reshape(x, (-1, *x.shape[2:])), train_samples)
 
-                shuffled_is = jax.random.permutation(rngs.optimize_samples(), len(train_samples[0]))
+                shuffled_is = jax.random.permutation(rngs.optimize_samples(), len(train_samples[2]))
                 minibatches = jax.tree.map(lambda x: 
                     jnp.reshape(x[shuffled_is], (self.hyperparameters.n_minibatches, -1, *x.shape[1:])), train_samples)
 

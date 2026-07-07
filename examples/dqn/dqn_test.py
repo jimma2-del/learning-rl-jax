@@ -64,7 +64,7 @@ hyperparameters = dqn.Hyperparameters(
 algo = dqn.DQN(VmapWrapper(env), hyperparameters)
 
 training_state = algo.init_training_state(rngs)
-train = nnx.jit(algo.train, static_argnames=('steps',))
+train = nnx.jit(algo.train, static_argnames=('steps',), donate_argnames=('training_state'))
 
 @nnx.jit
 def evaluate(rngs, actor):

@@ -14,6 +14,7 @@ from flax import nnx
 
 from core.envs.base import Space
 from core.utils import RunningMeanVar
+from core.utils.func_utils import optionally_pass
 
 from core.algos.base import AlgoPhase
 
@@ -70,6 +71,27 @@ def stateful_func(*state_args: TStatefulFuncState.args, **state_kwargs: TStatefu
         -> Callable[[Callable[..., TOutput]], StatefulFunc[TStatefulFuncState, TStatefulFuncParams, TOutput]]:
     """Decorator factory for :class:`StatefulFunc`."""
     return lambda inner: StatefulFunc(inner, *state_args, **state_kwargs)
+
+class Pipe(nnx.Module):
+    """Stores a sequence of callables, and applies them in order when called. 
+    Similar to `flax.nnx.Sequential`, but does not apply any extra processing to function outputs.
+    """
+
+    def __init__(self, *fns: Callable[..., Any]) -> None:
+        self.layers = list(fns)
+
+    def __call__(self, *args, rngs: nnx.Rngs | None = None, **kwargs) -> Any:
+        output: Any = None
+
+        for i, f in enumerate(self.layers):
+            if not callable(f): raise TypeError(f'Sequence[{i}] is not callable: {f}')
+
+            f = optionally_pass(f, rngs=rngs)
+            
+            if i == 0: output = f(*args, **kwargs)
+            else: output = f(output)
+
+        return output
 
 class MLP(nnx.Module):
 
