@@ -222,6 +222,33 @@ class Space(Generic[TSpaceElement]):
 
         return jax.tree.map(map_func, x, self.low, self.high, self.shapes_dtypes)
 
+    def add_noise_to_continuous(self, key: chex.PRNGKey, x: TSpaceElement, 
+            noise_std: ArrayLike, noise_clip: ArrayLike | None = None, bounds_clip: bool = True) -> TSpaceElement:
+        """Adds gaussian noise to continuous leaves.
+
+        `bounds_clip`: If True (default), clips final values to bounds.
+        """
+
+        keys = jax.random.split(key, num=self.treedef.num_leaves)
+        keys_tree = jax.tree.unflatten(self.treedef, keys)
+
+        def map_func(cur, cur_low, cur_high, shape_dtype: jax.ShapeDtypeStruct, key: chex.PRNGKey):
+            if np.issubdtype(shape_dtype.dtype, np.integer): return cur
+
+            noise = noise_std * jax.random.normal(key, shape_dtype.shape)
+            
+            if noise_clip is not None:
+                noise = jnp.clip(noise, -noise_clip, noise_clip)
+
+            cur += noise
+
+            if bounds_clip:
+                cur = jnp.clip(cur, cur_low, cur_high)
+
+            return cur
+
+        return jax.tree.map(map_func, x, self.low, self.high, self.shapes_dtypes, keys_tree)
+
     def sample_distribution(self, key: chex.PRNGKey, distribution: TSpaceElement, batch_dims: int | Sequence[int] = (),
             squash_continuous=True, deterministic=False, log_stds=False) -> TSpaceElement:
         """Samples a batch of elements of shape `batch_dims` from the space, according to the given distribution.

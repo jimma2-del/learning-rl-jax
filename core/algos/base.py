@@ -10,6 +10,7 @@ from chex import dataclass
 from flax import nnx
 
 from core.utils.func_utils import optionally_pass
+from core.utils.batch_utils import get_tree_batch_dims
 from core.envs.base import Space
 
 TScheduleValue = TypeVar('TScheduleValue')
@@ -77,6 +78,33 @@ class StochasticPolicyActor(Generic[TEnvObs, TEnvAction], nnx.Module):
         See `Space.sample_distribution()` for details on the structure of the returned distribution."""
         return optionally_pass(self.policy, rngs=rngs)(obs)
 
+class DeterministicPolicyActor(Generic[TEnvObs, TEnvAction], nnx.Module):
+    """Actor which gets actions directly from the policy, and optionally adds gaussian noise.
+    Currently only supports continuous actions."""
+
+    def __init__(self, policy: Policy[TEnvObs, TEnvAction], action_space: Space[TEnvAction],
+            noise: ArrayLike = jnp.array(0.0)) -> None:
+
+        assert jax.tree.map(lambda s_dt: jnp.issubdtype(s_dt.dtype, jnp.floating), 
+            action_space.shapes_dtypes), "Action space must be continuous (jnp.floating)."
+
+        self.policy = policy
+        self.action_space = action_space
+
+        self.noise = nnx.Variable(jnp.array(noise, dtype=jnp.float32))
+
+    def __call__(self, obs: TEnvObs, rngs: nnx.Rngs | None = None,
+            noise: ArrayLike | None = None) -> tuple[TEnvAction, dict[Any, Any]]:
+        """Computes an action using the policy, optionally adding gaussian noise.
+        Returns the raw action without noise in `info['raw_action']`."""
+
+        if noise is None: noise = self.noise.value
+
+        raw_action = optionally_pass(self.policy, rngs=rngs)(obs)
+        action = self.action_space.add_noise_to_continuous(rngs.action(), raw_action, noise)
+
+        return action, {'raw_action': raw_action}
+
 class DiscreteQFuncWithRngs(Generic[TEnvObs], Protocol):
     def __call__(self, obs: TEnvObs, rngs: nnx.Rngs) -> jax.Array: ...
 class DiscreteQFuncWithoutRngs(Generic[TEnvObs], Protocol):
@@ -109,7 +137,7 @@ class GreedyQActor(Generic[TEnvObs], nnx.Module):
         greedy_action = self.select_greedy_action(q_values)
 
         random_action = self.random_action(rngs, shape=greedy_action.shape)
-        take_random_action = jax.random.uniform(rngs.actions(), shape=greedy_action.shape) < epsilon
+        take_random_action = jax.random.bernoulli(rngs.actions(), p=epsilon, shape=greedy_action.shape)
 
         return jnp.where(take_random_action, random_action, greedy_action), \
             { 'q_values': q_values, 'action_random': take_random_action }
@@ -141,15 +169,16 @@ class Algo(Generic[TTrainingState, TActor (bound=core.env.utils.Actor), TEnvStat
     
     attributes:
         env
-        hyperparameters? should this be standardized?
 
     methods:
         __init__(env, *nonstandard params (eg. hyperparameters))
         init_training_state(rngs, networks, optional params (eg. replay buffer state, prefill steps)) -> TTrainingState
         train(rngs, training_state, steps) -> TTrainingState, metrics dict
 
-        make_actor(networks, optional rngs, optional params?)? 
+        make_actor(networks (or TrainingState?), optional rngs, optional params?)? 
             can be used as dummy for loading orbax checkpoints if only the actor was saved
+
+        save/load as a parent method? option to only include actor
 
 @chex.dataclass
 class TrainingState(ABC, Generic[TEnvState, TActor]): should this be standardized?

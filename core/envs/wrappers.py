@@ -555,10 +555,6 @@ class RandomTruncationWrapper(
     def step(self, key: chex.PRNGKey, state: TEnvState, action: TEnvAction) \
             -> tuple[TEnvState, jax.Array, jax.Array, jax.Array, dict[Any, Any]]:
         truncate_key, step_keys = split_key_from_batch(key)
-        
         next_state, reward, terminated, truncated, info = super().step(step_keys, state, action)
-
-        random = jax.random.uniform(truncate_key, shape=truncated.shape)
-        truncated = jnp.logical_or(truncated, random < self.truncate_probability)
-
+        truncated |= jax.random.bernoulli(truncate_key, p=self.truncate_probability, shape=truncated.shape)
         return next_state, reward, terminated, truncated, info
