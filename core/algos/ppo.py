@@ -427,7 +427,7 @@ class PPO(Generic[TEnvState, TEnvObs]):
             metrics_keys = { 'loss', 'policy_loss', 'value_loss', 'entropy', 'approx_kl', 'clip_frac' }
             metrics = { key: jnp.zeros(self.hyperparameters.n_epochs) for key in metrics_keys }
 
-            _, rngs, epoch_i, _, _, _, _, metrics = nnx.while_loop(
+            _, rngs, epochs_done, _, _, _, _, metrics = nnx.while_loop(
                 lambda carry: carry[0], # use first item in carry as the done flag
                 epoch,
                 (
@@ -440,10 +440,10 @@ class PPO(Generic[TEnvState, TEnvObs]):
                 ), 
             )
 
-            metrics = jax.tree.map(lambda x: jnp.sum(x) / epoch_i, metrics)
+            metrics = jax.tree.map(lambda x: jnp.sum(x) / epochs_done, metrics)
 
             if target_kl is not None: # if early stopping, track number of epochs done before stopping
-                metrics['n_epochs_done'] = epoch_i
+                metrics['n_epochs_done'] = epochs_done
 
             metrics['steps'] = training_state.steps
 

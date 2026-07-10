@@ -44,10 +44,11 @@ class Hyperparameters:
         # lowering this saves memory by allocating less space for truncated observations in the replay buffer
         # however, truncated timesteps exceeding the specified limit will be treated as terminated
 
-    train_freq: int = 4 # does around 1 gradient step per train_freq env steps
-        # NOTE: if n_envs > train_freq, we take 1 step in each env, followed by multiple gradient steps
-        # NOTE: will round up or down if not divisible evenly
+    train_freq: int = 4 # does approximately 1 optimize step per train_freq environment steps
+        # if n_envs > train_freq, we take 1 step in each env, followed by multiple optimize steps
+        # NOTE: actual number of env/optimize steps taken may be rounded if not evenly divisible
     policy_delay: int = 2 # updates the policy once every `policy_delay` Q-function updates
+        # NOTE: actual number of updates done may be rounded if not evenly divisible
 
     polyak_tau: Scheduleable[float] | None = None # if not None, OVERRIDES `target_update_interval``
         # target is updated after EVERY gradient step if not None
@@ -132,7 +133,7 @@ class Networks(nnx.Module, Generic[TEnvObs, TEnvAction, TTrunkOut]):
             do_layer_norm=do_layer_norm, activation_func=activation_func
         )
 
-        return Pipe(mlp, action_space.unflatten, action_space.unsquash_continuous_from_bounds)    
+        return Pipe(mlp, action_space.unflatten, action_space.squash_continuous_to_bounds)    
 
     @staticmethod
     def make_default_q_head(
@@ -217,7 +218,7 @@ class TD3(Generic[TEnvState, TEnvObs, TEnvAction]):
         })
 
     def make_actor(self, 
-        networks: Networks[TEnvObs, TTrunkOut] | None = None, 
+        networks: Networks[TEnvObs, TEnvAction, TTrunkOut] | None = None, 
         noise: ArrayLike = jnp.array(0.0), 
         rngs: nnx.Rngs | None = None
     ) -> DeterministicPolicyActor[TEnvObs, TEnvAction]:
@@ -266,9 +267,9 @@ class TD3(Generic[TEnvState, TEnvObs, TEnvAction]):
         target_networks = nnx.clone(networks)
         set_algo_phase(target_networks, AlgoPhase.EVAL)
 
-        if self.hyperparameters.polyak_tau is not None: # convert datatypes to floats
-            nnx.update(target_networks, optax.incremental_update(
-                nnx.state(target_networks), nnx.state(target_networks), 0.5))
+        # ensure target network datatypes are floats
+        nnx.update(target_networks, optax.incremental_update(
+            nnx.state(target_networks), nnx.state(target_networks), 0.5))
 
         if replay_buffer is None:
             replay_buffer = CircularBufferWithOptionalData.init(
@@ -348,7 +349,8 @@ class TD3(Generic[TEnvState, TEnvObs, TEnvAction]):
 
         steps_per_env_per_iter = math.ceil(self.hyperparameters.train_freq / self.hyperparameters.n_envs)
         total_steps_per_iter = steps_per_env_per_iter * self.hyperparameters.n_envs
-        learn_steps_per_iter = math.ceil(self.hyperparameters.n_envs / self.hyperparameters.train_freq)
+        optimize_steps_per_iter = math.ceil(self.hyperparameters.n_envs / self.hyperparameters.train_freq)
+        policy_updates_per_iter = math.ceil(optimize_steps_per_iter / self.hyperparameters.policy_delay)
 
         def train_iteration(training_state: TrainingState[TEnvState, TEnvObs, TEnvAction, TTrunkOut], rngs: nnx.Rngs) \
                 -> tuple[TrainingState[TEnvState, TEnvObs, TEnvAction, TTrunkOut], dict[Any, Any]]:
@@ -378,8 +380,7 @@ class TD3(Generic[TEnvState, TEnvObs, TEnvAction]):
             target_noise = try_call(self.hyperparameters.target_noise, steps)
             target_noise_clip = try_call(self.hyperparameters.target_noise_clip, steps)
 
-            def learn_step(carry: tuple[Networks, Networks, nnx.Optimizer, nnx.Optimizer], rngs: nnx.Rngs) \
-                    -> tuple[tuple[Networks, Networks, nnx.Optimizer, nnx.Optimizer], dict[Any, Any]]:
+            def optimize_step(carry, rngs: nnx.Rngs, i: jax.Array):
                 networks, target_networks, policy_optimizer, q_func_optimizer = carry
 
                 # sample replay buffer
@@ -419,36 +420,47 @@ class TD3(Generic[TEnvState, TEnvObs, TEnvAction]):
                 q_grads, metrics = q_loss_grad_func(networks, rngs)
                 q_func_optimizer.update(q_grads) 
 
-                # update target network if using polyak averaging
-                if self.hyperparameters.polyak_tau is not None:
+                def policy_and_target_networks_update(rngs, networks, target_networks, policy_optimizer):
+                    trunk_out = optionally_pass(networks.obs_trunk, rngs=rngs)(first_timestep.obs)
+
+                    def policy_loss_func(policy_head: nnx.Module, rngs: nnx.Rngs):
+                        action = optionally_pass(policy_head, rngs=rngs)(trunk_out)
+                        return - jnp.mean(optionally_pass(networks.q1_head, rngs=rngs)(trunk_out, action))
+
+                    policy_loss_grad_func = nnx.value_and_grad(policy_loss_func)
+                    policy_loss, policy_grads = policy_loss_grad_func(networks.policy_head, rngs)
+                    policy_optimizer.update(policy_grads) 
+
                     tau = try_call(self.hyperparameters.polyak_tau, training_state.steps)
                     nnx.update(target_networks, optax.incremental_update(
                         nnx.state(networks), nnx.state(target_networks), tau))
 
-                return carry, { 'q_loss': loss }
+                    return policy_loss
 
-            _, metrics = nnx.scan(learn_step)(
-                (training_state.networks, training_state.target_networks, training_state.optimizer), 
-                rngs.fork(split=learn_steps_per_iter)
+                policy_loss = nnx.cond(i % self.hyperparameters.policy_delay == 0, 
+                    policy_and_target_networks_update, lambda *args: jnp.array(0, dtype=jnp.float32),
+                    rngs, networks, target_networks, policy_optimizer)
+
+                metrics['policy_loss'] = policy_loss
+
+                return carry, metrics
+
+            _, metrics = nnx.scan(optimize_step, in_axes=(nnx.Carry, 0, 0))(
+                (training_state.networks, training_state.target_networks, 
+                    training_state.policy_optimizer, training_state.q_func_optimizer), 
+                rngs.fork(split=optimize_steps_per_iter),
+                jnp.arange(optimize_steps_per_iter)
             )
 
             metrics = jax.tree.map(lambda x: jnp.mean(x), metrics)
+            metrics['policy_loss'] *= optimize_steps_per_iter / policy_updates_per_iter
             metrics['steps'] = training_state.steps
-
-            # update target if enough steps have passed (not using polyak averaging)
-            if self.hyperparameters.polyak_tau is None:
-                update_target = training_state.steps % self.hyperparameters.target_update_interval < total_steps_per_iter
-                nnx.update(training_state.target_networks, jax.lax.cond(update_target, 
-                    lambda opt_state, target_state: opt_state, 
-                    lambda opt_state, target_state: target_state,
-                    nnx.state(training_state.networks), nnx.state(training_state.target_networks)
-                ))
 
             return training_state, metrics
 
-        if self.hyperparameters.polyak_tau is not None: # convert datatypes to floats
-            nnx.update(training_state.target_networks, optax.incremental_update(
-                nnx.state(training_state.target_networks), nnx.state(training_state.target_networks), 0.5))
+        # ensure target network datatypes are all floats
+        nnx.update(training_state.target_networks, optax.incremental_update(
+            nnx.state(training_state.target_networks), nnx.state(training_state.target_networks), 0.5))
 
         # phases must match phases at the end of train_iteration
         set_algo_phase(training_state.target_networks, AlgoPhase.EVAL)

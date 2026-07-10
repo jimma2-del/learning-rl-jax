@@ -2,6 +2,8 @@ from typing import Callable, Sequence, TypeVar, Any
 
 import math
 
+import numpy as np
+
 import jax
 import jax.numpy as jnp
 from jax.typing import ArrayLike
@@ -87,13 +89,14 @@ def unflatten_batched_tree(unbatched_shapes_dtypes: TInput, arr: jax.Array) -> T
     leaves_shape_dtype, treedef = jax.tree.flatten(unbatched_shapes_dtypes)
 
     sizes = [ math.prod(leaf.shape) for leaf in leaves_shape_dtype ]
-    end_is = jnp.cumsum(jnp.array(sizes))
+    end_is = np.cumsum(sizes)
 
     assert arr.shape[-1] == end_is[-1], \
         f"Expected flattened (trailing) dimension of {end_is[-1]}, got {arr.shape[-1]}."
 
     flat_leaves = jnp.split(arr, end_is[:-1], axis=-1)
-    leaves = [ leaf.reshape(shape_dtype.shape) for leaf, shape_dtype in zip(flat_leaves, leaves_shape_dtype) ]
+    leaves = [ leaf.reshape(arr.shape[:-1] + shape_dtype.shape) 
+        for leaf, shape_dtype in zip(flat_leaves, leaves_shape_dtype) ]
 
     return jax.tree.unflatten(treedef, leaves)
 

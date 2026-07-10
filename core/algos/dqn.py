@@ -45,9 +45,9 @@ class Hyperparameters:
         # lowering this saves memory by allocating less space for truncated observations in the replay buffer
         # however, truncated timesteps exceeding the specified limit will be treated as terminated
 
-    train_freq: int = 4 # does around 1 gradient step per train_freq env steps
-        # if n_envs > train_freq, we take 1 step in each env, followed by ceil(n_envs / train_freq) gradient steps
-        # NOTE: will round up or down if not divisible evenly
+    train_freq: int = 4 # does approximately 1 optimize step per train_freq environment steps
+        # if n_envs > train_freq, we take 1 step in each env, followed by multiple optimize steps
+        # NOTE: actual number of env/optimize steps taken may be rounded if not evenly divisible
 
     target_update_interval: int = 10_000 # environment steps
 
@@ -287,7 +287,7 @@ class DQN(Generic[TEnvState, TEnvObs]):
 
         steps_per_env_per_iter = math.ceil(self.hyperparameters.train_freq / self.hyperparameters.n_envs)
         total_steps_per_iter = steps_per_env_per_iter * self.hyperparameters.n_envs
-        learn_steps_per_iter = math.ceil(self.hyperparameters.n_envs / self.hyperparameters.train_freq)
+        optimize_steps_per_iter = math.ceil(self.hyperparameters.n_envs / self.hyperparameters.train_freq)
 
         def train_iteration(training_state: TrainingState[TEnvState, TEnvObs, TTrunkOut], rngs: nnx.Rngs) \
                 -> tuple[TrainingState[TEnvState, TEnvObs, TTrunkOut], dict[Any, Any]]:
@@ -310,7 +310,7 @@ class DQN(Generic[TEnvState, TEnvObs]):
             ## update q functions ##
             set_algo_phase(training_state.networks, AlgoPhase.OPTIMIZE)
 
-            def learn_step(carry: tuple[Networks, Networks, nnx.Optimizer], rngs: nnx.Rngs) \
+            def optimize_step(carry: tuple[Networks, Networks, nnx.Optimizer], rngs: nnx.Rngs) \
                     -> tuple[tuple[Networks, Networks, nnx.Optimizer], dict[Any, Any]]:
                 networks, target_networks, optimizer = carry
 
@@ -357,9 +357,9 @@ class DQN(Generic[TEnvState, TEnvObs]):
 
                 return carry, { 'q_loss': loss }
 
-            _, metrics = nnx.scan(learn_step)(
+            _, metrics = nnx.scan(optimize_step)(
                 (training_state.networks, training_state.target_networks, training_state.optimizer), 
-                rngs.fork(split=learn_steps_per_iter)
+                rngs.fork(split=optimize_steps_per_iter)
             )
 
             metrics = jax.tree.map(lambda x: jnp.mean(x), metrics)
