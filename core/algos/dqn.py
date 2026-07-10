@@ -17,7 +17,7 @@ from core.utils.buffers import CircularBufferWithOptionalData
 from core.utils.func_utils import try_call, optionally_pass, override_signature
 from core.utils.nnx_modules import MLP, RunningMeanVarNorm, Pipe
 
-from core.algos.base import Scheduleable, GreedyQActor, AlgoPhase, set_algo_phase
+from core.algos.base import Scheduleable, GreedyQActor, AlgoPhase, set_algo_phase, with_grad_clip
 
 from core.envs.base import Environment, Space
 from core.envs.wrappers import AutoResetWrapper
@@ -46,7 +46,7 @@ class Hyperparameters:
         # however, truncated timesteps exceeding the specified limit will be treated as terminated
 
     train_freq: int = 4 # does around 1 gradient step per train_freq env steps
-        # NOTE: if n_envs > train_freq, we take 1 step in each env, followed by multiple gradient steps
+        # if n_envs > train_freq, we take 1 step in each env, followed by ceil(n_envs / train_freq) gradient steps
         # NOTE: will round up or down if not divisible evenly
 
     target_update_interval: int = 10_000 # environment steps
@@ -147,35 +147,23 @@ class DQN(Generic[TEnvState, TEnvObs]):
             terminated = jax.ShapeDtypeStruct(shape=(), dtype=jnp.bool),
         )
 
-    def make_default_optax_optimizer(self) -> optax.GradientTransformationExtraArgs:
+    def make_optax_optimizer(self, base: Callable[..., optax.GradientTransformation] = optax.adamw) \
+            -> optax.GradientTransformationExtraArgs:
         optimizer_params = self.resolve_optimizer_params(0)
 
         @optax.inject_hyperparams
         @override_signature(**optimizer_params)
         def make_optimizer(**kwargs):
-            transforms = []
-
-            if 'max_grad_norm' in kwargs:
-                transforms.append(optax.clip_by_global_norm(kwargs['max_grad_norm']))
-                del kwargs['max_grad_norm']
-
-            transforms.append(optax.adamw(**kwargs))
-
-            return optax.chain(*transforms)
+            return with_grad_clip(base)(**kwargs)
 
         return make_optimizer(**optimizer_params)
 
-    def resolve_optimizer_params(self, steps: int = 0):
-        optimizer_params: dict = jax.tree.map(lambda x: try_call(x, steps), 
-            self.hyperparameters.optimizer_params)
-
-        if 'max_grad_norm' not in optimizer_params and self.hyperparameters.max_grad_norm is not None:
-            optimizer_params['max_grad_norm'] = try_call(self.hyperparameters.max_grad_norm, steps)
-
-        if 'learning_rate' not in optimizer_params:
-            optimizer_params['learning_rate'] = try_call(self.hyperparameters.learning_rate, steps)
-
-        return optimizer_params
+    def resolve_optimizer_params(self, steps: int = 0) -> dict[str, Any]:
+        return jax.tree.map(lambda x: try_call(x, steps), {
+            'learning_rate': self.hyperparameters.learning_rate,
+            'max_grad_norm': self.hyperparameters.max_grad_norm,
+            **self.hyperparameters.optimizer_params
+        })
 
     def make_actor(self, 
         networks: Networks[TEnvObs, TTrunkOut] | None = None, 
@@ -204,7 +192,7 @@ class DQN(Generic[TEnvState, TEnvObs]):
             networks = Networks.make_default(rngs, self.env.observation_space, self.env.action_space)
 
         if optax_optimizer is None:
-            optax_optimizer = self.make_default_optax_optimizer()
+            optax_optimizer = self.make_optax_optimizer()
 
         optimizer = nnx.Optimizer(networks, optax_optimizer)
 

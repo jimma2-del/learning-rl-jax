@@ -1,4 +1,4 @@
-from typing import TypeVar, Generic, Any, Sequence, Self, Callable, Mapping
+from typing import TypeVar, Generic, Any, Sequence, Self, Callable, Mapping, Literal
 
 import math
 
@@ -17,7 +17,7 @@ from core.utils.buffers import CircularBufferWithOptionalData
 from core.utils.func_utils import try_call, optionally_pass, override_signature
 from core.utils.nnx_modules import MLP, RunningMeanVarNorm, Pipe
 
-from core.algos.base import Scheduleable, AlgoPhase, set_algo_phase, DeterministicPolicyActor
+from core.algos.base import Scheduleable, AlgoPhase, set_algo_phase, DeterministicPolicyActor, with_grad_clip
 
 from core.envs.base import Environment, Space
 from core.envs.wrappers import AutoResetWrapper
@@ -31,7 +31,10 @@ class Hyperparameters:
 
     learning_rate: Scheduleable[float] = 2.5e-4
     max_grad_norm: Scheduleable[float] | None = 10.0
-    optimizer_params: Mapping[str, Scheduleable[float]] = field(
+
+    policy_optimizer_params: Mapping[str, Scheduleable[float]] = field(
+        default_factory=lambda: { 'weight_decay': 0.0 })
+    q_func_optimizer_params: Mapping[str, Scheduleable[float]] = field(
         default_factory=lambda: { 'weight_decay': 0.0 })
 
     batch_size: int = 32
@@ -59,6 +62,19 @@ TEnvAction = TypeVar("TEnvAction")
 TTrunkOut = TypeVar("TTrunkOut")
 
 class Networks(nnx.Module, Generic[TEnvObs, TEnvAction, TTrunkOut]):
+    """Module containing networks for TD3.
+
+    Observations are first processed using a shared `obs_trunk`.
+        By default, `obs_trunk` only applies standardization and flattening, with no learnable parameters.
+
+    The trunk output is then fed to the output heads: `policy_head`, `q1_head`, and `q2_head`.
+        Additionally, an action is passed to `q1_head` and `q2_head` as a second argument. 
+        Actions are given raw; the head is responsible for flattening.
+    
+    NOTE: Unlike in on-policy algorithms, in off-policy algorithms including TD3, the shared `obs_trunk` 
+        is only updated during Q function updates; it is kept frozen during policy updates.
+    """
+
     def __init__(self, 
         obs_trunk: Callable[[TEnvObs], TTrunkOut], 
         policy_head: Callable[[TTrunkOut], TEnvAction], 
@@ -146,7 +162,8 @@ class TrainingState(Generic[TEnvState, TEnvObs, TEnvAction, TTrunkOut]):
     env_states: TEnvState
 
     networks: Networks[TEnvObs, TEnvAction, TTrunkOut]
-    optimizer: nnx.Optimizer
+    policy_optimizer: nnx.Optimizer # policy updates only affect the policy head, NOT the shared trunk
+    q_func_optimizer: nnx.Optimizer # q func updates affect both the q heads and the shared trunk
 
     target_networks: Networks[TEnvObs, TEnvAction, TTrunkOut]
     replay_buffer: CircularBufferWithOptionalData[ReplayTimestep[TEnvObs, TEnvAction], TEnvObs]
@@ -174,35 +191,30 @@ class TD3(Generic[TEnvState, TEnvObs, TEnvAction]):
             terminated = jax.ShapeDtypeStruct(shape=(), dtype=jnp.bool),
         )
 
-    def make_default_optax_optimizer(self) -> optax.GradientTransformationExtraArgs:
-        optimizer_params = self.resolve_optimizer_params(0)
+    def make_optax_optimizer(self, 
+        network_name: Literal['policy', 'q_func'],
+        base: Callable[..., optax.GradientTransformation] = optax.adamw
+    ) -> optax.GradientTransformationExtraArgs:
+        optimizer_params = self.resolve_optimizer_params(network_name, 0)
 
         @optax.inject_hyperparams
         @override_signature(**optimizer_params)
         def make_optimizer(**kwargs):
-            transforms = []
-
-            if 'max_grad_norm' in kwargs:
-                transforms.append(optax.clip_by_global_norm(kwargs['max_grad_norm']))
-                del kwargs['max_grad_norm']
-
-            transforms.append(optax.adamw(**kwargs))
-
-            return optax.chain(*transforms)
+            return with_grad_clip(base)(**kwargs)
 
         return make_optimizer(**optimizer_params)
 
-    def resolve_optimizer_params(self, steps: int = 0):
-        optimizer_params: dict = jax.tree.map(lambda x: try_call(x, steps), 
-            self.hyperparameters.optimizer_params)
+    def resolve_optimizer_params(self, network_name: Literal['policy', 'q_func'], steps: int = 0) -> dict[str, Any]:
+        additional_params = { 
+            'policy': self.hyperparameters.policy_optimizer_params, 
+            'q_func': self.hyperparameters.q_func_optimizer_params 
+        }
 
-        if 'max_grad_norm' not in optimizer_params and self.hyperparameters.max_grad_norm is not None:
-            optimizer_params['max_grad_norm'] = try_call(self.hyperparameters.max_grad_norm, steps)
-
-        if 'learning_rate' not in optimizer_params:
-            optimizer_params['learning_rate'] = try_call(self.hyperparameters.learning_rate, steps)
-
-        return optimizer_params
+        return jax.tree.map(lambda x: try_call(x, steps), {
+            'learning_rate': self.hyperparameters.learning_rate,
+            'max_grad_norm': self.hyperparameters.max_grad_norm,
+            **additional_params[network_name]
+        })
 
     def make_actor(self, 
         networks: Networks[TEnvObs, TTrunkOut] | None = None, 
@@ -223,24 +235,33 @@ class TD3(Generic[TEnvState, TEnvObs, TEnvAction]):
     def init_training_state(self,
         rngs: nnx.Rngs,
         networks: Networks[TEnvObs, TEnvAction, TTrunkOut] | None = None,
-        optax_optimizer: optax.GradientTransformationExtraArgs | None = None,
+        policy_optax_optimizer: optax.GradientTransformationExtraArgs | None = None,
+        q_func_optax_optimizer: optax.GradientTransformationExtraArgs | None = None,
         replay_buffer: CircularBufferWithOptionalData[ReplayTimestep[TEnvObs, TEnvAction], TEnvObs] | None = None,
         prefill_steps: int = 10_000,
     ) -> TrainingState[TEnvState, TEnvObs, TEnvAction, TTrunkOut]:
         if networks is None: 
             networks = Networks.make_default(rngs, self.env.observation_space, self.env.action_space)
 
-        if optax_optimizer is None:
-            optax_optimizer = self.make_default_optax_optimizer()
+        optimizers = []
 
-        optimizer = nnx.Optimizer(networks, optax_optimizer)
+        for network_name, network, optax_optimizer in (
+            ('policy', networks.policy_head, policy_optax_optimizer), 
+            ('q_func', networks, q_func_optax_optimizer)
+        ):
+            if optax_optimizer is None: optax_optimizer = self.make_optax_optimizer(network_name)
+            optimizer = nnx.Optimizer(network, optax_optimizer)
 
-        assert hasattr(optimizer.opt_state, 'hyperparams'), \
-            "`optax_optimizer` must be initialized using a `optax.inject_hyperparams()`-wrapped function."
+            assert hasattr(optimizer.opt_state, 'hyperparams'), \
+                "`optax_optimizer` must be initialized using a `optax.inject_hyperparams()`-wrapped function."
 
-        handled_keys = set(optimizer.opt_state.hyperparams)
-        missing_keys = set(self.resolve_optimizer_params(0)) - handled_keys
-        assert not missing_keys, f"`optax_optimizer` missing hyperparams {missing_keys}; available: {handled_keys}."
+            handled_keys = set(optimizer.opt_state.hyperparams)
+            missing_keys = set(self.resolve_optimizer_params(network_name, 0)) - handled_keys
+            assert not missing_keys, f"`optax_optimizer` missing hyperparams {missing_keys}; available: {handled_keys}."
+
+            optimizers.append(optimizer)
+
+        policy_optimizer, q_func_optimizer = optimizers
 
         target_networks = nnx.clone(networks)
         set_algo_phase(target_networks, AlgoPhase.EVAL)
@@ -272,7 +293,8 @@ class TD3(Generic[TEnvState, TEnvObs, TEnvAction]):
             env_states = env_states,
 
             networks = networks,
-            optimizer = optimizer,
+            policy_optimizer = policy_optimizer,
+            q_func_optimizer = q_func_optimizer,
 
             target_networks = target_networks,
             replay_buffer = replay_buffer,
@@ -342,9 +364,13 @@ class TD3(Generic[TEnvState, TEnvObs, TEnvAction]):
             training_state.replay_buffer = training_state.replay_buffer.insert(timesteps, trunc, trunc_obs)
 
             # update optimizer schedules using env steps (rather than default grad steps)
-            optimizer_params = self.resolve_optimizer_params(training_state.steps)
-            for key, new_val in optimizer_params.items():
-                training_state.optimizer.opt_state.hyperparams[key].value = new_val
+            for network_name, optimizer in (
+                ('policy', training_state.policy_optimizer), 
+                ('q_func', training_state.q_func_optimizer)
+            ):
+                optimizer_params = self.resolve_optimizer_params(network_name, training_state.steps)
+                for key, new_val in optimizer_params.items():
+                    optimizer.opt_state.hyperparams[key].value = new_val
 
             ## update q functions ##
             set_algo_phase(training_state.networks, AlgoPhase.OPTIMIZE)
@@ -352,9 +378,9 @@ class TD3(Generic[TEnvState, TEnvObs, TEnvAction]):
             target_noise = try_call(self.hyperparameters.target_noise, steps)
             target_noise_clip = try_call(self.hyperparameters.target_noise_clip, steps)
 
-            def learn_step(carry: tuple[Networks, Networks, nnx.Optimizer], rngs: nnx.Rngs) \
-                    -> tuple[tuple[Networks, Networks, nnx.Optimizer], dict[Any, Any]]:
-                networks, target_networks, optimizer = carry
+            def learn_step(carry: tuple[Networks, Networks, nnx.Optimizer, nnx.Optimizer], rngs: nnx.Rngs) \
+                    -> tuple[tuple[Networks, Networks, nnx.Optimizer, nnx.Optimizer], dict[Any, Any]]:
+                networks, target_networks, policy_optimizer, q_func_optimizer = carry
 
                 # sample replay buffer
                 samp_timesteps, samp_trunc, samp_trunc_obs = training_state.replay_buffer.sample(
@@ -383,18 +409,15 @@ class TD3(Generic[TEnvState, TEnvObs, TEnvAction]):
                 target_qs = first_timestep.reward \
                     + try_call(self.hyperparameters.discount_rate, training_state.steps)*next_q
 
-                def loss_func(networks: nnx.Module, rngs: nnx.Rngs):
-                    pred_qs_all_actions = optionally_pass(networks, rngs=rngs)(first_timestep.obs)
-                        # q-net returns a q-value for every action
-                    pred_qs = pred_qs_all_actions[jnp.arange(self.hyperparameters.batch_size), first_timestep.action]
-                        # take only the q-value corresponding to the chosen action
+                def q_loss_func(networks: nnx.Module, rngs: nnx.Rngs):
+                    _, q1, q2 = optionally_pass(networks, rngs=rngs)(first_timestep.obs, first_timestep.action)
+                    q_losses = [ jnp.mean(jnp.power(target_qs - q, 2)) for q in (q1, q2) ] # MSE loss
 
-                    # simple MSE loss
-                    return jnp.mean(jnp.power(target_qs - pred_qs, 2))
+                    return sum(q_losses), { f'q1_loss': q_losses[0], 'q2_loss': q_losses[1] }
 
-                loss_grad_func = nnx.value_and_grad(loss_func)
-                loss, grads = loss_grad_func(networks, rngs)
-                optimizer.update(grads) 
+                q_loss_grad_func = nnx.grad(q_loss_func, has_aux=True)
+                q_grads, metrics = q_loss_grad_func(networks, rngs)
+                q_func_optimizer.update(q_grads) 
 
                 # update target network if using polyak averaging
                 if self.hyperparameters.polyak_tau is not None:

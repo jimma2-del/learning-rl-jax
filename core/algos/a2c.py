@@ -17,7 +17,7 @@ from core.utils.misc import compacting_mask
 from core.utils import RunningMeanVar
 from core.utils.nnx_modules import MLP, RunningMeanVarNorm, ActionDistributionHead, Pipe
 
-from core.algos.base import Scheduleable, StochasticPolicyActor, Policy, ValueFunc, set_algo_phase, AlgoPhase
+from core.algos.base import Scheduleable, StochasticPolicyActor, set_algo_phase, AlgoPhase, with_grad_clip
 
 from core.envs.base import Environment, Space
 from core.envs.wrappers import AutoResetWrapper, SquashContinuousActionsToBoundsWrapper
@@ -142,35 +142,23 @@ class A2C(Generic[TEnvState, TEnvObs]):
         self.env = env
         self.hyperparameters = hyperparameters
 
-    def make_default_optax_optimizer(self) -> optax.GradientTransformationExtraArgs:
+    def make_optax_optimizer(self, base: Callable[..., optax.GradientTransformation] = optax.adamw) \
+            -> optax.GradientTransformationExtraArgs:
         optimizer_params = self.resolve_optimizer_params(0)
 
         @optax.inject_hyperparams
         @override_signature(**optimizer_params)
         def make_optimizer(**kwargs):
-            transforms = []
-
-            if 'max_grad_norm' in kwargs:
-                transforms.append(optax.clip_by_global_norm(kwargs['max_grad_norm']))
-                del kwargs['max_grad_norm']
-
-            transforms.append(optax.adamw(**kwargs))
-
-            return optax.chain(*transforms)
+            return with_grad_clip(base)(**kwargs)
 
         return make_optimizer(**optimizer_params)
 
-    def resolve_optimizer_params(self, steps: int = 0):
-        optimizer_params: dict = jax.tree.map(lambda x: try_call(x, steps), 
-            self.hyperparameters.optimizer_params)
-
-        if 'max_grad_norm' not in optimizer_params and self.hyperparameters.max_grad_norm is not None:
-            optimizer_params['max_grad_norm'] = try_call(self.hyperparameters.max_grad_norm, steps)
-
-        if 'learning_rate' not in optimizer_params:
-            optimizer_params['learning_rate'] = try_call(self.hyperparameters.learning_rate, steps)
-
-        return optimizer_params
+    def resolve_optimizer_params(self, steps: int = 0) -> dict[str, Any]:
+        return jax.tree.map(lambda x: try_call(x, steps), {
+            'learning_rate': self.hyperparameters.learning_rate,
+            'max_grad_norm': self.hyperparameters.max_grad_norm,
+            **self.hyperparameters.optimizer_params
+        })
 
     def make_actor(self, 
         networks: Networks[TEnvObs, TEnvAction, TTrunkOut] | None = None, 
@@ -198,7 +186,7 @@ class A2C(Generic[TEnvState, TEnvObs]):
             networks = Networks.make_default(rngs, self.env.observation_space, self.env.action_space)
 
         if optax_optimizer is None:
-            optax_optimizer = self.make_default_optax_optimizer()
+            optax_optimizer = self.make_optax_optimizer()
 
         optimizer = nnx.Optimizer(networks, optax_optimizer)
 
@@ -345,8 +333,8 @@ class A2C(Generic[TEnvState, TEnvObs]):
 
                 return comb_loss, metrics
 
-            loss_grad_func = nnx.value_and_grad(loss_func, has_aux=True)
-            (comb_loss, metrics), grads = loss_grad_func(training_state.networks, rngs)
+            loss_grad_func = nnx.grad(loss_func, has_aux=True)
+            grads, metrics = loss_grad_func(training_state.networks, rngs)
             training_state.optimizer.update(grads) 
 
             metrics = jax.tree.map(lambda x: jnp.mean(x), metrics)

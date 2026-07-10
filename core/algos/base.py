@@ -1,17 +1,23 @@
-from typing import TypeVar, Generic, Protocol, TypeAlias, Sequence, Any
+from typing import TypeVar, Generic, Protocol, TypeAlias, Sequence, Any, Iterable, Mapping, Callable, ParamSpec
 from enum import Enum
+from functools import wraps
+
+from abc import ABC, abstractmethod
+import dataclasses
 
 import jax.numpy as jnp
 import jax
 
 from jax.typing import ArrayLike
-from chex import dataclass
+import chex
 
 from flax import nnx
+import optax
 
-from core.utils.func_utils import optionally_pass
+from core.utils.func_utils import optionally_pass, override_signature, try_call
 from core.utils.batch_utils import get_tree_batch_dims
-from core.envs.base import Space
+from core.envs.base import Space, Environment
+from core.envs.utils import Actor
 
 TScheduleValue = TypeVar('TScheduleValue')
 
@@ -163,30 +169,65 @@ class ValueFuncWithoutRngs(Generic[TEnvObs], Protocol):
     def __call__(self, obs: TEnvObs) -> jax.Array: ...
 ValueFunc: TypeAlias = ValueFuncWithRngs[TEnvObs] | ValueFuncWithoutRngs[TEnvObs]
 
-"""UNOFFICIAL Algo spec; not currently enforced, subject to change
+P = ParamSpec('P')
 
-class Algo(Generic[TTrainingState, TActor (bound=core.env.utils.Actor), TEnvState, TEnvObs, TEnvAction]):
-    
-    attributes:
-        env
+class OptimizerFactoryWithGradClip(Generic[P], Protocol):
+    def __call__(self, *args: P.args, max_grad_norm: Scheduleable[float] | None = None, 
+        **kwargs: P.kwargs) -> optax.GradientTransformationExtraArgs: ...
 
-    methods:
-        __init__(env, *nonstandard params (eg. hyperparameters))
-        init_training_state(rngs, networks, optional params (eg. replay buffer state, prefill steps)) -> TTrainingState
-        train(rngs, training_state, steps) -> TTrainingState, metrics dict
+def with_grad_clip(optimizer_factory: Callable[P, optax.GradientTransformation]) -> OptimizerFactoryWithGradClip[P]:
+    """Adds a `max_grad_norm` keyword parameter to the factory, which if set (and is not None),
+        adds a `optax.clip_by_global_norm(max_grad_norm)` transform to the front of the returned optimizer."""
 
-        make_actor(networks (or TrainingState?), optional rngs, optional params?)? 
-            can be used as dummy for loading orbax checkpoints if only the actor was saved
+    @wraps(optimizer_factory)
+    def make_optimizer(*args: P.args, max_grad_norm: Scheduleable[float] | None = None, 
+            **kwargs: P.kwargs) -> optax.GradientTransformationExtraArgs:
 
-        save/load as a parent method? option to only include actor
+        return optax.chain(
+            *( ( optax.clip_by_global_norm(max_grad_norm), ) 
+                if max_grad_norm is not None else () ),
+            optimizer_factory(*args, **kwargs),
+        )
 
-@chex.dataclass
-class TrainingState(ABC, Generic[TEnvState, TActor]): should this be standardized?
-    attributes: steps: ArrayLike (jnp int scalar), env_states: TEnvState,
+    return make_optimizer
 
-    not enforced as not all algorithms have it: `networks`, `optimizer`
-        - `networks` is an nnx.Module which holds all networks that are trained by `optimizer`;
-            use this name for consistency
+### UNOFFICIAL Algo spec; not currently enforced, subject to change ###
 
-    for off-policy algorithms: `target_networks`
-"""
+# TEnvState = TypeVar('TEnvState')
+# TRenderState = TypeVar('TRenderState')
+
+# @chex.dataclass
+# class TrainingState(Generic[TEnvState]):
+#     """Base class for algo training states.
+#     Common additional fields include: networks, optimizer, target_networks, replay_buffer, etc."""
+#     steps: jax.Array
+#     env_states: TEnvState
+
+# @chex.dataclass
+# class Hyperparameters:
+#     """Base class for algo hyperparmeters."""
+#     n_envs: int = 256
+#     discount_rate: Scheduleable[float] = 0.99
+
+#     learning_rate: Scheduleable[float] = 2.5e-4
+#     max_grad_norm: Scheduleable[float] | None = 10.0
+#     optimizer_params: Mapping[str, Scheduleable[float]] = field(
+#         default_factory=lambda: { 'weight_decay': 0.0 })
+
+# class Algo(Generic[TEnvState, TEnvObs, TEnvAction, TRenderState]):
+
+#     def __init__(self,
+#         env: Environment[TEnvState, TEnvObs, TEnvAction, TRenderState], 
+#         hyperparameters: Hyperparameters
+#     ) -> None:
+#         self.env = env
+#         self.hyperparameters = hyperparameters
+
+#     # def init_training_state(rngs, networks, optional params (eg. replay buffer state, prefill steps)) -> TTrainingState
+
+#     def train(rngs, training_state, steps) -> TTrainingState, metrics dict
+
+#     make_actor(networks (or TrainingState?), optional rngs, optional params?)? 
+#         can be used as dummy for loading orbax checkpoints if only the actor was saved
+
+#     save/load as a parent method? option to only include actor
