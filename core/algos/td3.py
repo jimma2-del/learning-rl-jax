@@ -126,7 +126,7 @@ class Networks(nnx.Module, Generic[TEnvObs, TEnvAction, TTrunkOut]):
     @staticmethod
     def make_default_policy_head(
         rngs: nnx.Rngs, input_dim: int, action_space: Space[ArrayLike],
-        hidden_dims: Sequence[int] = (128, 128), do_layer_norm: bool = True, activation_func=nnx.tanh
+        hidden_dims: Sequence[int] = (400, 300), do_layer_norm: bool = True, activation_func=nnx.relu
     ) -> Callable[[TTrunkOut], TEnvAction]:
         mlp = MLP(
             rngs, (input_dim, *hidden_dims, action_space.flattened_dim), 
@@ -138,7 +138,7 @@ class Networks(nnx.Module, Generic[TEnvObs, TEnvAction, TTrunkOut]):
     @staticmethod
     def make_default_q_head(
         rngs: nnx.Rngs, input_dim: int, action_space: Space[ArrayLike],
-        hidden_dims: Sequence[int] = (128, 128), do_layer_norm: bool = True, activation_func=nnx.relu
+        hidden_dims: Sequence[int] = (400, 300), do_layer_norm: bool = True, activation_func=nnx.relu
     ) -> Callable[[TTrunkOut], jax.Array]:
         return Pipe(
             lambda trunk_out, action: jnp.concatenate((trunk_out, action_space.flatten(action)), axis=-1),

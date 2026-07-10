@@ -125,7 +125,7 @@ class Networks(nnx.Module, Generic[TEnvObs, TEnvAction, TTrunkOut]):
     @staticmethod
     def make_default_value_head(
         rngs: nnx.Rngs, input_dim: int,
-        hidden_dims: Sequence[int] = (128, 128), do_layer_norm: bool = True, activation_func=nnx.relu
+        hidden_dims: Sequence[int] = (256, 256), do_layer_norm: bool = True, activation_func=nnx.tanh
     ) -> Callable[[TTrunkOut], jax.Array]:
         return Pipe(
             MLP(
