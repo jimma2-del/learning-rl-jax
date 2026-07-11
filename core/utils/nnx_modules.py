@@ -197,7 +197,7 @@ class ActionDistributionHead(nnx.Module, Generic[TEnvAction]):
         
         if do_state_independent_stds:
             self.state_independent_log_stds = nnx.Param(jnp.full(self.num_continuous, jnp.log(0.5)))
-                # stds should be initialized small, 0.5 is best; https://arxiv.org/abs/2006.05990
+                # stds should be initialized small; https://arxiv.org/abs/2006.05990
 
     def __call__(self, x: jax.Array, rngs=None):
         leaves = []
@@ -231,6 +231,6 @@ class ActionDistributionHead(nnx.Module, Generic[TEnvAction]):
                         jnp.broadcast_to(state_indep_log_stds, means.shape)
                     ), axis=-1))
                 else:
-                    leaves.append(vals.reshape(leaf_descrip['shape']))
+                    leaves.append(vals.reshape(vals.shape[:-1] + leaf_descrip['shape']))
 
         return jax.tree.unflatten(self.action_space.treedef, leaves)

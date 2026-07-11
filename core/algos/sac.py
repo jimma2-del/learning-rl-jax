@@ -16,9 +16,9 @@ import optax
 from core.utils import RunningMeanVar
 from core.utils.buffers import CircularBufferWithOptionalData
 from core.utils.func_utils import try_call, optionally_pass, override_signature
-from core.utils.nnx_modules import MLP, RunningMeanVarNorm, Pipe
+from core.utils.nnx_modules import MLP, RunningMeanVarNorm, Pipe, ActionDistributionHead
 
-from core.algos.base import Scheduleable, AlgoPhase, set_algo_phase, DeterministicPolicyActor, with_grad_clip
+from core.algos.base import Scheduleable, AlgoPhase, set_algo_phase, StochasticPolicyActor, with_grad_clip
 
 from core.envs.base import Environment, Space
 from core.envs.wrappers import AutoResetWrapper
@@ -37,6 +37,8 @@ class Hyperparameters:
         default_factory=lambda: { 'weight_decay': 0.0 })
     q_func_optimizer_params: Mapping[str, Scheduleable[float]] = field(
         default_factory=lambda: { 'weight_decay': 0.0 })
+    ent_coef_optimizer_params: Mapping[str, Scheduleable[float]] = field(
+        default_factory=lambda: { 'weight_decay': 0.0 })
 
     batch_size: int = 32
 
@@ -48,15 +50,24 @@ class Hyperparameters:
     train_freq: int = 4 # does approximately 1 optimize step per train_freq environment steps
         # if n_envs > train_freq, we take 1 step in each env, followed by multiple optimize steps
         # NOTE: actual number of env/optimize steps taken may be rounded if not evenly divisible
-    policy_delay: int = 2 # updates the policy once every `policy_delay` Q-function updates
+    policy_delay: int = 1 # updates the policy once every `policy_delay` Q-function updates, as in TD3
         # NOTE: actual number of updates done may be rounded if not evenly divisible
 
     polyak_tau: Scheduleable[float] | None = None # if not None, OVERRIDES `target_update_interval``
         # target is updated after EVERY gradient step if not None
 
-    exploration_noise: Scheduleable[float] = 0.1 # std
-    target_noise: Scheduleable[float] = 0.2 # std
-    target_noise_clip: Scheduleable[float] = 0.5
+    ent_coef: Scheduleable[float] | None = None # entropy regularization coefficient
+        # leave as None for automatic tuning based on target_entropy
+    target_entropy: Scheduleable[float] | None = None # used for automatic tuning when ent_coef=None
+        # if None, this will be set to `-action_space.flattened_dim`
+
+class LogEntCoef(nnx.Module):
+    def __init__(self, log_ent_coef: ArrayLike = jnp.array(0.0)):
+        self.log_ent_coef = nnx.Param(jnp.array(log_ent_coef, dtype=jnp.float32))
+
+    @property
+    def value(self):
+        return self.log_ent_coef.value
 
 TEnvState = TypeVar("TEnvState")
 TEnvObs = TypeVar("TEnvObs")
@@ -64,7 +75,7 @@ TEnvAction = TypeVar("TEnvAction")
 TTrunkOut = TypeVar("TTrunkOut")
 
 class Networks(nnx.Module, Generic[TEnvObs, TEnvAction, TTrunkOut]):
-    """Module containing networks for TD3.
+    """Module containing networks for SAC.
 
     Observations are first processed using a shared `obs_trunk`.
         By default, `obs_trunk` only applies standardization and flattening, with no learnable parameters.
@@ -73,7 +84,7 @@ class Networks(nnx.Module, Generic[TEnvObs, TEnvAction, TTrunkOut]):
         Additionally, an action is passed to each element of `q_heads` as a second argument. 
         Actions are given raw; the head is responsible for flattening.
     
-    NOTE: Unlike in on-policy algorithms, in off-policy algorithms including TD3, the shared `obs_trunk` 
+    NOTE: Unlike in on-policy algorithms, in off-policy algorithms including SAC, the shared `obs_trunk` 
         is only updated during Q function updates; it is kept frozen during policy updates.
     """
 
@@ -81,10 +92,13 @@ class Networks(nnx.Module, Generic[TEnvObs, TEnvAction, TTrunkOut]):
         obs_trunk: Callable[[TEnvObs], TTrunkOut], 
         policy_head: Callable[[TTrunkOut], TEnvAction], 
         q_heads: Sequence[Callable[[TTrunkOut, TEnvAction], jax.Array]],
+        log_ent_coef: ArrayLike = jnp.array(0.0),
     ) -> None:
         self.obs_trunk = obs_trunk
         self.policy_head = policy_head
         self.q_heads = q_heads
+
+        self.log_ent_coef = LogEntCoef(log_ent_coef)
 
     @classmethod
     def make_default(cls, rngs: nnx.Rngs, observation_space: Space[TEnvObs], action_space: Space[ArrayLike]) -> Self:
@@ -115,19 +129,21 @@ class Networks(nnx.Module, Generic[TEnvObs, TEnvAction, TTrunkOut]):
     @staticmethod
     def make_default_policy_head(
         rngs: nnx.Rngs, input_dim: int, action_space: Space[ArrayLike],
-        hidden_dims: Sequence[int] = (400, 300), do_layer_norm: bool = True, activation_func=nnx.relu
+        hidden_dims: Sequence[int] = (256, 256), do_layer_norm: bool = True, activation_func=nnx.relu
     ) -> Callable[[TTrunkOut], TEnvAction]:
+        head = ActionDistributionHead(action_space, do_state_independent_stds=False)
+
         mlp = MLP(
-            rngs, (input_dim, *hidden_dims, action_space.flattened_dim), 
+            rngs, (input_dim, *hidden_dims, head.input_dim), 
             do_layer_norm=do_layer_norm, activation_func=activation_func
         )
 
-        return Pipe(mlp, action_space.unflatten, action_space.squash_continuous_to_bounds)    
+        return Pipe(mlp, head)   
 
     @staticmethod
     def make_default_q_head(
         rngs: nnx.Rngs, input_dim: int, action_space: Space[ArrayLike],
-        hidden_dims: Sequence[int] = (400, 300), do_layer_norm: bool = True, activation_func=nnx.relu
+        hidden_dims: Sequence[int] = (256, 256), do_layer_norm: bool = True, activation_func=nnx.relu
     ) -> Callable[[TTrunkOut], jax.Array]:
         return Pipe(
             lambda trunk_out, action: jnp.concatenate((trunk_out, action_space.flatten(action)), axis=-1),
@@ -138,6 +154,26 @@ class Networks(nnx.Module, Generic[TEnvObs, TEnvAction, TTrunkOut]):
             lambda x: jnp.squeeze(x, axis=-1)
         )
 
+
+class TargetNetworks(nnx.Module, Generic[TEnvObs, TEnvAction, TTrunkOut]):
+    """Module containing the target networks for SAC. 
+    Includes `obs_trunk` and `q_heads`; leaves out `policy_head` and `log_ent_coef`."""
+
+    def __init__(self, 
+        obs_trunk: Callable[[TEnvObs], TTrunkOut], 
+        q_heads: Sequence[Callable[[TTrunkOut, TEnvAction], jax.Array]],
+    ) -> None:
+        self.obs_trunk = obs_trunk
+        self.q_heads = q_heads
+
+    @classmethod
+    def from_networks(cls, networks: Networks[TEnvObs, TEnvAction, TTrunkOut]):
+        """Creates a `TargetNetworks` instance from a `Networks` instance.
+
+        IMPORTANT: Does not deep copy parameters. Parameters will still reference the original `Networks` instance.
+            To make an unlinked deep copy, do `nnx.clone(TargetNetworks.from_networks(networks))`.
+        """
+        return cls(networks.obs_trunk, networks.q_heads)
 
 @dataclass(frozen=True)
 class ReplayTimestep(Generic[TEnvObs, TEnvAction]):
@@ -154,12 +190,13 @@ class TrainingState(Generic[TEnvState, TEnvObs, TEnvAction, TTrunkOut]):
     networks: Networks[TEnvObs, TEnvAction, TTrunkOut]
     policy_optimizer: nnx.Optimizer # policy updates only affect the policy head, NOT the shared trunk
     q_func_optimizer: nnx.Optimizer # q func updates affect both the q heads and the shared trunk
+    ent_coef_optimizer: nnx.Optimizer
 
-    target_networks: Networks[TEnvObs, TEnvAction, TTrunkOut]
+    target_networks: TargetNetworks[TEnvObs, TEnvAction, TTrunkOut]
     replay_buffer: CircularBufferWithOptionalData[ReplayTimestep[TEnvObs, TEnvAction], TEnvObs]
 
-class TD3(Generic[TEnvState, TEnvObs, TEnvAction]):
-    """Implementation of TD3."""
+class SAC(Generic[TEnvState, TEnvObs, TEnvAction]):
+    """Implementation of SAC."""
 
     def __init__(self, 
         env: Environment[TEnvState, TEnvObs, TEnvAction],
@@ -168,7 +205,7 @@ class TD3(Generic[TEnvState, TEnvObs, TEnvAction]):
         """IMPORTANT: `env` must already be batched; eg. wrap with `VmapWrapper` BEFORE passing in."""
 
         assert jax.tree.map(lambda s_dt: jnp.issubdtype(s_dt.dtype, jnp.floating), 
-            env.action_space.shapes_dtypes), "Action space for TD3 must be continuous (jnp.floating)."
+            env.action_space.shapes_dtypes), "Action space for SAC must be continuous (jnp.floating)."
 
         self.env = env
         self.hyperparameters = hyperparameters
@@ -182,7 +219,7 @@ class TD3(Generic[TEnvState, TEnvObs, TEnvAction]):
         )
 
     def make_optax_optimizer(self, 
-        network_name: Literal['policy', 'q_func'],
+        network_name: Literal['policy', 'q_func', 'ent_coef'],
         base: Callable[..., optax.GradientTransformation] = optax.adamw
     ) -> optax.GradientTransformationExtraArgs:
         optimizer_params = self.resolve_optimizer_params(network_name, 0)
@@ -194,10 +231,11 @@ class TD3(Generic[TEnvState, TEnvObs, TEnvAction]):
 
         return make_optimizer(**optimizer_params)
 
-    def resolve_optimizer_params(self, network_name: Literal['policy', 'q_func'], steps: int = 0) -> dict[str, Any]:
+    def resolve_optimizer_params(self, network_name: Literal['policy', 'q_func', 'ent_coef'], steps: int = 0) -> dict[str, Any]:
         additional_params = { 
             'policy': self.hyperparameters.policy_optimizer_params, 
-            'q_func': self.hyperparameters.q_func_optimizer_params 
+            'q_func': self.hyperparameters.q_func_optimizer_params,
+            'ent_coef': self.hyperparameters.ent_coef_optimizer_params
         }
 
         return jax.tree.map(lambda x: try_call(x, steps), {
@@ -208,18 +246,19 @@ class TD3(Generic[TEnvState, TEnvObs, TEnvAction]):
 
     def make_actor(self, 
         networks: Networks[TEnvObs, TEnvAction, TTrunkOut] | None = None, 
-        noise: ArrayLike = jnp.array(0.0), 
+        deterministic_sampling: bool = False, squash_continuous: bool = True,
         rngs: nnx.Rngs | None = None
-    ) -> DeterministicPolicyActor[TEnvObs, TEnvAction]:
+    ) -> StochasticPolicyActor[TEnvObs, TEnvAction]:
         """`rngs` is only necessary if `networks` is not provided."""
 
         if networks is None: 
             networks = Networks.make_default(rngs, self.env.observation_space, self.env.action_space)
 
-        return DeterministicPolicyActor(
+        return StochasticPolicyActor(
             Pipe(networks.obs_trunk, networks.policy_head), 
             self.env.action_space,
-            noise=noise
+            deterministic_sampling=deterministic_sampling,
+            squash_continuous=squash_continuous
         )
 
     def init_training_state(self,
@@ -227,6 +266,7 @@ class TD3(Generic[TEnvState, TEnvObs, TEnvAction]):
         networks: Networks[TEnvObs, TEnvAction, TTrunkOut] | None = None,
         policy_optax_optimizer: optax.GradientTransformationExtraArgs | None = None,
         q_func_optax_optimizer: optax.GradientTransformationExtraArgs | None = None,
+        ent_coef_optax_optimizer: optax.GradientTransformationExtraArgs | None = None,
         replay_buffer: CircularBufferWithOptionalData[ReplayTimestep[TEnvObs, TEnvAction], TEnvObs] | None = None,
         prefill_steps: int = 10_000,
     ) -> TrainingState[TEnvState, TEnvObs, TEnvAction, TTrunkOut]:
@@ -237,7 +277,8 @@ class TD3(Generic[TEnvState, TEnvObs, TEnvAction]):
 
         for network_name, network, optax_optimizer in (
             ('policy', networks.policy_head, policy_optax_optimizer), 
-            ('q_func', networks, q_func_optax_optimizer)
+            ('q_func', networks, q_func_optax_optimizer),
+            ('ent_coef', networks.log_ent_coef, ent_coef_optax_optimizer)
         ):
             if optax_optimizer is None: optax_optimizer = self.make_optax_optimizer(network_name)
             optimizer = nnx.Optimizer(network, optax_optimizer)
@@ -251,9 +292,9 @@ class TD3(Generic[TEnvState, TEnvObs, TEnvAction]):
 
             optimizers.append(optimizer)
 
-        policy_optimizer, q_func_optimizer = optimizers
+        policy_optimizer, q_func_optimizer, ent_coef_optimizer = optimizers
 
-        target_networks = nnx.clone(networks)
+        target_networks = nnx.clone(TargetNetworks.from_networks(networks))
         set_algo_phase(target_networks, AlgoPhase.EVAL)
 
         # ensure target network datatypes are floats
@@ -285,6 +326,7 @@ class TD3(Generic[TEnvState, TEnvObs, TEnvAction]):
             networks = networks,
             policy_optimizer = policy_optimizer,
             q_func_optimizer = q_func_optimizer,
+            ent_coef_optimizer = ent_coef_optimizer,
 
             target_networks = target_networks,
             replay_buffer = replay_buffer,
@@ -346,8 +388,7 @@ class TD3(Generic[TEnvState, TEnvObs, TEnvAction]):
             ## sample transitions from environment ##
             set_algo_phase(training_state.networks, AlgoPhase.ROLLOUT)
 
-            actor = self.make_actor(training_state.networks, 
-                noise=try_call(self.hyperparameters.exploration_noise, training_state.steps))
+            actor = self.make_actor(training_state.networks)
             timesteps, trunc, trunc_obs, training_state.env_states = self.rollout(rngs, 
                 actor, steps_per_env_per_iter, training_state.env_states)
             training_state.steps += total_steps_per_iter
@@ -357,7 +398,8 @@ class TD3(Generic[TEnvState, TEnvObs, TEnvAction]):
             # update optimizer schedules using env steps (rather than default grad steps)
             for network_name, optimizer in (
                 ('policy', training_state.policy_optimizer), 
-                ('q_func', training_state.q_func_optimizer)
+                ('q_func', training_state.q_func_optimizer),
+                ('ent_coef', training_state.ent_coef_optimizer)
             ):
                 optimizer_params = self.resolve_optimizer_params(network_name, training_state.steps)
                 for key, new_val in optimizer_params.items():
@@ -366,11 +408,16 @@ class TD3(Generic[TEnvState, TEnvObs, TEnvAction]):
             ## update q functions ##
             set_algo_phase(training_state.networks, AlgoPhase.OPTIMIZE)
 
-            target_noise = try_call(self.hyperparameters.target_noise, steps)
-            target_noise_clip = try_call(self.hyperparameters.target_noise_clip, steps)
+            manual_ent_coef = try_call(self.hyperparameters.ent_coef, training_state.steps)
+            ent_coef = jnp.exp(training_state.networks.log_ent_coef.value) if manual_ent_coef is None else manual_ent_coef
+
+            target_entropy = try_call(self.hyperparameters.target_entropy, training_state.steps)
+            if target_entropy is None: target_entropy = -self.env.action_space.flattened_dim
+
+            POLICY_METRICS_KEYS = { 'policy_loss', 'entropy', 'ent_coef_loss' }
 
             def optimize_step(carry, rngs: nnx.Rngs, i: jax.Array):
-                networks, target_networks, policy_optimizer, q_func_optimizer = carry
+                networks, target_networks, policy_optimizer, q_func_optimizer, ent_coef_optimizer = carry
 
                 # sample replay buffer
                 samp_timesteps, samp_trunc, samp_trunc_obs = training_state.replay_buffer.sample(
@@ -382,14 +429,20 @@ class TD3(Generic[TEnvState, TEnvObs, TEnvAction]):
                     samp_timesteps.obs, samp_trunc_obs, self.env.observation_space.shapes_dtypes)
 
                 # optimize networks
+                next_trunk_out = optionally_pass(networks.obs_trunk, rngs=rngs)(next_obs)
+                next_action_dist = optionally_pass(networks.policy_head, rngs=rngs)(next_trunk_out)
+                next_action_raw = self.env.action_space.sample_distribution(rngs.actions(), next_action_dist, 
+                    squash_continuous=False, log_stds=True)
+                next_action = self.env.action_space.squash_continuous_to_bounds(next_action_raw)
+
                 target_next_trunk_out = optionally_pass(target_networks.obs_trunk, rngs=rngs)(next_obs)
-
-                next_action = optionally_pass(target_networks.policy_head, rngs=rngs)(target_next_trunk_out)
-                next_action = self.env.action_space.add_noise_to_continuous(rngs.actions(), next_action,
-                    noise_std=target_noise, noise_clip=target_noise_clip)
-
                 next_q = reduce(jnp.minimum, [ optionally_pass(q_head, rngs=rngs)(target_next_trunk_out, next_action) 
                     for q_head in target_networks.q_heads ])
+
+                # entropy term
+                next_ent = - self.env.action_space.log_probability(next_action_raw, next_action_dist, 
+                    continuous_squashed=False, log_stds=True)
+                next_q += ent_coef * next_ent
 
                 # zero out q value if terminated
                 next_q *= jnp.logical_not(first_timestep.terminated)
@@ -411,40 +464,71 @@ class TD3(Generic[TEnvState, TEnvObs, TEnvAction]):
                 q_grads, (trunk_out, metrics) = q_loss_grad_func(networks, rngs)
                 q_func_optimizer.update(q_grads) 
 
-                def policy_and_target_networks_update(rngs, networks, target_networks, policy_optimizer):
+                def policy_and_target_networks_update(rngs, networks, target_networks, policy_optimizer, ent_coef_optimizer):
 
                     def policy_loss_func(policy_head: nnx.Module, rngs: nnx.Rngs):
-                        action = optionally_pass(policy_head, rngs=rngs)(trunk_out)
-                        return - jnp.mean(optionally_pass(networks.q_heads[0], rngs=rngs)(trunk_out, action))
+                        action_dist = optionally_pass(policy_head, rngs=rngs)(trunk_out)
+                        action_raw = self.env.action_space.sample_distribution(rngs.actions(), action_dist, 
+                            squash_continuous=False, log_stds=True)
+                        action = self.env.action_space.squash_continuous_to_bounds(action_raw)
 
-                    policy_loss_grad_func = nnx.value_and_grad(policy_loss_func)
-                    policy_loss, policy_grads = policy_loss_grad_func(networks.policy_head, rngs)
+                        q = reduce(jnp.minimum, [ optionally_pass(q_head, rngs=rngs)(trunk_out, action) 
+                            for q_head in networks.q_heads ])
+
+                        log_probs = self.env.action_space.log_probability(action_raw, action_dist, 
+                            continuous_squashed=False, log_stds=True)
+                        entropy = - jnp.mean(log_probs)
+
+                        policy_loss = - (jnp.mean(q) + ent_coef*entropy)
+                        return policy_loss, entropy
+
+                    policy_loss_grad_func = nnx.value_and_grad(policy_loss_func, has_aux=True)
+                    (policy_loss, entropy), policy_grads = policy_loss_grad_func(networks.policy_head, rngs)
                     policy_optimizer.update(policy_grads) 
+
+                    metrics = { 'policy_loss': policy_loss, 'entropy': entropy }
+
+                    if manual_ent_coef is None:
+                        def ent_coef_loss_func(log_ent_coef):
+                            return - (log_ent_coef.value * (target_entropy - entropy))
+
+                        ent_coef_loss_grad_func = nnx.value_and_grad(ent_coef_loss_func)
+                        ent_coef_loss, ent_coef_grads = ent_coef_loss_grad_func(networks.log_ent_coef)
+                        ent_coef_optimizer.update(ent_coef_grads) 
+
+                        metrics['ent_coef_loss'] = ent_coef_loss
 
                     tau = try_call(self.hyperparameters.polyak_tau, training_state.steps)
                     nnx.update(target_networks, optax.incremental_update(
-                        nnx.state(networks), nnx.state(target_networks), tau))
+                        nnx.state(TargetNetworks.from_networks(networks)), nnx.state(target_networks), tau))
 
-                    return policy_loss
+                    return metrics
 
-                policy_loss = nnx.cond(i % self.hyperparameters.policy_delay == 0, 
-                    policy_and_target_networks_update, lambda *args: jnp.array(0, dtype=jnp.float32),
-                    rngs, networks, target_networks, policy_optimizer)
+                empty_policy_metrics = { key: jnp.array(0.0) for key in POLICY_METRICS_KEYS }
+                if manual_ent_coef is not None: del empty_policy_metrics['ent_coef_loss']
 
-                metrics['policy_loss'] = policy_loss
+                metrics |= nnx.cond(i % self.hyperparameters.policy_delay == 0, 
+                    policy_and_target_networks_update, lambda *args: empty_policy_metrics,
+                    rngs, networks, target_networks, policy_optimizer, ent_coef_optimizer)
 
                 return carry, metrics
 
             _, metrics = nnx.scan(optimize_step, in_axes=(nnx.Carry, 0, 0))(
                 (training_state.networks, training_state.target_networks, 
-                    training_state.policy_optimizer, training_state.q_func_optimizer), 
+                    training_state.policy_optimizer, training_state.q_func_optimizer, training_state.ent_coef_optimizer), 
                 rngs.fork(split=optimize_steps_per_iter),
                 jnp.arange(optimize_steps_per_iter)
             )
 
             metrics = jax.tree.map(lambda x: jnp.mean(x), metrics)
-            metrics['policy_loss'] *= optimize_steps_per_iter / policy_updates_per_iter
             metrics['steps'] = training_state.steps
+
+            if manual_ent_coef is None:
+                metrics['ent_coef'] = ent_coef
+
+            for key in POLICY_METRICS_KEYS: # account for policy delay's affect on metrics
+                if key in metrics:
+                    metrics[key] *= optimize_steps_per_iter / policy_updates_per_iter
 
             return training_state, metrics
 

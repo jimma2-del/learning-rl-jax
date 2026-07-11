@@ -76,7 +76,7 @@ class StochasticPolicyActor(Generic[TEnvObs, TEnvAction], nnx.Module):
         if squash_continuous is None: squash_continuous = self.squash_continuous
 
         action_dist = self.action_distribution(obs, rngs)
-        return self.action_space.sample_distribution(rngs.actions(), action_dist, 
+        return self.action_space.sample_distribution(rngs.actions(), action_dist, log_stds=True,
             squash_continuous=squash_continuous, deterministic=deterministic_sampling), {'action_dist': action_dist}
 
     def action_distribution(self, obs, rngs: nnx.Rngs | None = None) -> TEnvAction:

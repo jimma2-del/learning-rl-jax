@@ -399,7 +399,7 @@ class PPO(Generic[TEnvState, TEnvObs]):
                         clip_frac = jnp.mean(jnp.abs(ratio - 1) > clip_epsilon)
                             # fraction of data where the clipped objective was used instead of the regular
 
-                        metrics = { 'loss': comb_loss, 'policy_loss': policy_loss, 'value_loss': value_loss, 
+                        metrics = { 'policy_loss': policy_loss, 'value_loss': value_loss, 
                             'entropy': mean_entropy, 'approx_kl': approx_kl, 'clip_frac': clip_frac }
 
                         return comb_loss, metrics
@@ -424,7 +424,7 @@ class PPO(Generic[TEnvState, TEnvObs]):
 
                 return not_done, rngs, epoch_i, networks, optimizer, adv, target_vals, aggr_metrics
 
-            metrics_keys = { 'loss', 'policy_loss', 'value_loss', 'entropy', 'approx_kl', 'clip_frac' }
+            metrics_keys = { 'policy_loss', 'value_loss', 'entropy', 'approx_kl', 'clip_frac' }
             metrics = { key: jnp.zeros(self.hyperparameters.n_epochs) for key in metrics_keys }
 
             _, rngs, epochs_done, _, _, _, _, metrics = nnx.while_loop(

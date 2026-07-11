@@ -327,10 +327,8 @@ class A2C(Generic[TEnvState, TEnvObs]):
                 mean_entropy = jnp.mean(comb_ents)
 
                 comb_loss = policy_loss + vf_coef*value_loss - ent_coef*mean_entropy
-
-                metrics = { 'loss': comb_loss, 'policy_loss': policy_loss, 'value_loss': value_loss, 
-                    'entropy': mean_entropy }
-
+                metrics = { 'policy_loss': policy_loss, 'value_loss': value_loss, 'entropy': mean_entropy }
+        
                 return comb_loss, metrics
 
             loss_grad_func = nnx.grad(loss_func, has_aux=True)

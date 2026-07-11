@@ -331,7 +331,7 @@ class DQN(Generic[TEnvState, TEnvObs]):
                     chosen_next_q = jnp.max(next_qs, axis=-1)
 
                 # zero out q_val if terminated
-                chosen_next_q = chosen_next_q * jnp.logical_not(first_timestep.terminated)
+                chosen_next_q *= jnp.logical_not(first_timestep.terminated)
 
                 target_qs = first_timestep.reward \
                     + try_call(self.hyperparameters.discount_rate, training_state.steps)*chosen_next_q
