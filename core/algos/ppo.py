@@ -405,7 +405,7 @@ class PPO(Generic[TEnvState, TEnvObs]):
                         return comb_loss, metrics
 
                     loss_grad_func = nnx.grad(loss_func, has_aux=True)
-                    grads, metrics = loss_grad_func(training_state.networks, rngs)
+                    grads, metrics = loss_grad_func(networks, rngs)
                     optimizer.update(grads)
 
                     return (networks, optimizer), metrics

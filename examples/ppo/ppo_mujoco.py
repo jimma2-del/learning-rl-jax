@@ -26,7 +26,7 @@ from core.utils.batch_utils import flatten_batched_tree, get_tree_flattened_dim
 
 #jax.config.update("jax_log_compiles", True)
 
-ENV_NAME = "G1JoystickRoughTerrain"
+ENV_NAME = "G1JoystickFlatTerrain"
 MAX_STEPS = 1000
 N_ENVS = 2048
 CAMERA = 'track'#'side' # None
@@ -38,6 +38,7 @@ config = registry.get_default_config(ENV_NAME)
 config.impl = 'warp' #'jax' # compatibility with 'warp' backend is experimental
 #config.naconmax = 50_000
 #config.njmax = 32 # for SpotFlatTerrainJoystick
+config.njmax = 120 # for G1JoystickFlatTerrain
 
 # config.ctrl_dt = 0.05
 # config.sim_dt = 0.005
@@ -46,23 +47,23 @@ mjx_env = registry.load(ENV_NAME, config)
 
 env = MuJoCoPlaygroundWrapper(mjx_env, {'camera': CAMERA})
 
-RESETS_POOL_SIZE = 2048 - 1#32768 - 1 # subtract one to avoid being the same as nacomax
+RESETS_POOL_SIZE = 8192 - 1#2048 - 1#32768 - 1 # subtract one to avoid being the same as nacomax
 resets_pool_states_infos = jax.vmap(env.reset)(jax.random.split(rngs.env(), RESETS_POOL_SIZE))
 env = PrecomputedResetsPoolWrapper(env, resets_pool_states_infos)
 
 #env = ClipActionsToBoundsWrapper(env)
 
 ### TRAIN ###
-STEPS = 200_000_000 #1_000_000
+STEPS = 200_000_000
 
 EVAL_EPS = 256
-EVAL_INTERVAL = 100_000
+EVAL_INTERVAL = 10_000_000
 N_LOGS_PER_EVAL = 10
 
 hyperparameters = ppo.Hyperparameters(
     discount_rate = 0.97,
 
-    learning_rate = schedules.cosine_decay_schedule(3e-4, STEPS), #2.5e-4,
+    learning_rate = schedules.cosine_decay_schedule(2e-4, STEPS), #2.5e-4,
     n_envs = N_ENVS,
     gae_lambda = 0.95,
 
@@ -73,7 +74,7 @@ hyperparameters = ppo.Hyperparameters(
     clip_epsilon = 0.2,
 
     vf_coef = 0.5, 
-    ent_coef = 0.01,
+    ent_coef = 0.005,
 
     normalize_advantages = True,
 
@@ -87,7 +88,7 @@ wrapped_env = EpisodeStepCountWrapper(VmapWrapper(env), max_eps_len=MAX_STEPS)
 algo = ppo.PPO(wrapped_env, hyperparameters)
 
 # custom networks are needed to allow for asymmetric actor-critic
-    # policy net only gets sensor data (partial observation); critic gets full (privileged) state
+    # policy net only gets sensor data (partial observation); critic gets full "privileged" state
 obs_trunk = RunningMeanVarNorm(env.observation_space.shapes_dtypes)
 
 try_enter = lambda x, key: x[key] if isinstance(x, Mapping) and key in x else x

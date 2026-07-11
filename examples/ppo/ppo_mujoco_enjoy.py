@@ -25,7 +25,7 @@ from core.utils.batch_utils import flatten_batched_tree, get_tree_flattened_dim
 
 #jax.config.update("jax_log_compiles", True)
 
-ENV_NAME = "G1JoystickRoughTerrain"
+ENV_NAME = "G1JoystickFlatTerrain"
 MAX_STEPS = 1000
 CAMERA = 'track'
 
@@ -35,6 +35,8 @@ config = registry.get_default_config(ENV_NAME)
 
 config.impl = 'warp' #'jax' # compatibility with 'warp' backend is experimental
 #config.naconmax = 50_000
+
+config.njmax = 120 # for G1JoystickFlatTerrain
 
 # config.ctrl_dt = 0.05
 # config.sim_dt = 0.005
@@ -101,24 +103,24 @@ import mediapy
 
 rngs = nnx.Rngs(0, params=1, env=5, actions=3)
 
-EVAL_EPS = 256
-returns, lengths = nnx.jit(evaluate_episodes, static_argnums=(1, 3, 4))(
-    rngs, EpisodeStepCountWrapper(VmapWrapper(env), max_eps_len=MAX_STEPS), actor, EVAL_EPS, EVAL_EPS)
+# EVAL_EPS = 256
+# returns, lengths = nnx.jit(evaluate_episodes, static_argnums=(1, 3, 4))(
+#     rngs, EpisodeStepCountWrapper(VmapWrapper(env), max_eps_len=MAX_STEPS), actor, EVAL_EPS, EVAL_EPS)
 
-print("Episode Returns:")
-print(returns)
-print()
+# print("Episode Returns:")
+# print(returns)
+# print()
 
-print("Episode Lengths:")
-print(lengths)
-print()
+# print("Episode Lengths:")
+# print(lengths)
+# print()
 
-print(f"Episode Return: mean={jnp.mean(returns)} std={jnp.std(returns, ddof=1)}")
-print(f"Episode Length: mean={jnp.mean(lengths)} std={jnp.std(lengths, ddof=1)}")
+# print(f"Episode Return: mean={jnp.mean(returns)} std={jnp.std(returns, ddof=1)}")
+# print(f"Episode Length: mean={jnp.mean(lengths)} std={jnp.std(lengths, ddof=1)}")
 
 VISUALIZE_METHOD = "video"
 NUM_EPISODES = 1
-rngs = nnx.Rngs(0, params=1, env=5, actions=3)
+rngs = nnx.Rngs(0, params=1, env=50, actions=30)
 
 FPS = 1.0 / mjx_env.dt
 

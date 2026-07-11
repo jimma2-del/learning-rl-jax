@@ -23,10 +23,10 @@ from core.algos import sac
 
 #jax.config.update("jax_log_compiles", True)
 
-ENV_NAME = "WalkerRun"
-MAX_STEPS = 500
+ENV_NAME = "SpotGetup"
+MAX_STEPS = 1000
 N_ENVS = 2048
-CAMERA = 'side' # None
+CAMERA = 'track' # None
 
 rngs = nnx.Rngs(0, params=1, env=2, actions=3, optimize_samples=4)
 
@@ -36,8 +36,8 @@ config.impl = 'warp' #'jax' # compatibility with 'warp' backend is experimental
 #config.naconmax = 50_000
 #config.njmax = 32 # for SpotFlatTerrainJoystick
 
-config.ctrl_dt = 0.05
-config.sim_dt = 0.005
+# config.ctrl_dt = 0.05
+# config.sim_dt = 0.005
 
 mjx_env = registry.load(ENV_NAME, config)
 
@@ -50,14 +50,14 @@ env = PrecomputedResetsPoolWrapper(env, resets_pool_states_infos)
 #env = ClipActionsToBoundsWrapper(env)
 
 ### TRAIN ###
-STEPS = 10_000_000 #1_000_000
+STEPS = 30_000_000
 
 EVAL_EPS = 256
-EVAL_INTERVAL = 1_000_000
+EVAL_INTERVAL = 3_000_000
 N_LOGS_PER_EVAL = 10
 
 hyperparameters = sac.Hyperparameters(
-    discount_rate = 0.99,
+    discount_rate = 0.97,
 
     learning_rate = schedules.cosine_decay_schedule(3e-4, STEPS), #2.5e-4,
     n_envs = N_ENVS,
