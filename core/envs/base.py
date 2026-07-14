@@ -72,6 +72,8 @@ class Space(Generic[TSpaceElement]):
             self.low, self.high
         )), "`low` cannot equal `high` for continuous leaves, since `high` bound is exclusive while `low` is inclusive."
 
+    def __repr__(self):
+        return f"Space(low={repr(self.low)}, high={repr(self.high)})"
 
     def flatten(self, x: TSpaceElement) -> jax.Array:
         return flatten_batched_tree(self.shapes_dtypes, x)

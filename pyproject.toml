@@ -10,16 +10,11 @@ dependencies = [
   "gymnasium==1.2.0",
   "jax==0.6.2",
   "numpy>=2.2.6",
-  "pygame==2.6.1",
   "typing_extensions==4.15.0",
   "flax==0.10.7",
-  "gymnax==0.0.9",
   "chex==0.1.90",
-  "jumanji==1.1.1",
   "requests==2.34.2",
   "orbax-checkpoint>=0.11.36",
-  "playground==0.2.0",
-  "mujoco-mjx[warp]==3.9.0",
 ]
 authors = [
   {name = "Jim Ma", email = "jim.majk350@gmail.com"}
@@ -27,8 +22,17 @@ authors = [
 maintainers = [
   {name = "Jim Ma", email = "jim.majk350@gmail.com"}
 ]
-description = "Sample RL environments and algorithms implemented in Jax."
+description = "RL environments and algorithms implemented in JAX + Flax NNX."
 readme = "README.md"
+
+[project.optional-dependencies]
+gymnax = [ "gymnax @ git+https://github.com/lebrice/gymnax.git@fix-classic-control-rendering" ]
+jumanji = [ "jumanji==1.1.1" ]
+playground = [
+  "playground==0.2.0",
+  "mujoco-mjx[warp]==3.9.0",
+]
+viz = [ "pygame" ]
 
 [tool.setuptools.packages.find]
 where = ["."]

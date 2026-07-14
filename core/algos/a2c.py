@@ -197,7 +197,7 @@ class A2C(Generic[TEnvState, TEnvObs]):
         missing_keys = set(self.resolve_optimizer_params(0)) - handled_keys
         assert not missing_keys, f"`optax_optimizer` missing hyperparams {missing_keys}; available: {handled_keys}."
 
-        env_states, infos = self.env.reset(jax.random.split(rngs.env(), self.hyperparameters.n_envs))
+        env_states, infos = jax.jit(self.env.reset)(jax.random.split(rngs.env(), self.hyperparameters.n_envs))
 
         return TrainingState(
             steps = jnp.array(0, dtype=jnp.int32),

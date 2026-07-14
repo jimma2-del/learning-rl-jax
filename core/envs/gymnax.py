@@ -57,16 +57,22 @@ class GymnaxWrapper(Environment[TEnvState, ArrayLike, ArrayLike], Generic[TEnvSt
         self._observation_space = space_from_gymnax_space(self.gymnax_env.observation_space(self.gymnax_params))
         self._action_space = space_from_gymnax_space(self.gymnax_env.action_space(self.gymnax_params))
 
-        # dummy info for self.reset(), since gymnax does not provide info on resets
-        _, dummy_state = gymnax_env.reset_env(jax.random.key(0), self.gymnax_params)
-        _, _, _, _, self._dummy_info = self.step(jax.random.key(0), 
-            dummy_state, 
-            self.action_space.sample(jax.random.key(0))
-        )
+        # info shapes dtypes needed to make dummy info for self.reset(), since gymnax does not provide info on resets
+        def get_step_info():
+            _, dummy_state = gymnax_env.reset_env(jax.random.key(0), self.gymnax_params)
+            _, _, _, _, info = self.step(jax.random.key(0), 
+                dummy_state, 
+                self.action_space.sample(jax.random.key(0))
+            )
+
+            return info
+
+        self.info_shapes_dtypes = jax.eval_shape(get_step_info)
 
     def reset(self, key: chex.PRNGKey) -> tuple[TEnvState, dict[Any, Any]]:
         obs, state = self.gymnax_env.reset_env(key, self.gymnax_params)
-        return state, jax.tree.map(lambda x: x, self._dummy_info)
+        dummy_info = jax.tree.map(lambda s_dt: jnp.empty(s_dt.shape, dtype=s_dt.dtype), self.info_shapes_dtypes)
+        return state, dummy_info
 
     def step(self, key: chex.PRNGKey, state: TEnvState, action: ArrayLike) \
         -> tuple[TEnvState, jax.Array, jax.Array, jax.Array, dict[Any, Any]]:

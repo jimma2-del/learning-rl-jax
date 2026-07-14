@@ -496,10 +496,17 @@ class EpisodeStepCountWrapper(
 
     def __init__(self,
         env: Environment[TEnvState, TEnvObs, TEnvAction, TRenderFrame],
-        max_eps_len: int | None = None
+        max_eps_len: int | None = None,
+        terminate: bool = False
     ) -> None:
+        """
+        `max_eps_len`: If specified, truncates episodes after this many steps have been done.
+        `terminate`: If True, terminates episodes exceeding `max_eps_len` rather than truncating.
+        """
+
         super().__init__(env)
         self.max_eps_len = max_eps_len
+        self.terminate = terminate
 
     def reset(self, key: chex.PRNGKey) -> tuple[EpisodeStepCountState[TEnvState], dict[Any, Any]]:
         state, info = super().reset(key)
@@ -517,13 +524,16 @@ class EpisodeStepCountWrapper(
         info[self.STEP_COUNT_INFO_KEY] = steps
 
         if self.max_eps_len is not None:
-            truncated = jnp.logical_or(
-                truncated,
-                jnp.logical_and(
+            if self.terminate:
+                terminated |= jnp.logical_and(
+                    jnp.logical_not(truncated), # don't terminate if already truncated
+                    steps >= self.max_eps_len
+                )
+            else:
+                truncated |= jnp.logical_and(
                     jnp.logical_not(terminated), # don't truncate if already terminated
                     steps >= self.max_eps_len
                 )
-            )
 
         return EpisodeStepCountState(state=next_state, episode_steps=steps), reward, terminated, truncated, info
 

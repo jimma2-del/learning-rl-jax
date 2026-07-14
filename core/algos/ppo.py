@@ -212,7 +212,7 @@ class PPO(Generic[TEnvState, TEnvObs]):
         missing_keys = set(self.resolve_optimizer_params(0)) - handled_keys
         assert not missing_keys, f"`optax_optimizer` missing hyperparams {missing_keys}; available: {handled_keys}."
 
-        env_states, infos = self.env.reset(jax.random.split(rngs.env(), self.hyperparameters.n_envs))
+        env_states, infos = jax.jit(self.env.reset)(jax.random.split(rngs.env(), self.hyperparameters.n_envs))
 
         return TrainingState(
             steps = jnp.array(0, dtype=jnp.int32),
@@ -395,7 +395,7 @@ class PPO(Generic[TEnvState, TEnvObs]):
 
                         # extra metrics
                         approx_kl = jnp.mean(ratio - 1 - log_ratio) # http://joschu.net/blog/kl-approx.html
-                            # monte carlo estimate of kl divergence; only used for metrics
+                            # monte carlo estimate of kl divergence; only used for metrics & early stopping
                         clip_frac = jnp.mean(jnp.abs(ratio - 1) > clip_epsilon)
                             # fraction of data where the clipped objective was used instead of the regular
 

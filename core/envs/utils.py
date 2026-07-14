@@ -234,7 +234,7 @@ def rollout_episode(rngs: nnx.Rngs,
 
     Returns: 
         timesteps, or user defined take objs for each timestep
-        final state and final info (may be useful eg. if truncated)
+        final timestep/take obj, after the termination/truncation (may be useful eg. if truncated)
     """
 
     if take_func is None:
@@ -257,7 +257,7 @@ def rollout_episode(rngs: nnx.Rngs,
 
         return (actor, next_state, next_info), (optionally_pass(take_func, rngs=rngs)(timestep), terminated, truncated)
 
-    state, info = env.reset(rngs.env())
+    state, info = jax.jit(env.reset)(rngs.env())
 
     comb_take_vals = None
     done = False
@@ -273,13 +273,20 @@ def rollout_episode(rngs: nnx.Rngs,
         if done:
             take_vals = jax.tree.map(lambda x: x[:done_idx+1], take_vals)
 
+            if done_idx == len(dones) - 1:
+                (actor, state, info), (final_take_vals, terminated, truncated) = rollout(
+                    (actor, state, info), rngs.fork(split=1))
+                final_take_val = jax.tree.map(lambda x: x[0], final_take_vals)
+            else:
+                final_take_val = jax.tree.map(lambda x: x[done_idx + 1], take_vals)
+
         if comb_take_vals is None:
             comb_take_vals = take_vals
         else: # append to existing
             comb_take_vals = jax.tree.map(lambda comb, new: jnp.concatenate((comb, new), axis=0), 
                 comb_take_vals, take_vals)
     
-    return comb_take_vals, state, info
+    return comb_take_vals, final_take_val
 
 def stagger_env_states(rngs: nnx.Rngs,
     env: Environment[TEnvState, TEnvObs, TEnvAction, TRenderFrame],

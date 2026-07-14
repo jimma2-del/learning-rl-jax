@@ -180,7 +180,7 @@ class TabularQLearning(Generic[TEnvState, TEnvObs]):
     def init_training_state(self, rngs: nnx.Rngs, q_func: TabularQFunc[TEnvObs] | None = None) \
             -> TrainingState[TEnvState, TEnvObs]:
         if q_func is None: q_func = self.make_default_q_func()
-        env_states, _ = self.env.reset(jax.random.split(rngs.env(), self.hyperparameters.n_envs))
+        env_states, _ = jax.jit(self.env.reset)(jax.random.split(rngs.env(), self.hyperparameters.n_envs))
 
         return TrainingState(
             steps = jnp.array(0, dtype=jnp.int32),
