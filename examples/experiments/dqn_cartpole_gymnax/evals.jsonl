@@ -1,0 +1,10 @@
+{"length_mean": 406.5, "length_std": 173.2108612060547, "return_mean": 406.5, "return_std": 173.2108612060547, "steps": 10000}
+{"length_mean": 486.125, "length_std": 25.726238250732422, "return_mean": 486.125, "return_std": 25.726238250732422, "steps": 20000}
+{"length_mean": 218.75, "length_std": 173.61431884765625, "return_mean": 218.75, "return_std": 173.61431884765625, "steps": 30000}
+{"length_mean": 306.5, "length_std": 135.62448120117188, "return_mean": 306.5, "return_std": 135.62448120117188, "steps": 40000}
+{"length_mean": 120.125, "length_std": 15.959211349487305, "return_mean": 120.125, "return_std": 15.959211349487305, "steps": 50000}
+{"length_mean": 177.5, "length_std": 20.901126861572266, "return_mean": 177.5, "return_std": 20.901126861572266, "steps": 60000}
+{"length_mean": 229.375, "length_std": 167.31402587890625, "return_mean": 229.375, "return_std": 167.31402587890625, "steps": 70000}
+{"length_mean": 289.25, "length_std": 124.25865936279297, "return_mean": 289.25, "return_std": 124.25865936279297, "steps": 80000}
+{"length_mean": 403.75, "length_std": 178.2404022216797, "return_mean": 403.75, "return_std": 178.2404022216797, "steps": 90000}
+{"length_mean": 135.25, "length_std": 23.06977081298828, "return_mean": 135.25, "return_std": 23.06977081298828, "steps": 100000}

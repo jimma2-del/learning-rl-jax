@@ -195,7 +195,7 @@ class ActionDistributionHead(nnx.Module, Generic[TEnvAction]):
                     'shape': (*cur_low.shape, 2), # mean, std
                 })
         
-        if do_state_independent_stds:
+        if do_state_independent_stds and self.num_continuous > 0:
             self.state_independent_log_stds = nnx.Param(jnp.full(self.num_continuous, jnp.log(0.5)))
                 # stds should be initialized small; https://arxiv.org/abs/2006.05990
 
