@@ -2,10 +2,10 @@ import json, sys, os
 import numpy as np
 import matplotlib.pyplot as plt
 
-EXPERIMENT_NAME = 'sac_pendulum_gymnax'
+EXPERIMENT_NAME = 'tabular_q_learning_gridworld'
 if len(sys.argv) > 1: EXPERIMENT_NAME = sys.argv[1]
 
-EVAL_EPS = 256
+EVAL_EPS = 8192
 if len(sys.argv) > 2: EVAL_EPS = sys.argv[2]
 
 DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), EXPERIMENT_NAME)

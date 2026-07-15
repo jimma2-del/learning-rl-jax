@@ -1,8 +1,10 @@
-"""`gymnax` library's `Pendulum-v1`, trained with SAC."""
+"""`gymnax` library's `Acrobot-v1`, trained with Tabular Q-Learning with linear interpolation."""
 
 import time
 import os
 import json
+
+import numpy as np
 
 import jax
 import jax.numpy as jnp
@@ -11,9 +13,10 @@ from flax import nnx
 from optax import schedules
 import orbax.checkpoint as ocp
 
-from core.algos import sac
+from core.algos import tabular_q_learning
 
-from core.envs.wrappers import VmapWrapper
+from core.envs.base import Space
+from core.envs.wrappers import Wrapper, VmapWrapper
 from core.envs.utils import evaluate_episodes, rollout_episode
 
 from core.envs.gymnax import GymnaxWrapper
@@ -22,41 +25,66 @@ from gymnax.visualize import Visualizer
 
 DIR = os.path.dirname(os.path.abspath(__file__))
 
+
 ## ENVIRONMENTS
 
 # Make env
-gymnax_env, gymnax_env_params = gymnax.make("Pendulum-v1")
+gymnax_env, gymnax_env_params = gymnax.make("Acrobot-v1")
 env = GymnaxWrapper(gymnax_env, gymnax_env_params)
+
+# Wrapper to reduce dimensionality of observations from 6 -> 4; important for tabular methods
+class AcrobotCondenseObsWrapper(Wrapper):
+    """Reduces dimensionality of Acrobot observations from 6 to 4 by converting (sin, cos) -> angle."""
+
+    def get_obs(self, key, state):
+        obs = super().get_obs(key, state)
+
+        return jnp.array((
+            jnp.atan2(obs[1], obs[0]), 
+            jnp.atan2(obs[3], obs[2]), 
+            obs[4], 
+            obs[5]
+        ), dtype=jnp.float32)
+        
+    @property
+    def observation_space(self):
+        return Space(
+            low=np.array((-np.pi, -np.pi, -13, -29), dtype=np.float32),
+            high=np.array((np.pi, np.pi, 13, 29), dtype=np.float32)
+        )
+
+env = AcrobotCondenseObsWrapper(env)
 
 train_env = env
 eval_env = env
 
+
 ## HYPERPARMETERS
 
-STEPS = 1_000_000 # total training steps
+STEPS = 100_000_000 # total training steps
 
-hyperparameters = sac.Hyperparameters(
-    learning_rate = schedules.cosine_decay_schedule(3e-4, STEPS),
+hyperparameters = tabular_q_learning.Hyperparameters(
+    discount_rate = 0.98,
+    learning_rate = 0.1,
+    epsilon = schedules.linear_schedule(1, 0.05, 0.1*STEPS),
     n_envs = 256,
-
-    target_entropy = None, # use default of -env.action_space.flattened_dim
-
-    train_freq = 32,
-    batch_size = 256,
-
-    replay_buffer_size = 100_000,
-    truncated_frac = 0.0,
-
-    polyak_tau = 0.005,
 )
 
-rngs = nnx.Rngs(0, env=1, actions=2, params=3, optimize_samples=4)
+rngs = nnx.Rngs(0, env=1, actions=2)
 
+
+## LINEAR INTERPOLATION
+low  = (-3.2, -3.2,   -6,  -15)
+high = ( 3.2,  3.2,    6,   15)
+res  = ( 0.2,  0.4, 0.25, 0.25)
+
+q_func = tabular_q_learning.LinInterpTabularQFunc(
+    int(env.action_space.high + 1), Space(np.array(low), np.array(high)), np.array(res))
 
 ## TRAINING
 
 EVAL_EPS = 256
-EVAL_INTERVAL = 100_000
+EVAL_INTERVAL = 10_000_000
 N_LOGS_PER_EVAL = 3
 
 METRICS_PATH = os.path.join(DIR, 'metrics.jsonl')
@@ -74,7 +102,7 @@ def append_jsonl(path: str, data: dict):
     with open(path, 'a') as f:
         f.writelines(lines)
 
-algo = sac.SAC(VmapWrapper(train_env), hyperparameters)
+algo = tabular_q_learning.TabularQLearning(VmapWrapper(train_env), hyperparameters)
 train = nnx.jit(algo.train, static_argnames=('steps',), donate_argnames=('training_state'))
 
 @nnx.jit
@@ -84,7 +112,7 @@ def evaluate(rngs, actor):
         EVAL_EPS, EVAL_EPS
     )
 
-training_state = algo.init_training_state(rngs)
+training_state = algo.init_training_state(rngs, q_func)
 
 while training_state.steps < STEPS:
     print()
@@ -110,7 +138,7 @@ while training_state.steps < STEPS:
     print(f"COMPLETED steps={training_state.steps}; sps={sps:,.1f}")
 
     # Evaluate
-    actor = algo.make_actor(training_state.networks, deterministic_sampling=True)
+    actor = algo.make_actor(training_state.q_func, epsilon=0)
     returns, lengths = evaluate(rngs, actor)
 
     eval_metrics = {
@@ -139,7 +167,7 @@ checkpointer_save.save(SAVE_PATH, state)
 ## VISUALIZATION
 
 # Rollout trained actor
-actor = algo.make_actor(training_state.networks, deterministic_sampling=True)
+actor = algo.make_actor(training_state.q_func, epsilon=0)
 
 rngs = nnx.Rngs(0, env=10, actions=20)
 timesteps, final_timestep = rollout_episode(rngs, eval_env, actor)
