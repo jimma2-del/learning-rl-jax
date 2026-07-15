@@ -1,0 +1,10 @@
+{"length_mean": 999.0, "length_std": 0.0, "return_mean": -0.38938474655151367, "return_std": 0.03370323404669762, "steps": 1000000}
+{"length_mean": 999.0, "length_std": 0.0, "return_mean": -0.13650068640708923, "return_std": 0.21868084371089935, "steps": 2000000}
+{"length_mean": 999.0, "length_std": 0.0, "return_mean": -2.1627602577209473, "return_std": 0.06178225576877594, "steps": 3000000}
+{"length_mean": 999.0, "length_std": 0.0, "return_mean": -67.38912963867188, "return_std": 0.10447201132774353, "steps": 4000000}
+{"length_mean": 999.0, "length_std": 0.0, "return_mean": -6.511836051940918, "return_std": 0.1717367172241211, "steps": 5000000}
+{"length_mean": 66.65234375, "length_std": 0.4771590232849121, "return_mean": 93.87417602539062, "return_std": 0.270320862531662, "steps": 6000000}
+{"length_mean": 66.40625, "length_std": 0.5230003595352173, "return_mean": 93.91677856445312, "return_std": 0.24972853064537048, "steps": 7000000}
+{"length_mean": 66.56640625, "length_std": 0.6593850255012512, "return_mean": 93.84490203857422, "return_std": 0.24176214635372162, "steps": 8000000}
+{"length_mean": 66.60546875, "length_std": 0.7116739153862, "return_mean": 93.88652038574219, "return_std": 0.23444372415542603, "steps": 9000000}
+{"length_mean": 66.484375, "length_std": 0.6069450974464417, "return_mean": 93.88859558105469, "return_std": 0.20264461636543274, "steps": 10000000}

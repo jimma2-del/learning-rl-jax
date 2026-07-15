@@ -1,6 +1,5 @@
-"""`gymnax` library's `Cartpole-v1`, trained with DQN.
-Adapted from the ["Basics" section of the tutorial notebook](examples/tutorial/tutorial.ipynb#Basics).
-"""
+"""`gymnax` library's `MountainCarContinuous-v0`, trained with TD3 with heavy exploration noise."""
+
 import time
 import os
 import json
@@ -12,7 +11,7 @@ from flax import nnx
 from optax import schedules
 import orbax.checkpoint as ocp
 
-from core.algos import dqn
+from core.algos import sac
 
 from core.envs.wrappers import VmapWrapper
 from core.envs.utils import evaluate_episodes, rollout_episode
@@ -26,7 +25,7 @@ DIR = os.path.dirname(os.path.abspath(__file__))
 ## ENVIRONMENTS
 
 # Make env
-gymnax_env, gymnax_env_params = gymnax.make("CartPole-v1")
+gymnax_env, gymnax_env_params = gymnax.make("Pendulum-v1")
 env = GymnaxWrapper(gymnax_env, gymnax_env_params)
 
 train_env = env
@@ -34,42 +33,21 @@ eval_env = env
 
 ## HYPERPARMETERS
 
-STEPS = 100_000 # total training steps
+STEPS = 1_000_000 # total training steps
 
-hyperparameters = dqn.Hyperparameters(
-    n_envs = 8, # number of environments to run in parallel, to fully saturate GPU
-        # using a very low number here for the sake of making this example accessible
-        # GPU-acceleration allows us to run many more envs in parallel
-            # -- at least 256; upwards of 8192 for powerful setups
+hyperparameters = sac.Hyperparameters(
+    learning_rate = schedules.cosine_decay_schedule(3e-4, STEPS),
+    n_envs = 256,
 
-    discount_rate = 0.99,
+    target_entropy = None, # use default of -env.action_space.flattened_dim
 
-    learning_rate = 2.5e-4,
-    max_grad_norm = 10.0,
-
-    train_freq = 4, # number of env steps per network update
-        # since train_freq < n_envs, we repeatedly:
-            # take 1 step in each parallel env, giving us 8 total samples,
-            # do 8 / 4 = 2 optimize steps at once
-
-    batch_size = 32,
-
-    epsilon = schedules.linear_schedule(1, 0.05, 0.1*STEPS),
-        # the majority of float parameters can take a Schedule instead of a constant value
-        # a Schedule is simply any function which takes in a step count and returns a value
+    train_freq = 32,
+    batch_size = 256,
 
     replay_buffer_size = 100_000,
+    truncated_frac = 0.0,
 
-    truncated_frac = 1.0/500, # fraction of timesteps expected to be truncated
-        # to handle truncations properly, we need the observation after the truncation to bootstrap Q values
-        # we allocate extra space for these observations in the replay buffer depending on `truncated_frac`
-        # lowering `truncated_frac` saves memory by allocating less space for these observations
-        # however, truncated timesteps exceeding this limit will be treated as terminated
-
-    #target_update_interval = 5000, # interval for hard target updates
-    polyak_tau = 0.005, # use polyak averaging instead of hard target updates
-
-    double_dqn = False # double DQN add-on
+    polyak_tau = 0.005,
 )
 
 rngs = nnx.Rngs(0, env=1, actions=2, params=3, optimize_samples=4)
@@ -77,8 +55,8 @@ rngs = nnx.Rngs(0, env=1, actions=2, params=3, optimize_samples=4)
 
 ## TRAINING
 
-EVAL_EPS = 8
-EVAL_INTERVAL = 10_000
+EVAL_EPS = 256
+EVAL_INTERVAL = 100_000
 N_LOGS_PER_EVAL = 3
 
 METRICS_PATH = os.path.join(DIR, 'metrics.jsonl')
@@ -96,7 +74,7 @@ def append_jsonl(path: str, data: dict):
     with open(path, 'a') as f:
         f.writelines(lines)
 
-algo = dqn.DQN(VmapWrapper(train_env), hyperparameters)
+algo = sac.SAC(VmapWrapper(train_env), hyperparameters)
 train = nnx.jit(algo.train, static_argnames=('steps',), donate_argnames=('training_state'))
 
 @nnx.jit
@@ -132,7 +110,7 @@ while training_state.steps < STEPS:
     print(f"COMPLETED steps={training_state.steps}; sps={sps:,.1f}")
 
     # Evaluate
-    actor = algo.make_actor(training_state.networks, epsilon=0)
+    actor = algo.make_actor(training_state.networks, deterministic_sampling=True)
     returns, lengths = evaluate(rngs, actor)
 
     eval_metrics = {
@@ -161,7 +139,7 @@ checkpointer_save.save(SAVE_PATH, state)
 ## VISUALIZATION
 
 # Rollout trained actor
-actor = algo.make_actor(training_state.networks, epsilon=0)
+actor = algo.make_actor(training_state.networks, deterministic_sampling=True)
 
 rngs = nnx.Rngs(0, env=10, actions=20)
 timesteps, final_timestep = rollout_episode(rngs, eval_env, actor)
