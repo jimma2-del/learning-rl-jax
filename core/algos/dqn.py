@@ -1,3 +1,9 @@
+"""Implementation of Deep Q-Networks (DQN) - https://arxiv.org/abs/1312.5602
+
+We include the Double DQN add-on - https://arxiv.org/abs/1509.06461
+    We also plan to add n-step returns, dueling networks, and NoisyNets.
+"""
+
 from typing import TypeVar, Generic, Any, Sequence, Self, Callable, Mapping
 
 import math
@@ -61,11 +67,21 @@ TEnvObs = TypeVar("TEnvObs")
 TTrunkOut = TypeVar("TTrunkOut")
 
 class Networks(nnx.Module, Generic[TEnvObs, TTrunkOut]):
+    """NNX module containing networks for DQN.
+
+    `qs_head`: Outputs a Q value for EVERY action.
+    
+    Defaults:
+        `obs_trunk`: observation standardization + flattening; no learnable parameters
+        `qs_head`: hidden layers 128, 128; ReLU activation; layer norm enabled
+    """
+
     def __init__(self, obs_trunk: Callable[[TEnvObs], TTrunkOut], qs_head: Callable[[TTrunkOut], jax.Array]) -> None:
         self.obs_trunk = obs_trunk
         self.qs_head = qs_head
 
     def __call__(self, obs: TEnvObs, rngs: nnx.Rngs | None = None) -> jax.Array:
+        """Returns: an array containing a Q value for EVERY action."""
         trunk_out = optionally_pass(self.obs_trunk, rngs=rngs)(obs)
         return optionally_pass(self.qs_head, rngs=rngs)(trunk_out)
 
@@ -83,6 +99,7 @@ class Networks(nnx.Module, Generic[TEnvObs, TTrunkOut]):
         obs_running_mean_var: RunningMeanVar[TEnvObs] | None = None, 
         obs_clip_threshold: float | None = None
     ) -> Callable[[TEnvObs], TTrunkOut]:
+        """NOTE: Contains no learnable parameters!"""
         layers = []
 
         if normalize_observations:
@@ -122,13 +139,18 @@ class TrainingState(Generic[TEnvState, TEnvObs, TTrunkOut]):
     replay_buffer: CircularBufferWithOptionalData[ReplayTimestep[TEnvObs], TEnvObs]
 
 class DQN(Generic[TEnvState, TEnvObs]):
-    """Implementation of DQN."""
+    """Main class for DQN, facilitating initialization and training.
+    See the module docstring for more details."""
 
     def __init__(self, 
         env: Environment[TEnvState, TEnvObs, ArrayLike],
         hyperparameters: Hyperparameters = Hyperparameters()
     ) -> None:
-        """IMPORTANT: `env` must already be batched; eg. wrap with `VmapWrapper` BEFORE passing in."""
+        """
+        IMPORTANT: 
+            `env` must already be batched; eg. wrap with `VmapWrapper` BEFORE passing in.
+            `env` should not auto-reset.
+        """
 
         assert (
             jnp.isscalar(env.action_space.low) 

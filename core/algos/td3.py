@@ -1,3 +1,8 @@
+"""Implementation of Twin Delayed Deep Deterministic Policy Gradient (TD3) - https://arxiv.org/abs/1802.09477
+
+We use Gaussian noise instead of Ornstein-Uhlenbeck (OU) noise for both exploration and target smoothing.
+"""
+
 from typing import TypeVar, Generic, Any, Sequence, Self, Callable, Mapping, Literal
 
 import math
@@ -64,7 +69,7 @@ TEnvAction = TypeVar("TEnvAction")
 TTrunkOut = TypeVar("TTrunkOut")
 
 class Networks(nnx.Module, Generic[TEnvObs, TEnvAction, TTrunkOut]):
-    """Module containing networks for TD3.
+    """NNX module containing networks for TD3.
 
     Observations are first processed using a shared `obs_trunk`.
         By default, `obs_trunk` only applies standardization and flattening, with no learnable parameters.
@@ -75,6 +80,11 @@ class Networks(nnx.Module, Generic[TEnvObs, TEnvAction, TTrunkOut]):
     
     NOTE: Unlike in on-policy algorithms, in off-policy algorithms including TD3, the shared `obs_trunk` 
         is only updated during Q function updates; it is kept frozen during policy updates.
+
+    Defaults:
+        `obs_trunk`: observation standardization + flattening; no learnable parameters
+        `policy_head`: hidden layers 400, 300; ReLU activation; layer norm enabled
+        `value_head`: hidden layers 400, 300; ReLU activation; layer norm enabled
     """
 
     def __init__(self, 
@@ -102,6 +112,7 @@ class Networks(nnx.Module, Generic[TEnvObs, TEnvAction, TTrunkOut]):
         obs_running_mean_var: RunningMeanVar[TEnvObs] | None = None, 
         obs_clip_threshold: float | None = None
     ) -> Callable[[TEnvObs], TTrunkOut]:
+        """NOTE: Contains no learnable parameters!"""
         layers = []
 
         if normalize_observations:
@@ -159,13 +170,18 @@ class TrainingState(Generic[TEnvState, TEnvObs, TEnvAction, TTrunkOut]):
     replay_buffer: CircularBufferWithOptionalData[ReplayTimestep[TEnvObs, TEnvAction], TEnvObs]
 
 class TD3(Generic[TEnvState, TEnvObs, TEnvAction]):
-    """Implementation of TD3."""
+    """Main class for TD3, facilitating initialization and training.
+    See the module docstring for more details."""
 
     def __init__(self, 
         env: Environment[TEnvState, TEnvObs, TEnvAction],
         hyperparameters: Hyperparameters = Hyperparameters()
     ) -> None:
-        """IMPORTANT: `env` must already be batched; eg. wrap with `VmapWrapper` BEFORE passing in."""
+        """
+        IMPORTANT: 
+            `env` must already be batched; eg. wrap with `VmapWrapper` BEFORE passing in.
+            `env` should not auto-reset.
+        """
 
         assert jax.tree.map(lambda s_dt: jnp.issubdtype(s_dt.dtype, jnp.floating), 
             env.action_space.shapes_dtypes), "Action space for TD3 must be continuous (jnp.floating)."

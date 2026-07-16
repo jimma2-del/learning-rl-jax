@@ -1,4 +1,4 @@
-"""`gymnax` library's `Acrobot-v1`, trained with Tabular Q-Learning with linear interpolation."""
+"""`gymnax` library's `Acrobot-v1`, trained with Tabular Q-Learning + observation linear interpolation."""
 
 import time
 import os

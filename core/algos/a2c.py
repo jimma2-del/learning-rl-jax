@@ -1,3 +1,11 @@
+"""Implementation of Advantage Actor-Critic (A2C) - https://openai.com/index/openai-baselines-acktr-a2c/
+A2C is a synchronous variant of Asynchronous Advantage Actor-Critic (A3C) - https://arxiv.org/abs/1602.01783
+
+By default, actions are squashed to bounds using the tanh function as is commonly done in SAC.
+    Log probabilities are adjusted for entropy calculations by -log(1 - tanh^2(x)).
+To use basic action clipping instead, wrap the environment with `ClipActionsToBoundsWrapper(env)`.
+"""
+
 from typing import TypeVar, Generic, Any, Sequence, Self, Callable, Mapping
 
 import math
@@ -57,6 +65,14 @@ TEnvAction = TypeVar("TEnvAction")
 TTrunkOut = TypeVar("TTrunkOut")
 
 class Networks(nnx.Module, Generic[TEnvObs, TEnvAction, TTrunkOut]):
+    """NNX module containing networks for A2C.
+    
+    Defaults:
+        `obs_trunk`: observation standardization + flattening; no learnable parameters
+        `policy_head`: hidden layers 128, 128; tanh activation; layer norm enabled
+        `value_head`: hidden layers 256, 256; tanh activation; layer norm enabled
+    """
+
     def __init__(self, obs_trunk: Callable[[TEnvObs], TTrunkOut], 
             policy_head: Callable[[TTrunkOut], TEnvAction], value_head: Callable[[TTrunkOut], jax.Array]) -> None:
         self.obs_trunk = obs_trunk
@@ -64,6 +80,7 @@ class Networks(nnx.Module, Generic[TEnvObs, TEnvAction, TTrunkOut]):
         self.value_head = value_head
 
     def __call__(self, obs: TEnvObs, rngs: nnx.Rngs | None = None) -> tuple[TEnvAction, jax.Array]:
+        """Returns: action distribution, value."""
         trunk_out = optionally_pass(self.obs_trunk, rngs=rngs)(obs)
 
         action_dist = optionally_pass(self.policy_head, rngs=rngs)(trunk_out)
@@ -86,6 +103,7 @@ class Networks(nnx.Module, Generic[TEnvObs, TEnvAction, TTrunkOut]):
         obs_running_mean_var: RunningMeanVar[TEnvObs] | None = None, 
         obs_clip_threshold: float | None = None
     ) -> Callable[[TEnvObs], TTrunkOut]:
+        """NOTE: Contains no learnable parameters!"""
         layers = []
 
         if normalize_observations:
@@ -132,13 +150,18 @@ class TrainingState(Generic[TEnvState, TEnvObs, TEnvAction, TTrunkOut]):
     optimizer: nnx.Optimizer
 
 class A2C(Generic[TEnvState, TEnvObs]):
-    """Implementation of A2C."""
+    """Main class for A2C, facilitating initialization and training.
+    See the module docstring for more details."""
 
     def __init__(self, 
         env: Environment[TEnvState, TEnvObs, TEnvAction],
         hyperparameters: Hyperparameters = Hyperparameters()
     ) -> None:
-        """IMPORTANT: `env` must already be batched; eg. wrap with `VmapWrapper` BEFORE passing in."""
+        """
+        IMPORTANT: 
+            `env` must already be batched; eg. wrap with `VmapWrapper` BEFORE passing in.
+            `env` should not auto-reset.
+        """
         self.env = env
         self.hyperparameters = hyperparameters
 

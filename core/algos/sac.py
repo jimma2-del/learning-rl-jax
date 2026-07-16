@@ -1,3 +1,9 @@
+"""Implementation of Soft Actor-Critic (SAC) - https://arxiv.org/abs/1801.01290
+
+We implement a policy network and twin Q networks. 
+We forego the additional value network, and add automatic entropy adjustment - https://arxiv.org/abs/1812.05905
+"""
+
 from typing import TypeVar, Generic, Any, Sequence, Self, Callable, Mapping, Literal
 
 import math
@@ -75,7 +81,7 @@ TEnvAction = TypeVar("TEnvAction")
 TTrunkOut = TypeVar("TTrunkOut")
 
 class Networks(nnx.Module, Generic[TEnvObs, TEnvAction, TTrunkOut]):
-    """Module containing networks for SAC.
+    """NNX module containing networks for SAC.
 
     Observations are first processed using a shared `obs_trunk`.
         By default, `obs_trunk` only applies standardization and flattening, with no learnable parameters.
@@ -86,6 +92,11 @@ class Networks(nnx.Module, Generic[TEnvObs, TEnvAction, TTrunkOut]):
     
     NOTE: Unlike in on-policy algorithms, in off-policy algorithms including SAC, the shared `obs_trunk` 
         is only updated during Q function updates; it is kept frozen during policy updates.
+
+    Defaults:
+        `obs_trunk`: observation standardization + flattening; no learnable parameters
+        `policy_head`: hidden layers 256, 256; ReLU activation; layer norm enabled
+        `q_heads`: hidden layers 256, 256; ReLU activation; layer norm enabled
     """
 
     def __init__(self, 
@@ -116,6 +127,7 @@ class Networks(nnx.Module, Generic[TEnvObs, TEnvAction, TTrunkOut]):
         obs_running_mean_var: RunningMeanVar[TEnvObs] | None = None, 
         obs_clip_threshold: float | None = None
     ) -> Callable[[TEnvObs], TTrunkOut]:
+        """NOTE: Contains no learnable parameters!"""
         layers = []
 
         if normalize_observations:
@@ -196,16 +208,24 @@ class TrainingState(Generic[TEnvState, TEnvObs, TEnvAction, TTrunkOut]):
     replay_buffer: CircularBufferWithOptionalData[ReplayTimestep[TEnvObs, TEnvAction], TEnvObs]
 
 class SAC(Generic[TEnvState, TEnvObs, TEnvAction]):
-    """Implementation of SAC."""
+    """Main class for SAC, facilitating initialization and training.
+    See the module docstring for more details."""
 
     def __init__(self, 
         env: Environment[TEnvState, TEnvObs, TEnvAction],
         hyperparameters: Hyperparameters = Hyperparameters()
     ) -> None:
-        """IMPORTANT: `env` must already be batched; eg. wrap with `VmapWrapper` BEFORE passing in."""
+        """
+        IMPORTANT: 
+            `env` must already be batched; eg. wrap with `VmapWrapper` BEFORE passing in.
+            `env` should not auto-reset.
+        """
 
         assert jax.tree.map(lambda s_dt: jnp.issubdtype(s_dt.dtype, jnp.floating), 
-            env.action_space.shapes_dtypes), "Action space for SAC must be continuous (jnp.floating)."
+            env.action_space.shapes_dtypes), (
+                "Action space for SAC must be continuous (jnp.floating). "
+                "Support for discrete actions is in development."
+            )
 
         self.env = env
         self.hyperparameters = hyperparameters

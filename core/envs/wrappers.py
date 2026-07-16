@@ -1,10 +1,7 @@
-from typing import Any, Generic, Callable
+from typing import Any, Generic
 from typing_extensions import TypeVar
-from abc import ABC, abstractmethod
 
 import chex
-
-import functools
 
 import jax
 from jax.typing import ArrayLike
@@ -381,8 +378,10 @@ class PrecomputedResetsPoolWrapper(
         self.resets_pool_state_infos = resets_pool_state_infos
 
     def reset(self, key: chex.PRNGKey) -> tuple[TEnvState, dict[Any, Any]]:
+        take_key = key if jnp.isscalar(key) else key.ravel()[0]
+
         resets_pool_size = get_vmap_axis_size(self.resets_pool_state_infos)
-        reset_is = jax.random.randint(key, key.shape, minval=0, maxval=resets_pool_size)
+        reset_is = jax.random.randint(take_key, key.shape, minval=0, maxval=resets_pool_size)
 
         return jax.tree.map(
             lambda x: x[reset_is] if hasattr(x, 'shape') and x.shape[0] == resets_pool_size else x.copy(), 
@@ -439,6 +438,9 @@ class ClipActionsToBoundsWrapper(
 ):
     """Clips values in actions to the bounds defined by the action space.
         Values above or below bounds will be set to the bounds.
+
+    This wrapper can be used to replace the default tanh-based action squashing in A2C/PPO
+        with action clipping, aligning more closely with the most common implementation.
 
     The new action space will have (-inf, inf) bounds for all continuous values.
         Discrete bounds will be left unchanged because there is no way to mark unbounded discrete bounds,

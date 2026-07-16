@@ -1,5 +1,5 @@
 """`gymnax` library's `Cartpole-v1`, trained with DQN.
-Adapted from the ["Basics" section of the tutorial notebook](examples/tutorial/tutorial.ipynb#Basics).
+Adapted from the "Basics" section of the tutorial notebook (examples/tutorial/tutorial.ipynb).
 """
 import time
 import os

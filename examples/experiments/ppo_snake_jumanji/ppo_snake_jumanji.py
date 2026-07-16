@@ -1,5 +1,5 @@
 """Jumanji's `Snake-v1`, trained with PPO + reward shaping + CNN/action-masking networks + RMSprop.
-Adapted from the ["Further Customization" section of the tutorial notebook](examples/tutorial/tutorial.ipynb#Further-Customization).
+Adapted from the "Further Customization" section of the tutorial notebook (examples/tutorial/tutorial.ipynb).
 """
 import time
 import os

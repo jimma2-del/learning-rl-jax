@@ -315,6 +315,10 @@ class Space(Generic[TSpaceElement]):
         """Computes the individual log probability of sampling each feature of `x` from `distribution`.
         See `space.sample_distribution` for details on the structure of `distribution`.
 
+        Tanh-squashed action probabilities are adjusted by -log(1 - tanh^2(x)), as is commonly done in SAC.
+            We compute a more numerically stable version: -2(log2 + x - softplus(2x)).
+        Similarly, softplus-squashed actions are adjusted by logaddexp(0, -x), ie. log(1 + e^(-x)).
+
         `continuous_squashed`: If False, assumes all continuous values are unsquashed and unbounded.
             Useful, eg. for processing raw outputs, before softplus or tanh.
 
@@ -364,6 +368,10 @@ class Space(Generic[TSpaceElement]):
         """Computes the total log probability of sampling `x` from `distribution`, assuming features are independent.
         See `space.sample_distribution` for details on the structure of `distribution`.
 
+        Tanh-squashed action probabilities are adjusted by -log(1 - tanh^2(x)), as is commonly done in SAC.
+            We compute a more numerically stable version: -2(log2 + x - softplus(2x)).
+        Similarly, softplus-squashed actions are adjusted by logaddexp(0, -x), ie. log(1 + e^(-x)).
+
         `continuous_squashed`: If False, assumes all continuous values are unsquashed and unbounded.
             Useful, eg. for processing raw outputs, before softplus or tanh.
 
@@ -387,6 +395,10 @@ class Space(Generic[TSpaceElement]):
         For bounded (one or both sides) continuous features, there is no analytical expression for entropy.
             This function will compute a monte-carlo estimate in these cases, using `monte_carlo_n_samples` samples. 
             The parameters `monte_carlo_n_samples` and `monte_carlo_key` must be provided if there are any such features.
+
+        Tanh-squashed action probabilities are adjusted by -log(1 - tanh^2(x)), as is commonly done in SAC.
+            We compute a more numerically stable version: -2(log2 + x - softplus(2x)).
+        Similarly, softplus-squashed actions are adjusted by logaddexp(0, -x), ie. log(1 + e^(-x)).
 
         `log_stds`: If True, treats stds as log stds: uses exp(feature[1]) as the standard deviation.
         """

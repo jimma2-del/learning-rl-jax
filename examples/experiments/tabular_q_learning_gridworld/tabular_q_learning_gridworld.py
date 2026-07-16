@@ -26,6 +26,9 @@ DIR = os.path.dirname(os.path.abspath(__file__))
 # Make env
 MAP = "general"
 env = GridworldEnv.built_in_map(MAP)
+print("Gridworld Env Map:")
+print(env.map_data)
+print()
 
 train_env = env
 eval_env = env

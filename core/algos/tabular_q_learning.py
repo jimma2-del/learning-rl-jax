@@ -1,3 +1,14 @@
+"""Implementation of Q-Learning - https://doi.org/10.1007/BF00992698
+
+We take `n_envs` steps in parallel, and update the Q table
+    using the sampled transitions completely in parallel.
+
+Along with the basic tabular implementation for discrete observation spaces,
+    we offer two options for continuous observations: 
+        rounding (default), and linear interpolation using nearby table corners.
+    Note that these methods break convergence guarentees.
+"""
+
 from typing import TypeVar, Generic, Any, Sequence
 
 import math
@@ -130,6 +141,7 @@ class LinInterpTabularQFunc(Generic[TEnvObs], TabularQFunc[TEnvObs]):
 
 @dataclass(frozen=True)
 class Hyperparameters:
+    "Hyperparameters for Tabular Q-Learning."
     n_envs: int = 32
 
     discount_rate: Scheduleable[float] = 0.95
@@ -141,19 +153,29 @@ class Hyperparameters:
 
 @dataclass
 class TrainingState(Generic[TEnvState, TEnvObs]):
+    """Training state for Tabular Q-Learning."""
     steps: ArrayLike
     env_states: TEnvState
 
     q_func: TabularQFunc
 
 class TabularQLearning(Generic[TEnvState, TEnvObs]):
-    """Implementation of Tabular Q-Learning."""
+    """Main class for Tabular Q-Learning, facilitating initialization and training.
+    See the module docstring for more details.
+    
+    Continuous observations are handled using rounding by default. To enable linear interpolation,
+        create an instance of `LinInterpTabularQFunc` and pass it to `init_training_state()`.
+    """
 
     def __init__(self, 
         env: Environment[TEnvState, TEnvObs, ArrayLike],
         hyperparameters: Hyperparameters = Hyperparameters()
     ) -> None:
-        """IMPORTANT: `env` must already be batched; eg. wrap with `VmapWrapper` BEFORE passing in."""
+        """
+        IMPORTANT: 
+            `env` must already be batched; eg. wrap with `VmapWrapper` BEFORE passing in.
+            `env` should not auto-reset.
+        """
 
         assert (
             jnp.isscalar(env.action_space.low) 
