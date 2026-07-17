@@ -1,4 +1,5 @@
 ![Banner Demo Animations](docs/assets/banner-anims.gif)
+<small>*Agents **trained** using this repository. Environments from: [Gymnax](https://github.com/RobertTLange/gymnax), [Jumanji](https://github.com/instadeepai/jumanji), [Mujoco Playground](https://github.com/google-deepmind/mujoco_playground).*</small>
 
 # Learning RL JAX
 <a href="https://www.python.org/doc/versions/">
