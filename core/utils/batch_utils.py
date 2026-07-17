@@ -1,3 +1,5 @@
+"""Utilities for handling arrays or PyTrees with possible leading batch axes."""
+
 from typing import Callable, Sequence, TypeVar, Any
 
 import math

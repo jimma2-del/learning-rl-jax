@@ -1,3 +1,5 @@
+"""GPU-accelerated gridworld environment."""
+
 from chex import dataclass
 from jax.typing import ArrayLike
 from jax import Array
@@ -18,10 +20,30 @@ get_map_path = lambda x: path.join(MAP_DIR, x)
 
 @dataclass(frozen=True)
 class State:
+    """State for the Gridworld environment."""
     pos: jax.Array
     steps: ArrayLike
 
 class GridworldEnv(Environment[State, Array, ArrayLike, str]):
+    """GPU-accelerated Gridworld environment.
+    
+    The environment consists of a 2D grid of tiles. 
+        Each tile can either be empty, a wall, or an endpoint.
+        Each tile has a reward, positive, negative, or zero.
+            The reward is given each step the agent is on that tile after moving.
+        
+    Agents start at a random empty tile.
+
+    On each step, agents move to one of the four adjacent tiles.
+        Agents cannot move into a wall tile.
+            Agents that attempt moving into a wall tile will stay in place.
+        Agents recieve the reward of the tile they landed on.
+        If the tile they landed on is an end tile, the episode is terminated.
+    
+    Observation: the agents position (r, c) in the grid, as zero-indexed indices.
+    Action: an integer [0, 3], corresponding to a move up, down, left, right.
+    """
+
     ROWS_DELIMITER = "\n\n"
     COLS_DELIMITER = "   "
     WALL_TILE = "WWW"
@@ -31,6 +53,8 @@ class GridworldEnv(Environment[State, Array, ArrayLike, str]):
 
     @classmethod
     def built_in_map(cls, map_name: str, max_steps: int = 50):
+        """Create an environment with a built-in map."""
+
         try:
             with open(get_map_path(map_name + ".txt"), "r") as f:
                 map_data = f.read()
@@ -40,6 +64,9 @@ class GridworldEnv(Environment[State, Array, ArrayLike, str]):
         return cls(map_data, max_steps)
 
     def __init__(self, map_data: str, max_steps: int = 50) -> None:
+        """Initialize an environment using a map data string.
+        See maps/general.txt for an example of the map data format."""
+
         self.max_steps = max_steps
 
         self.map_data = map_data
@@ -130,14 +157,22 @@ class GridworldEnv(Environment[State, Array, ArrayLike, str]):
         return Space(low=np.array(0, dtype=np.int32), high=np.array(3, dtype=np.int32))
 
 
-    def visualize_q_table(self, q_vals) -> str:
+    def visualize_q_table(self, q_vals: ArrayLike) -> str:
+        """Visualize a Q table as a string, with arrows indicating the greedy action.
+        '@' indicates a wall; 'O' indicates an endpoint.
+        
+        `q_vals`: Array storing the Q values, with shape (4, n_rows, n_cols).
+        """
+
         result = ""
 
         for y, row in enumerate(q_vals):
 
             for x, tile in enumerate(row):
-                if self.tile_is_end[y,x] or not self.tile_is_passable[y,x]:
-                    result += "@"
+                if self.tile_is_end[y,x]:
+                    result += 'O'
+                elif not self.tile_is_passable[y,x]:
+                    result += '@'
                 else:
                     best_action = np.argmax(tile)
                     result += ( "^", "v", "<", ">" )[best_action]

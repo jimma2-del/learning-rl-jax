@@ -1,3 +1,5 @@
+"""Utility functions for environments."""
+
 import math
 
 from typing import Any, Generic, Callable, Protocol, TypeAlias, ParamSpec, Sequence

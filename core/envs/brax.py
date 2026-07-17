@@ -1,3 +1,10 @@
+"""Utility for converting a Brax `PipelineEnv` into an `Environment`/`Space` 
+    following the API of this repository.
+
+NOTE: These "wrappers" are unrelated to the Wrapper type in wrappers.py, 
+    which take in an Environment from this repository, rather than an environment from an external library.
+"""
+
 from typing import Any
 
 import numpy as np

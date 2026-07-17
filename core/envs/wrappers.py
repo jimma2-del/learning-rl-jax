@@ -1,3 +1,5 @@
+"""Module for environment wrappers, containing the Wrapper ABC and built-in wrapper classes."""
+
 from typing import Any, Generic
 from typing_extensions import TypeVar
 

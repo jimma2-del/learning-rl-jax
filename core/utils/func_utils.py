@@ -1,3 +1,5 @@
+"""Utilities relating to handling functions."""
+
 from typing import Callable, TypeVar, Any, ParamSpec
 
 import inspect
@@ -7,10 +9,16 @@ P = ParamSpec('P')
 TReturn = TypeVar('TReturn')
 
 def try_call(possibly_callable: Callable[P, TReturn] | TReturn, *args: P.args, **kwargs: P.kwargs) -> TReturn:
+    """Calls the input and returns the result if it is callable; returns the input directly otherwise."""
     if callable(possibly_callable): return possibly_callable(*args, **kwargs)
     return possibly_callable
 
 def optionally_pass(func: Callable[..., TReturn], *opt_args: Any, **opt_kwargs: Any) -> Callable[..., TReturn]:
+    """Returns `func` with arguments bound if they exist in `func`.
+    
+    Allows passing arguments to a function only if they function accepts them.
+    """
+
     params = inspect.signature(func).parameters
 
     # check for *args or **kwargs in params

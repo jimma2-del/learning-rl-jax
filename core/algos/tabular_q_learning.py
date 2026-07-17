@@ -88,6 +88,7 @@ class TabularQFunc(Generic[TEnvObs], nnx.Module):
         self.q_table_values.value = self.q_table_values.value.at[indices].add(adjust)
 
     def obs_table_indices(self, obs: TEnvObs) -> Sequence[ArrayLike]:
+        """Get corresponding indices in the Q table for a particular observation."""
         flattened_obs = flatten_batched_tree(self.obs_shapes_dtypes, obs)
 
         array_is = jnp.clip(
@@ -137,19 +138,28 @@ class LinInterpTabularQFunc(Generic[TEnvObs], TabularQFunc[TEnvObs]):
         self.q_table_values.value = self.q_table_values.value.at[adjust_indices_tuple].add(adjust_amounts)
 
     def obs_table_indices(self, obs: TEnvObs) -> Sequence[ArrayLike]:
+        """Get corresponding indices in the Q table for a particular observation."""
         return flatten_batched_tree(self.obs_shapes_dtypes, obs)
 
 @dataclass(frozen=True)
 class Hyperparameters:
-    "Hyperparameters for Tabular Q-Learning."
-    n_envs: int = 32
+    """Hyperparameters for Tabular Q-Learning.
 
+    `n_envs`: Number of environments to run in parallel.
+    `discount_rate`: Discount factor gamma for the environment.
+
+    `epsilon`: Chance to take a random action instead of a greedy action during rollouts.
+        It is recommended to use a schedule: eg. decay from 1 to ~0.05 over ~10% of training steps.
+
+    `learning_rate`: Learning rate, scaling update sizes.
+    """
+
+    n_envs: int = 32
     discount_rate: Scheduleable[float] = 0.95
-    learning_rate: Scheduleable[float] = 0.1
 
     epsilon: Scheduleable[float] = 0.05
-        # it is recommended to use a schedule: decay from 1 to ~0.05 over ~10% of training steps
-        # eg. optax.schedules.linear_schedule(1, 0.05, 0.1*steps)
+
+    learning_rate: Scheduleable[float] = 0.1
 
 @dataclass
 class TrainingState(Generic[TEnvState, TEnvObs]):
@@ -187,6 +197,7 @@ class TabularQLearning(Generic[TEnvState, TEnvObs]):
         self.hyperparameters = hyperparameters
 
     def make_default_q_func(self, init_val: ArrayLike | None = None, rngs=None) -> TabularQFunc[TEnvObs]:
+        """Makes the default Q function - a Q table with rounding for continuous observations."""
         q_func = TabularQFunc(int(self.env.action_space.high + 1), self.env.observation_space)
 
         if init_val is not None:
@@ -196,11 +207,18 @@ class TabularQLearning(Generic[TEnvState, TEnvObs]):
 
     def make_actor(self, q_func: TabularQFunc[TEnvObs] | None = None, 
             epsilon: ArrayLike = 0, **kwargs) -> GreedyQActor[TEnvObs]:
+        """Make an Actor (obs, rngs) -> (action, infos) using `q_func`."""
+
         if q_func is None: q_func = self.make_default_q_func(**kwargs)
         return GreedyQActor(q_func, int(self.env.action_space.high + 1), epsilon=epsilon)
 
     def init_training_state(self, rngs: nnx.Rngs, q_func: TabularQFunc[TEnvObs] | None = None) \
             -> TrainingState[TEnvState, TEnvObs]:
+        """Initialize a starting training state, ready for training.
+        
+        Creates a default Q function object.
+        """
+
         if q_func is None: q_func = self.make_default_q_func()
         env_states, _ = jax.jit(self.env.reset)(jax.random.split(rngs.env(), self.hyperparameters.n_envs))
 

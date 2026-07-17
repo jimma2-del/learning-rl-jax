@@ -1,3 +1,5 @@
+"""Buffers, for use as replay buffers."""
+
 from typing import Any, Generic, TypeVar, Self, Sequence
 
 import math
@@ -16,6 +18,12 @@ TBufferItem = TypeVar("TBufferItem")
 
 @flax.struct.dataclass
 class CircularBuffer(Generic[TBufferItem]):
+    """Container which discards earliest inserted items upon reaching maximum capacity.
+    
+    Sequential order is kept intact, except in the transition from the last element to the first element.
+        Multiple circular buffers can be kept in parallel with `batch_dims`.
+    """
+
     item_shapes_dtypes: TBufferItem = flax.struct.field(pytree_node=False)
     length: int = flax.struct.field(pytree_node=False)
 
@@ -30,7 +38,12 @@ class CircularBuffer(Generic[TBufferItem]):
     @classmethod
     def init(cls, item_shapes_dtypes: TBufferItem, length: int, 
             batch_dims: int | Sequence[int] = ()) -> Self:
-        """`item_shapes_dtypes`: A PyTree of jax.ShapeDtypeStruct leaves, eg. from jax.eval_shape()."""
+        """Initialize an empty CircularBuffer.
+
+        `item_shapes_dtypes`: A PyTree of jax.ShapeDtypeStruct leaves, eg. from jax.eval_shape().
+        `length`: Maximum number of items per parallel circular buffer.
+        `batch_dims`: Dimensions of circular buffers kept in parallel.
+        """
 
         if isinstance(batch_dims, int):
             batch_dims = (batch_dims,)
@@ -54,15 +67,31 @@ class CircularBuffer(Generic[TBufferItem]):
         return position % self.length
 
     def get(self, position: ArrayLike, include_empty: bool = False) -> TBufferItem:
+        """Get an item at a position in the circular buffer, 
+            with position 0 being the earliest inserted item.
+        
+        `include_empty`: If True, considers all slots in the buffer as filled with items.
+        """
         index = self.index(position, include_empty=include_empty)
         return jax.tree.map(lambda leaf: leaf[index], self.data)
 
     def set(self, position: ArrayLike, item: TBufferItem, include_empty: bool = False) -> Self:
+        """Set an item at a position in the circular buffer,
+            with position 0 being the earliest inserted item.
+
+        Returns a copy of the buffer with the item set.
+        
+        `include_empty`: If True, considers all slots in the buffer as filled with items.
+        """
         index = self.index(position, include_empty=include_empty)
         return self.replace(data=jax.tree.map(lambda d, i: d.at[index].set(i), self.data, item))
 
     def insert(self, items: TBufferItem) -> Self:
-        """`items`: Shape (seq_len, *batch_dims, *item_shape_dtype.shape)."""
+        """Insert an array of items into the circular buffer,
+            removing the earliest inserted items if the buffer is full.
+
+        `items`: Array of items with shape (seq_len, *batch_dims, *item_shape_dtype.shape).
+        """
 
         if len(get_tree_batch_dims(self.item_shapes_dtypes, items)) < len(self.batch_dims) + 1:
             items = jax.tree.map(lambda x: x[None, ...], items) # single item -> add batch axis
@@ -80,6 +109,12 @@ class CircularBuffer(Generic[TBufferItem]):
         return self.replace(start_i=start_i, filled_len=filled_len)
 
     def remove(self, num: int, include_empty: bool = False) -> Self:
+        """Remove the specified number of items, starting from the earliest inserted item.
+        
+        Returns a copy of the buffer with the items marked as removed.
+
+        `include_empty`: If True, considers all slots in the buffer as filled with items.
+        """
         if include_empty:
             num = jnp.maximum(0, num - (self.length - self.filled_len))
         else:
@@ -89,7 +124,13 @@ class CircularBuffer(Generic[TBufferItem]):
 
     def sample(self, key: chex.PRNGKey, seq_len: int | None = None, 
             batch_dims: int | Sequence[int] = ()) -> TBufferItem:
-        """Returns: shape (*batch_dims, seq_len, *item_shape_dtype.shape)."""
+        """Sample a batch of items from the circular buffer with uniform probability.
+
+        `seq_length`: If provided, samples sequences (i, i+1, i+2, ...) instead of single samples.
+        
+        Returns: An array of samples of shape (*batch_dims, *item_shape_dtype.shape)
+            or (*batch_dims, seq_len, *item_shape_dtype.shape) if `seq_len` is specified.
+        """
         batch_is_key, seq_is_key = jax.random.split(key)
 
         if isinstance(batch_dims, int):
@@ -135,6 +176,16 @@ class CircularBufferWithOptionalData(Generic[TBufferItem, TOptionalData]):
         optional_data_capacity: int | None = None,
         batch_dims: int | Sequence[int] = ()
     ) -> Self:
+        """Initialize an empty CircularBuffer.
+
+        `main_shapes_dtypes`: A PyTree of jax.ShapeDtypeStruct leaves, eg. from jax.eval_shape().
+        `optional_data_shapes_dtypes`: A PyTree of jax.ShapeDtypeStruct leaves, eg. from jax.eval_shape().
+        `main_length`: Maximum number of main items per parallel circular buffer.
+        `optional_data_frac`: Maximum fraction of main items with optional data.
+        `optional_data_capacity`: Total maximum number optional data items stored.
+        `batch_dims`: Dimensions of circular buffers kept in parallel.
+        """
+
         assert optional_data_frac is None or optional_data_capacity is None, \
             "Specify either `optional_data_frac` or `optional_data_capacity`, not both."
         assert optional_data_frac is not None or optional_data_capacity is not None, \
@@ -164,11 +215,28 @@ class CircularBufferWithOptionalData(Generic[TBufferItem, TOptionalData]):
         return cls(main_buffer=main_buffer, optional_data_buffer=optional_data_buffer)
 
     def get(self, position: ArrayLike) -> tuple[TBufferItem, jax.Array, TOptionalData]:
+        """Get an item at a position in the circular buffer and its corresponding optional data,
+            with position 0 being the earliest inserted item.
+        
+        `include_empty`: If True, considers all slots in the buffer as filled with items.
+
+        Returns: 
+            an array of samples
+            a mask indicating if each item has optional data
+            an array of the samples' corresponding optional data
+        """
         main_data, has_opt, opt_i = self.main_buffer.get(position)
         return main_data, has_opt, jax.tree.map(lambda x: x[opt_i], self.optional_data_buffer.data)
 
     def insert(self, items: TBufferItem, has_optional_data_mask: ArrayLike, optional_data: TOptionalData) -> Self:
-        """`items`: Shape (seq_len, *batch_dims, *item_shape_dtype.shape)."""
+        """Insert an array of items and their optional data into the circular buffer,
+            removing the earliest inserted items if the buffer is full.
+
+        `items`: Array of items of shape (seq_len, *batch_dims, *item_shape_dtype.shape).
+        `has_optional_data_mask`: Mask of shape (seq_len, *batch_dims), indicating if each item has optional data.
+        `optional_data`: Array of optional data for each item, 
+            of shape (seq_len, *batch_dims, *optional_data_shapes_dtypes.shape)
+        """
         
         # calculate space left for opt data after opt data of main buffer overriden items is removed
         main_shapes_dtypes = self.main_buffer.item_shapes_dtypes[0]
@@ -210,6 +278,14 @@ class CircularBufferWithOptionalData(Generic[TBufferItem, TOptionalData]):
         return self.replace(main_buffer=main_buffer, optional_data_buffer=optional_data_buffer)
 
     def remove(self, num: int, include_empty: bool = False) -> Self:
+        """Remove the specified number of items and their optional data, 
+            starting from the earliest inserted item.
+        
+        Returns a copy of the buffer with the items marked as removed.
+
+        `include_empty`: If True, considers all slots in the buffer as filled with items.
+        """
+
         _, has_opt, opt_is = self.main_buffer.get(jnp.arange(num), include_empty=include_empty)
 
         opt_is += jnp.where(opt_is < self.optional_data_buffer.start_i, 
@@ -225,6 +301,17 @@ class CircularBufferWithOptionalData(Generic[TBufferItem, TOptionalData]):
 
     def sample(self, key: chex.PRNGKey, seq_len: int | None = None, 
             batch_dims: int | Sequence[int] = ()) -> tuple[TBufferItem, jax.Array, TOptionalData]:
-        """Returns: shape (*batch_dims, seq_len, *item_shape_dtype.shape)."""
+        """Sample a batch of items and their optional data from the circular buffer with uniform probability,
+
+        `seq_length`: If provided, samples sequences (i, i+1, i+2, ...) instead of single samples.
+        
+        Returned values have additional dimensions (*batch_dims),
+            or (*batch_dims, seq_len) if `seq_len` is specified.
+        
+        Returns: 
+            an array of samples
+            a mask indicating if each item has optional data
+            an array of the samples' corresponding optional data
+        """
         main_data, has_opt, opt_i = self.main_buffer.sample(key, seq_len=seq_len, batch_dims=batch_dims)
         return main_data, has_opt, jax.tree.map(lambda x: x[opt_i], self.optional_data_buffer.data)

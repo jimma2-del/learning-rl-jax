@@ -1,3 +1,5 @@
+"""Base classes and types for RL algorithms."""
+
 from typing import TypeVar, Generic, Protocol, TypeAlias, Sequence, Any, Iterable, Mapping, Callable, ParamSpec
 from enum import Enum
 from functools import wraps

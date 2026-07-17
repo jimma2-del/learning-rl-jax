@@ -89,7 +89,7 @@ train = nnx.jit(algo.train, static_argnames=('steps',), donate_argnames=('traini
 
 rngs = nnx.Rngs(0, env=1, actions=2, params=3, optimize_samples=4)
 training_state = algo.init_training_state(rngs, prefill_steps=5000)
-training_state, metrics = train(rngs, training_state, 100_000)
+training_state, metrics = train(rngs, training_state, steps=100_000)
 
 actor = algo.make_actor(training_state.networks, epsilon=0)
 evaluate = nnx.jit(evaluate_episodes, static_argnames=('env', 'episodes', 'n_envs'))
@@ -102,6 +102,7 @@ print(f"Episode Length: mean={jnp.mean(lengths)} std={jnp.std(lengths, ddof=1)}"
 ## Roadmap
 ### Short-term plans include:
 - Add better logging utilities and support for Weights & Biases.
+- Properly benchmark performance/speed and compare with other libraries.
 - Refine the environment API to be more flexible. Specifically, we should support states that persist throughout the entire training process, allowing for curriculum learning and reducing compile times for reset states caching.
 - Support multi-device training with the Anakin Podracer architecture.
 - Add more DQN add-ons: n-step returns, dueling networks, NoisyNets

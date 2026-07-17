@@ -31,9 +31,43 @@ from core.envs.utils import rollout, Actor, RandomActor
 
 @dataclass(frozen=True)
 class Hyperparameters:
-    n_envs: int = 256
+    """Hyperparameters for DQN.
 
+    `n_envs`: Number of environments to run in parallel.
+    `discount_rate`: Discount factor gamma for the environment.
+
+    `truncated_frac`: Fraction of timesteps expected to be truncated.
+        Lowering this increases performance, calling the critic on fewer extra observations.
+        However, truncated timesteps exceeding this limit will be treated as terminated.
+
+    `epsilon`: Chance to take a random action instead of a greedy action during rollouts.
+        It is recommended to use a schedule: eg. decay from 1 to ~0.05 over ~10% of training steps.
+
+    `learning_rate`: Learning rate, used for all networks.
+    `max_grad_norm`: Maximum gradient global norm, used for gradient clipping.
+    `optimizer_params`: Dict of extra parameters for the optimizer.
+
+    `batch_size`: Minibatch size for each gradient update.
+    `train_freq`: Does approximately 1 gradient step per `train_freq` environment steps.
+        If `n_envs > train_freq`, we take 1 step in each env, followed by multiple gradient steps.
+        NOTE: Actual number of env/gradient steps taken may be rounded if not evenly divisible.
+
+    `target_update_interval`: Hard updates the target network every `target_update_interval` env steps.
+
+    `polyak_tau`: If not None, applies a soft Polyak averaging update to the target network 
+        with this as the coefficient tau once every `train_freq` env steps.
+        NOTE: Takes precedence over hard updates; `target_update_interval` will be ignored.
+
+    `replay_buffer_size`: Maximum number of samples in the replay buffer.
+
+    `double_dqn`: If True, switches to the Double DQN formula for target calculation.
+    """
+
+    n_envs: int = 256
     discount_rate: Scheduleable[float] = 0.99
+    truncated_frac: float = 1.0
+
+    epsilon: Scheduleable[float] = 0.05
 
     learning_rate: Scheduleable[float] = 2.5e-4
     max_grad_norm: Scheduleable[float] | None = 10.0
@@ -41,24 +75,13 @@ class Hyperparameters:
         default_factory=lambda: { 'weight_decay': 0.0 })
 
     batch_size: int = 32
+    train_freq: int = 4
 
-    epsilon: Scheduleable[float] = 0.05
-        # it is recommended to use a schedule: decay from 1 to ~0.05 over ~10% of training steps
-        # eg. optax.schedules.linear_schedule(1, 0.05, 0.1*steps)
+    target_update_interval: int = 10_000
+
+    polyak_tau: Scheduleable[float] | None = None 
 
     replay_buffer_size: int = 1_000_000
-    truncated_frac: float = 1.0 # fraction of timesteps expected to be truncated
-        # lowering this saves memory by allocating less space for truncated observations in the replay buffer
-        # however, truncated timesteps exceeding the specified limit will be treated as terminated
-
-    train_freq: int = 4 # does approximately 1 optimize step per train_freq environment steps
-        # if n_envs > train_freq, we take 1 step in each env, followed by multiple optimize steps
-        # NOTE: actual number of env/optimize steps taken may be rounded if not evenly divisible
-
-    target_update_interval: int = 10_000 # environment steps
-
-    polyak_tau: Scheduleable[float] | None = None # if not None, OVERRIDES `target_update_interval``
-        # target is updated after EVERY gradient step if not None
 
     double_dqn: bool = False
 
@@ -99,7 +122,7 @@ class Networks(nnx.Module, Generic[TEnvObs, TTrunkOut]):
         obs_running_mean_var: RunningMeanVar[TEnvObs] | None = None, 
         obs_clip_threshold: float | None = None
     ) -> Callable[[TEnvObs], TTrunkOut]:
-        """NOTE: Contains no learnable parameters!"""
+        """Observation standardization + flattening; contains no learnable parameters!"""
         layers = []
 
         if normalize_observations:
@@ -122,6 +145,8 @@ class Networks(nnx.Module, Generic[TEnvObs, TTrunkOut]):
 
 @dataclass(frozen=True)
 class ReplayTimestep(Generic[TEnvObs]):
+    """Dataclass storing data for a single timestep in the replay buffer.
+    The replay buffer samples `ReplayTimestep`s in pairs of (i, i+1)."""
     obs: TEnvObs
     action: ArrayLike
     reward: ArrayLike
@@ -129,6 +154,7 @@ class ReplayTimestep(Generic[TEnvObs]):
 
 @dataclass
 class TrainingState(Generic[TEnvState, TEnvObs, TTrunkOut]):
+    """Training state for DQN."""
     steps: ArrayLike
     env_states: TEnvState
 
@@ -171,6 +197,9 @@ class DQN(Generic[TEnvState, TEnvObs]):
 
     def make_optax_optimizer(self, base: Callable[..., optax.GradientTransformation] = optax.adamw) \
             -> optax.GradientTransformationExtraArgs:
+        """Wraps the `base` optimizer (default AdamW) with a global-norm-based gradient clipping transform,
+            and `optax.inject_hyperparams`, which is necessary for this repo's 
+            external environment-steps-based parameter scheduling."""
         optimizer_params = self.resolve_optimizer_params(0)
 
         @optax.inject_hyperparams
@@ -181,6 +210,9 @@ class DQN(Generic[TEnvState, TEnvObs]):
         return make_optimizer(**optimizer_params)
 
     def resolve_optimizer_params(self, steps: int = 0) -> dict[str, Any]:
+        """Get values for each optimizer parameter at a particular number of env steps trained.
+        Includes 'learning_rate', 'max_grad_norm', and other extra optimizer parameters."""
+        
         return jax.tree.map(lambda x: try_call(x, steps), {
             'learning_rate': self.hyperparameters.learning_rate,
             'max_grad_norm': self.hyperparameters.max_grad_norm,
@@ -192,7 +224,11 @@ class DQN(Generic[TEnvState, TEnvObs]):
         epsilon: ArrayLike = jnp.array(0.0), 
         rngs: nnx.Rngs | None = None
     ) -> GreedyQActor[TEnvObs]:
-        """`rngs` is only necessary if `networks` is not provided."""
+        """Make an Actor (obs, rngs) -> (action, infos) using `networks`.
+
+        `rngs` is only necessary if `networks` is not provided.
+            It will be used to create default networks.
+        """
 
         if networks is None: 
             networks = Networks.make_default(rngs, self.env.observation_space, self.env.action_space)
@@ -210,6 +246,13 @@ class DQN(Generic[TEnvState, TEnvObs]):
         replay_buffer: CircularBufferWithOptionalData[ReplayTimestep[TEnvObs], TEnvObs] | None = None,
         prefill_steps: int = 10_000,
     ) -> TrainingState[TEnvState, TEnvObs, TTrunkOut]:
+        """Initialize a starting training state, ready for training.
+
+        Creates a default Networks, optax optimizer, and replay buffer object if not given.
+
+        Prefills the replay buffer with `prefill_steps` samples.
+        """
+
         if networks is None: 
             networks = Networks.make_default(rngs, self.env.observation_space, self.env.action_space)
 

@@ -35,43 +35,75 @@ from core.envs.utils import rollout, Timestep
 
 @dataclass(frozen=True)
 class Hyperparameters:
-    n_envs: int = 256
+    """Hyperparameters for PPO.
+    
+    `n_envs`: Number of environments to run in parallel.
+    `discount_rate`: Discount factor gamma for the environment.
 
+    `truncated_frac`: Fraction of timesteps expected to be truncated.
+        Lowering this increases performance, calling the critic on fewer extra observations.
+        However, truncated timesteps exceeding this limit will be treated as terminated.
+
+    `learning_rate`: Learning rate, used for all networks.
+    `max_grad_norm`: Maximum gradient global norm, used for gradient clipping.
+    `optimizer_params`: Dict of extra parameters for the optimizer.
+
+    `rollout_length`: Number of steps to run per env per update (batch size is `rollout_length * n_envs`).
+    `n_minibatches`: Number of minibatches to split each rollout batch into.
+        Minibatch size is `rollout_length * n_envs / n_minibatches`; must divide evenly.
+    `n_epochs`: Number of complete optimization passes of the entire rollout batch.
+
+    `recompute_advantages`: If True, recomputes advantages before every epoch rather than only the first epoch.
+        See https://arxiv.org/pdf/2006.05990 (Appendix B.1)
+
+    `target_kl`: If not None, stops further training epochs if the average approx_kl 
+        of the previous epoch exceeds this threshold.
+
+    `clip_epsilon`: PPO-Clip clipping range for policy updates.
+
+    `gae_lambda`: Factor controlling bias vs. variance tradeoff for Generalized Advantage Estimation.
+        `gae_lambda=1` is equivalent to using classic n-step returns.
+
+    `vf_coef`: Coefficient for the value loss term in the combined loss calculation.
+        Controls the learning rate of the value network, as a fraction of the main learning rate.
+    `ent_coef`: Coefficient for the entropy bonus term in the combined loss calculation.
+        Controls how much higher entropy is favored. At `ent_coef=0`, higher entropy is not favored.
+
+    `ent_weight_continuous`: Entropy for continuous actions is scaled by this coefficient.
+        For mixed continuous-discrete action spaces, it may be helpful to reduce the weight of the continuous 
+        (differential) entropy, since it tends to have a higher scale than discrete (Shannon's) entropy.
+
+    `normalize_advantages`: If True, standardizes advantages across each minibatch (mean=0, std=1).
+    """
+
+    n_envs: int = 256
     discount_rate: Scheduleable[float] = 0.99
+
+    truncated_frac: float = 1.0
 
     learning_rate: Scheduleable[float] = 2.5e-4
     max_grad_norm: Scheduleable[float] | None = 0.5
     optimizer_params: Mapping[str, Scheduleable[float]] = field(
         default_factory=lambda: { 'weight_decay': 0.0 })
 
-    gae_lambda: Scheduleable[float] = 0.95
+    rollout_length: int = 32
+    n_minibatches: int = 32
+    n_epochs: int = 8
 
-    rollout_length: int = 32 # steps per env per update (batch size is rollout_length * n_envs)
-    n_minibatches: int = 32 # number of minibatches to split each batch into
-        # minibatch size is rollout_length * n_envs / n_minibatches; must divide evenly
-    n_epochs: int = 8 # number of full run throughs of the entire batch
+    recompute_advantages: bool = False
+
+    target_kl: Scheduleable[float] | None = None
 
     clip_epsilon: Scheduleable[float] = 0.25
 
-    vf_coef: Scheduleable[float] = 0.5 # value function coefficient for the loss calculation
-    ent_coef: Scheduleable[float] = 0.001 # conservative default; 0.01 to 0.001 (possibly schedule)
+    gae_lambda: Scheduleable[float] = 0.95
+
+    vf_coef: Scheduleable[float] = 0.5 
+    ent_coef: Scheduleable[float] = 0.001
 
     ent_weight_continuous: Scheduleable[float] = 1
-        # if using both discrete and continuous actions, it may be helpful to reduce the weight
-            # of the continuous (differential) entropy, since it tends to have a higher scale
-            # than discrete (Shannon's) entropy
 
     normalize_advantages: bool = True
-
-    recompute_advantages: bool = False # if True, recomputes GAEs before every epoch.
-        # see https://arxiv.org/pdf/2006.05990 (Appendix B.1)
-
-    target_kl: Scheduleable[float] | None = None # if not None, stops further training epochs 
-        # if the average approx_kl of the previous epoch exceeds this threshold
-
-    truncated_frac: float = 1.0 # fraction of timesteps expected to be truncated
-        # lowering increases performance, calling the critic on fewer extra observations
-        # however, truncated timesteps exceeding the specified limit will be treated as terminated
     
 TEnvState = TypeVar("TEnvState")
 TEnvObs = TypeVar("TEnvObs")
@@ -117,7 +149,7 @@ class Networks(nnx.Module, Generic[TEnvObs, TEnvAction, TTrunkOut]):
         obs_running_mean_var: RunningMeanVar[TEnvObs] | None = None, 
         obs_clip_threshold: float | None = None
     ) -> Callable[[TEnvObs], TTrunkOut]:
-        """NOTE: Contains no learnable parameters!"""
+        """Observation standardization + flattening; contains no learnable parameters!"""
         layers = []
 
         if normalize_observations:
@@ -157,6 +189,7 @@ class Networks(nnx.Module, Generic[TEnvObs, TEnvAction, TTrunkOut]):
 
 @dataclass
 class TrainingState(Generic[TEnvState, TEnvObs, TEnvAction, TTrunkOut]):
+    """Training state for PPO."""
     steps: ArrayLike
     env_states: TEnvState
 
@@ -184,6 +217,9 @@ class PPO(Generic[TEnvState, TEnvObs]):
 
     def make_optax_optimizer(self, base: Callable[..., optax.GradientTransformation] = optax.adamw) \
             -> optax.GradientTransformationExtraArgs:
+        """Wraps the `base` optimizer (default AdamW) with a global-norm-based gradient clipping transform,
+            and `optax.inject_hyperparams`, which is necessary for this repo's 
+            external environment-steps-based parameter scheduling."""
         optimizer_params = self.resolve_optimizer_params(0)
 
         @optax.inject_hyperparams
@@ -194,6 +230,9 @@ class PPO(Generic[TEnvState, TEnvObs]):
         return make_optimizer(**optimizer_params)
 
     def resolve_optimizer_params(self, steps: int = 0) -> dict[str, Any]:
+        """Get values for each optimizer parameter at a particular number of env steps trained.
+        Includes 'learning_rate', 'max_grad_norm', and other extra optimizer parameters."""
+        
         return jax.tree.map(lambda x: try_call(x, steps), {
             'learning_rate': self.hyperparameters.learning_rate,
             'max_grad_norm': self.hyperparameters.max_grad_norm,
@@ -205,7 +244,11 @@ class PPO(Generic[TEnvState, TEnvObs]):
         deterministic_sampling: bool = False, squash_continuous: bool = True,
         rngs: nnx.Rngs | None = None
     ) -> StochasticPolicyActor[TEnvObs, TEnvAction]:
-        """`rngs` is only necessary if `networks` is not provided."""
+        """Make an Actor (obs, rngs) -> (action, infos) using `networks`.
+
+        `rngs` is only necessary if `networks` is not provided.
+            It will be used to create default networks.
+        """
 
         if networks is None: 
             networks = Networks.make_default(rngs, self.env.observation_space, self.env.action_space)
@@ -222,6 +265,11 @@ class PPO(Generic[TEnvState, TEnvObs]):
         networks: Networks[TEnvObs, TEnvAction, TTrunkOut] | None = None,
         optax_optimizer: optax.GradientTransformationExtraArgs | None = None,
     ) -> TrainingState[TEnvState, TEnvObs, TEnvAction, TTrunkOut]:
+        """Initialize a starting training state, ready for training.
+        
+        Creates a default Networks and optax optimizer object if not given.
+        """
+
         if networks is None: 
             networks = Networks.make_default(rngs, self.env.observation_space, self.env.action_space)
 

@@ -1,3 +1,5 @@
+"""Useful Flax NNX Modules."""
+
 from typing import Any, Generic, TypeVar, overload, Container, ParamSpec, Callable, Sequence
 
 from functools import update_wrapper
@@ -94,6 +96,7 @@ class Pipe(nnx.Module):
         return output
 
 class MLP(nnx.Module):
+    """MLP which applies linear layers, activation functions, and optionally, layer norms."""
 
     def __init__(self, rngs: nnx.Rngs, layer_dims: Sequence[int],
             do_layer_norm: bool = False, activation_func = nnx.relu) -> None:
@@ -200,6 +203,7 @@ class ActionDistributionHead(nnx.Module, Generic[TEnvAction]):
                 # stds should be initialized small; https://arxiv.org/abs/2006.05990
 
     def __call__(self, x: jax.Array, rngs=None):
+        """Converts a 1D array of flattened values into an unflattened action distribution."""
         leaves = []
         i = 0
         state_indep_log_stds_i = 0

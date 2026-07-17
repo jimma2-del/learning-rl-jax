@@ -1,6 +1,9 @@
 """Implementation of Twin Delayed Deep Deterministic Policy Gradient (TD3) - https://arxiv.org/abs/1802.09477
 
 We use Gaussian noise instead of Ornstein-Uhlenbeck (OU) noise for both exploration and target smoothing.
+
+For off-policy algorithms including TD3, we update the shared `obs_trunk` feature extractor
+    only during Q function updates with the Q loss; it is kept frozen during policy updates.
 """
 
 from typing import TypeVar, Generic, Any, Sequence, Self, Callable, Mapping, Literal
@@ -31,9 +34,46 @@ from core.envs.utils import rollout, Actor, RandomActor
 
 @dataclass(frozen=True)
 class Hyperparameters:
-    n_envs: int = 256
+    """Hyperparameters for TD3.
 
+    `n_envs`: Number of environments to run in parallel.
+    `discount_rate`: Discount factor gamma for the environment.
+
+    `truncated_frac`: Fraction of timesteps expected to be truncated.
+        Lowering this increases performance, calling the critic on fewer extra observations.
+        However, truncated timesteps exceeding this limit will be treated as terminated.
+
+    `exploration_noise`: Standard deviation of Gaussian noise added to actions during rollouts.
+
+    `learning_rate`: Learning rate, used for all networks.
+    `max_grad_norm`: Maximum gradient global norm, used for gradient clipping.
+
+    `policy_optimizer_params`: Dict of extra parameters for the policy head optimizer.
+    `q_func_optimizer_params`: Dict of extra parameters for the obs trunk & Q heads optimizer.
+
+    `batch_size`: Minibatch size for each gradient update.
+    `train_freq`: Does approximately 1 gradient step per `train_freq` environment steps.
+        If `n_envs > train_freq`, we take 1 step in each env, followed by multiple gradient steps.
+        NOTE: Actual number of env/gradient steps taken may be rounded if not evenly divisible.
+
+    `policy_delay`: Updates the policy head once every `policy_delay` Q network updates.
+        Actual number of updates done may be rounded if not evenly divisible.
+    `polyak_tau`: Coefficient tau for target network soft Polyak averaging updates.
+        Target networks are only updated on policy head updates, 
+            ie. once every `train_freq * policy_delay` env steps.
+        NOTE: Takes precedence over hard updates; `target_update_interval` will be ignored.
+
+    `target_noise`: Standard deviation of Gaussian noise added to target policy actions.
+    `target_noise_clip`: Maximum value of target policy smoothing noise along each dimension.
+
+    `replay_buffer_size`: Maximum number of samples in the replay buffer.
+    """
+
+    n_envs: int = 256
     discount_rate: Scheduleable[float] = 0.99
+    truncated_frac: float = 1.0 
+
+    exploration_noise: Scheduleable[float] = 0.1
 
     learning_rate: Scheduleable[float] = 2.5e-4
     max_grad_norm: Scheduleable[float] | None = 10.0
@@ -44,24 +84,15 @@ class Hyperparameters:
         default_factory=lambda: { 'weight_decay': 0.0 })
 
     batch_size: int = 32
+    train_freq: int = 4
 
-    replay_buffer_size: int = 1_000_000
-    truncated_frac: float = 1.0 # fraction of timesteps expected to be truncated
-        # lowering this saves memory by allocating less space for truncated observations in the replay buffer
-        # however, truncated timesteps exceeding the specified limit will be treated as terminated
+    policy_delay: int = 2 
+    polyak_tau: Scheduleable[float] | None = None 
 
-    train_freq: int = 4 # does approximately 1 optimize step per train_freq environment steps
-        # if n_envs > train_freq, we take 1 step in each env, followed by multiple optimize steps
-        # NOTE: actual number of env/optimize steps taken may be rounded if not evenly divisible
-    policy_delay: int = 2 # updates the policy once every `policy_delay` Q-function updates
-        # NOTE: actual number of updates done may be rounded if not evenly divisible
-
-    polyak_tau: Scheduleable[float] | None = None # if not None, OVERRIDES `target_update_interval``
-        # target is updated after EVERY gradient step if not None
-
-    exploration_noise: Scheduleable[float] = 0.1 # std
     target_noise: Scheduleable[float] = 0.2 # std
     target_noise_clip: Scheduleable[float] = 0.5
+
+    replay_buffer_size: int = 1_000_000
 
 TEnvState = TypeVar("TEnvState")
 TEnvObs = TypeVar("TEnvObs")
@@ -79,7 +110,7 @@ class Networks(nnx.Module, Generic[TEnvObs, TEnvAction, TTrunkOut]):
         Actions are given raw; the head is responsible for flattening.
     
     NOTE: Unlike in on-policy algorithms, in off-policy algorithms including TD3, the shared `obs_trunk` 
-        is only updated during Q function updates; it is kept frozen during policy updates.
+        is only updated during Q function updates with the Q loss; it is kept frozen during policy updates.
 
     Defaults:
         `obs_trunk`: observation standardization + flattening; no learnable parameters
@@ -112,7 +143,7 @@ class Networks(nnx.Module, Generic[TEnvObs, TEnvAction, TTrunkOut]):
         obs_running_mean_var: RunningMeanVar[TEnvObs] | None = None, 
         obs_clip_threshold: float | None = None
     ) -> Callable[[TEnvObs], TTrunkOut]:
-        """NOTE: Contains no learnable parameters!"""
+        """Observation standardization + flattening; contains no learnable parameters!"""
         layers = []
 
         if normalize_observations:
@@ -152,6 +183,8 @@ class Networks(nnx.Module, Generic[TEnvObs, TEnvAction, TTrunkOut]):
 
 @dataclass(frozen=True)
 class ReplayTimestep(Generic[TEnvObs, TEnvAction]):
+    """Dataclass storing data for a single timestep in the replay buffer.
+    The replay buffer samples `ReplayTimestep`s in pairs of (i, i+1)."""
     obs: TEnvObs
     action: TEnvAction
     reward: ArrayLike
@@ -159,6 +192,7 @@ class ReplayTimestep(Generic[TEnvObs, TEnvAction]):
 
 @dataclass
 class TrainingState(Generic[TEnvState, TEnvObs, TEnvAction, TTrunkOut]):
+    """Training state for TD3."""
     steps: ArrayLike
     env_states: TEnvState
 
@@ -201,6 +235,9 @@ class TD3(Generic[TEnvState, TEnvObs, TEnvAction]):
         network_name: Literal['policy', 'q_func'],
         base: Callable[..., optax.GradientTransformation] = optax.adamw
     ) -> optax.GradientTransformationExtraArgs:
+        """Wraps the `base` optimizer (default AdamW) with a global-norm-based gradient clipping transform,
+            and `optax.inject_hyperparams`, which is necessary for this repo's 
+            external environment-steps-based parameter scheduling."""
         optimizer_params = self.resolve_optimizer_params(network_name, 0)
 
         @optax.inject_hyperparams
@@ -210,7 +247,14 @@ class TD3(Generic[TEnvState, TEnvObs, TEnvAction]):
 
         return make_optimizer(**optimizer_params)
 
-    def resolve_optimizer_params(self, network_name: Literal['policy', 'q_func'], steps: int = 0) -> dict[str, Any]:
+    def resolve_optimizer_params(self, network_name: Literal['policy', 'q_func'], 
+            steps: int = 0) -> dict[str, Any]:
+        """Get values for each optimizer parameter at a particular number of env steps trained.
+        Includes 'learning_rate', 'max_grad_norm', and other extra optimizer parameters.
+        
+        Specify the optimizer to get parameters for with `network_name`.
+        """
+        
         additional_params = { 
             'policy': self.hyperparameters.policy_optimizer_params, 
             'q_func': self.hyperparameters.q_func_optimizer_params 
@@ -227,7 +271,11 @@ class TD3(Generic[TEnvState, TEnvObs, TEnvAction]):
         noise: ArrayLike = jnp.array(0.0), 
         rngs: nnx.Rngs | None = None
     ) -> DeterministicPolicyActor[TEnvObs, TEnvAction]:
-        """`rngs` is only necessary if `networks` is not provided."""
+        """Make an Actor (obs, rngs) -> (action, infos) using `networks`.
+
+        `rngs` is only necessary if `networks` is not provided.
+            It will be used to create default networks.
+        """
 
         if networks is None: 
             networks = Networks.make_default(rngs, self.env.observation_space, self.env.action_space)
@@ -246,6 +294,13 @@ class TD3(Generic[TEnvState, TEnvObs, TEnvAction]):
         replay_buffer: CircularBufferWithOptionalData[ReplayTimestep[TEnvObs, TEnvAction], TEnvObs] | None = None,
         prefill_steps: int = 10_000,
     ) -> TrainingState[TEnvState, TEnvObs, TEnvAction, TTrunkOut]:
+        """Initialize a starting training state, ready for training.
+
+        Creates a default Networks, optax optimizer, and replay buffer object if not given.
+
+        Prefills the replay buffer with `prefill_steps` samples.
+        """
+
         if networks is None: 
             networks = Networks.make_default(rngs, self.env.observation_space, self.env.action_space)
 

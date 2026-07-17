@@ -1,3 +1,5 @@
+"""GPU-accelerated FlappyBird environment, with JAX image observation rendering."""
+
 import numpy as np
 
 from chex import dataclass
@@ -14,7 +16,12 @@ import dataclasses
 
 @dataclass(frozen=True)
 class State:
-    # positions refer to the CENTER
+    """State for the FlappyBird environment.
+
+    Coordinates (y, x) are relative to the center of the screen.,
+        with positive y being the downward direction.
+    """
+
     bird_pos_y: ArrayLike
     bird_vel_y: ArrayLike
 
@@ -26,6 +33,11 @@ class State:
 
 @dataclass(frozen=True)
 class Settings:
+    """Settings for the FlappyBird environment.
+
+    Positive y refers to the downward direction.
+    """
+
     window_size: tuple[int, int] = (800, 600) # height, width
 
     bird_size: int = 40
@@ -44,22 +56,55 @@ class Settings:
 
 @dataclass(frozen=True)
 class Rewards:
+    """Reward values for the FlappyBird environment."""
     pass_pipe: int = 1
     death: int = -1
 
 @dataclass(frozen=True)
 class RenderSettings:
+    """Settings for the FlappyBird environment's image observation rendering."""
     background_color = jnp.array((139, 212, 245), dtype=jnp.uint8)
     pipe_color = jnp.array((114, 197, 100), dtype=jnp.uint8)
     bird_color = jnp.array((253, 218, 66), dtype=jnp.uint8)
 
 class FlappyBirdEnv(Environment[State, Array, ArrayLike, Array]):
+    """GPU-accelerated FlappyBird environment, with JAX image observation rendering.
 
-    def __init__(self, dt=0.1, settings=Settings(), rewards=Rewards(), render_settings=RenderSettings()):
+    A recreation of the popular Flappy Bird mobile game:
+        The agent controls a "bird", which on its own, falls down rapidly to the ground.
+        Every step, the agent chooses whether or not to "flap" and move upwards.
+        Vertical "pipes" appear on the screen, moving from the right side to the left side.
+            Pipes appear in sets of upper and lower portions, with a gap in the middle.
+        The agent fails if it hits the pipes or the upper and lower bounds of the screen.
+            The agent must maneuver the bird through the gaps in the pipes.
+    
+    Coordinates (y, x) are relative to the center of the screen.,
+        with positive y being the downward direction.
+
+    State-based observations (default) consist of an array of 3 floats: 
+        The bird's vertical velocity, 
+        Vertical distance from the bird to the center of the next pipe gap.
+        Horizontal distance from the bird to the center of the next pipe gap.
+
+    Image-based observations can also be enabled, for a (800, 600, 3) array observation.
+        Color channels will be normalized to [0, 1].
+        NOTE: Image-based observations is experimental.
+
+    Actions: a single integer [0, 1] indicating whether to flap.
+
+    Rewards: 
+        a reward (default 1) for passing a pipe
+        a reward (default -1) for colliding with a pipe or the upper and lower bounds of the screen
+    """
+
+    def __init__(self, dt=0.1, settings=Settings(), rewards=Rewards(), render_settings=RenderSettings(),
+            use_image_obs: bool = False) -> None:
         self.DT = dt
         self.settings = settings
         self.rewards = rewards
         self.render_settings = render_settings
+
+        self.use_image_obs = use_image_obs
 
     def reset(self, key: chex.PRNGKey) -> tuple[State, dict[Any, Any]]:
         pipe1_key, pipe2_key = jax.random.split(key, 2)
@@ -144,6 +189,12 @@ class FlappyBirdEnv(Environment[State, Array, ArrayLike, Array]):
         )
 
     def get_obs(self, key: chex.PRNGKey, state: State) -> Array:
+        if self.use_image_obs:
+            return self.render(state, 0)
+        
+        return self.get_state_obs(state)
+
+    def get_state_obs(self, state: State) -> Array:
         use_pipe2 = state.pipe1_pos_x + self.settings.pipe_width/2 + self.settings.bird_size < self.settings.bird_pos_x
 
         pipe_pos_x = jnp.where(use_pipe2, state.pipe2_pos_x, state.pipe1_pos_x)
@@ -190,8 +241,19 @@ class FlappyBirdEnv(Environment[State, Array, ArrayLike, Array]):
 
     @property
     def observation_space(self) -> Space[Array]:
-        """Observation space of the environment."""
-        # TODO: values should depend on self.settings
+        """Observation space of the environment.
+        
+        IMPORTANT: for state-based observations, high and low bounds are only currently accurate 
+            for the default settings.
+        """
+        if self.use_image_obs:
+            shape = (*self.settings.window_size, 3)
+
+            Space(
+                low=np.full(shape, 0.0, dtype=np.float32), 
+                high=np.full(shape, 1.0, dtype=np.float32), 
+            )
+
         return Space(
             low=np.array((-600.0, -625.0, -100), dtype=np.float32), 
             high=np.array((1500.0,  625.0, 255), dtype=np.float32)

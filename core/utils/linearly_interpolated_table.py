@@ -7,7 +7,11 @@ import jax
 from core.utils.batch_utils import batched_index, shape_matches_excluding_batch_axes
 
 class LinearlyInterpolatedTable:
-    """Supports batched positions -- getting/setting values at multiple positions at once."""
+    """Linearly interpolates values using nearby grid points.
+    Can also extrapolate values if outside of the grid, though this is usually highly inaccurate.
+
+    Supports batched positions -- getting/setting values at multiple positions at once.
+    """
 
     def __init__(self, min: ArrayLike, max: ArrayLike, step: ArrayLike):
         self.min = np.asarray(min)
@@ -27,6 +31,7 @@ class LinearlyInterpolatedTable:
         return jnp.full(self.shape, init, dtype=jnp.float32)
 
     def get(self, data: jax.Array, pos: ArrayLike) -> jax.Array:
+        """Get a linearly interpolated value at a position."""
         assert shape_matches_excluding_batch_axes(self.shape, data.shape)
         assert pos.shape[-1] == len(self.shape)
 
@@ -42,7 +47,13 @@ class LinearlyInterpolatedTable:
     def get_corner_adjustments(
         self, data: jax.Array, pos: ArrayLike, adjust_amount: ArrayLike
     ) -> tuple[jax.Array, jax.Array]:
-        """Returns: (*batch_dims, corner_dim, pos_dim), (*batch_dims, corner_dim)."""
+        """Adjust values at gridpoints to adjust the linearly interpolated value at the position.
+        Get the adjustment needed for each gridpoint.
+
+        Returns: 
+            corner positions: (*batch_dims, corner_dim, pos_dim) 
+            corner adjustment values: (*batch_dims, corner_dim)
+        """
         assert shape_matches_excluding_batch_axes(self.shape, data.shape)
         assert pos.shape[-1] == len(self.shape)
 
@@ -55,6 +66,7 @@ class LinearlyInterpolatedTable:
         return corner_indices, adjust_amounts
 
     def adjust(self, data: jax.Array, pos: ArrayLike, adjust_amount: ArrayLike) -> jax.Array:
+        """Adjust values at gridpoints to adjust the linearly interpolated value at the position."""
         corner_indices, adjust_amounts = self.get_corner_adjustments(data, pos, adjust_amount)
 
         # move corner axis to the front
@@ -64,6 +76,7 @@ class LinearlyInterpolatedTable:
         return data.at[batched_index(data, corner_indices)].add(adjust_amounts)
 
     def set(self, data: jax.Array, pos: ArrayLike, value: ArrayLike) -> jax.Array:
+        """Adjust values at gridpoints to set the linearly interpolated value at the position."""
         cur_value = self.get(data, pos)
         return self.adjust(data, pos, value - cur_value)
     

@@ -10,12 +10,15 @@ TInput = TypeVar('TInput')
 
 @chex.dataclass(frozen=True)
 class RunningMeanVar(Generic[TInput]):
+    """Class which keeps a running mean and variance, using Welford's formula."""
+
     mean: TInput
     var: TInput
     count: jax.Array
 
     @classmethod
     def init(cls, shapes_dtypes: TInput) -> Self:
+        """Initialize the class, with no tracked samples yet."""
         return cls(
             mean = jax.tree.map(lambda s_dt: jnp.zeros(s_dt.shape), shapes_dtypes),
             var = jax.tree.map(lambda s_dt: jnp.zeros(s_dt.shape), shapes_dtypes),
@@ -23,7 +26,11 @@ class RunningMeanVar(Generic[TInput]):
         )
 
     def merge(self, other: Self) -> Self:
-        """See https://en.wikipedia.org/wiki/Algorithms_for_calculating_variance#Parallel_algorithm"""
+        """Merges running mean and variance statistics with that of another RunningMeanVar object,
+            returning an updated RunningMeanVar object.
+
+        See https://en.wikipedia.org/wiki/Algorithms_for_calculating_variance#Parallel_algorithm
+        """
 
         new_count = self.count + other.count
         count_ratio = other.count / new_count
@@ -42,6 +49,8 @@ class RunningMeanVar(Generic[TInput]):
         return RunningMeanVar(mean=new_mean, var=new_var, count=new_count)
 
     def update(self, x: TInput) -> Self:
+        """Updates the running mean and variance with one or more samples, 
+            returning an updated RunningMeanVar object."""
         x = flatten_tree_batch_axes(jax.eval_shape(lambda: self.mean), x)
 
         batch_stats = RunningMeanVar(
@@ -53,6 +62,7 @@ class RunningMeanVar(Generic[TInput]):
         return self.merge(batch_stats)
 
     def normalize(self, x: TInput, epsilon=1e-8) -> TInput:
+        """Standardize an input to mean=0, var=1 using the running mean/variance."""
         return jax.tree.map(lambda x, mean, var: (x - mean) / jnp.sqrt(var + epsilon), x, self.mean, self.var)
 
 # if __name__ == "__main__":

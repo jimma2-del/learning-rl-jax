@@ -1,6 +1,8 @@
-"""
-Utility for converting a MuJoCo Playground (MjxEnv) environment into an Environment following the API of this repository.
-NOTE: these "wrappers" are unrelated to the Wrapper type in wrappers.py, which take in an Environment from this repository.
+"""Utility for converting a MuJoCo Playground `MjxEnv` into an `Environment`/`Space` 
+    following the API of this repository.
+
+NOTE: These "wrappers" are unrelated to the Wrapper type in wrappers.py, 
+    which take in an Environment from this repository, rather than an environment from an external library.
 """
 
 from typing import Any

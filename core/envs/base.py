@@ -1,3 +1,5 @@
+"""Base classes for environments in this repository."""
+
 from typing import Any, Generic, Sequence
 from typing_extensions import TypeVar
 from abc import ABC, abstractmethod
@@ -445,22 +447,22 @@ class Environment(ABC, Generic[TEnvState, TEnvObs, TEnvAction, TRenderFrame]):
 
     @abstractmethod
     def reset(self, key: chex.PRNGKey) -> tuple[TEnvState, dict[Any, Any]]:
-        """Performs resetting of environment.
+        """Performs resetting of the environment.
         Returns: state, info"""
 
     @abstractmethod
     def step(self, key: chex.PRNGKey, state: TEnvState, action: TEnvAction) \
         -> tuple[TEnvState, jax.Array, jax.Array, jax.Array, dict[Any, Any]]:
-        """Performs step transitions in the environment.
+        """Perform a step transition in the environment.
         Returns: state, reward, terminated, truncated, info"""
 
     @abstractmethod
     def get_obs(self, key: chex.PRNGKey, state: TEnvState) -> TEnvObs:
-        """Applies observation function to state."""
+        """Gets an observation from a state."""
 
     def render(self, state: TEnvState, action: ArrayLike) -> TRenderFrame:
-        """Compute a render frame from the state-action pair.
-        Intended for human interpretation (visualization, debugging); should not be used as a policy input.
+        """Compute a render frame from a state-action pair.
+        Intended for human interpretation (visualization, debugging); may not be usable as a policy input.
         Implementations may or may not be jittable.
         Unimplemented by default, returning None."""
         return None
