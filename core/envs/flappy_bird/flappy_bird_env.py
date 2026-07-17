@@ -205,7 +205,7 @@ class FlappyBirdEnv(Environment[State, Array, ArrayLike, Array]):
 
         return jnp.array((state.bird_vel_y, pipe_dy, pipe_dx))
 
-    def render(self, state: State, Action: ArrayLike) -> Array:
+    def render(self, state: State, action: ArrayLike) -> Array:
         image = jnp.full((*self.settings.window_size, 3), self.render_settings.background_color, dtype=jnp.uint8)
 
         # pipes

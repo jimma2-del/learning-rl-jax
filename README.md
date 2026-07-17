@@ -1,4 +1,4 @@
-![Demo](examples/tutorial/snake_custom_ppo.gif)
+![Banner Demo Animations](docs/assets/banner-anims.gif)
 
 # Learning RL JAX
 <a href="https://www.python.org/doc/versions/">

@@ -235,8 +235,8 @@ def rollout_episode(rngs: nnx.Rngs,
         A full `Timestep` object is returned by default.
 
     Returns: 
-        timesteps, or user defined take objs for each timestep
-        final timestep/take obj, after the termination/truncation (may be useful eg. if truncated)
+        timesteps, or user defined take objs for each timestep;
+        final timestep/take obj, after the termination/truncation (may be useful eg. if truncated);
     """
 
     if take_func is None:
